@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app
+  
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/.env
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules # Impede que o host sobrescreva os módulos do container
+    environment:
+      - WATCHPACK_POLLING=true # Força o hot-reload do React funcionar via Docker Desktop
+      
+    stdin_open: true # Necessário para o React não encerrar o container no modo dev
+    tty: true
