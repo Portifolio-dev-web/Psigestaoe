@@ -113,11 +113,17 @@ class LoginInput(BaseModel):
 class PatientInput(BaseModel):
     full_name: str
     cpf: Optional[str] = ""
+    rg: Optional[str] = ""                  # Novo
     birth_date: Optional[str] = ""
+    age: Optional[str] = ""                 # Novo (Nota: Em sistemas reais, calcula-se a idade pela data de nascimento, mas manteremos para espelhar o form)
+    education: Optional[str] = ""           # Novo (Escolaridade)
+    profession: Optional[str] = ""          # Novo (Profissão)
     phone: Optional[str] = ""
     email: Optional[str] = ""
+    address: Optional[str] = ""             # Novo (Endereço Completo)
     emergency_contact: Optional[str] = ""
     initial_notes: Optional[str] = ""
+    consent_terms: bool = False             # Novo (Termo de Consentimento)
 
 class RecordInput(BaseModel):
     session_datetime: str
@@ -286,11 +292,20 @@ async def logout(request: Request, response: Response):
 # ---------------------------------------------------------------------------
 def patient_public(p: dict) -> dict:
     return {
-        "id": p["id"], "full_name": p["full_name"],
+        "id": p["id"], 
+        "full_name": p["full_name"],
         "cpf": decrypt_field(p.get("cpf")) or "",
-        "birth_date": p.get("birth_date", ""), "phone": p.get("phone", ""),
-        "email": p.get("email", ""), "emergency_contact": p.get("emergency_contact", ""),
+        "rg": decrypt_field(p.get("rg")) or "",
+        "birth_date": p.get("birth_date", ""), 
+        "age": p.get("age", ""),
+        "education": p.get("education", ""),
+        "profession": p.get("profession", ""),
+        "phone": p.get("phone", ""),
+        "email": p.get("email", ""), 
+        "address": decrypt_field(p.get("address")) or "",
+        "emergency_contact": p.get("emergency_contact", ""),
         "initial_notes": p.get("initial_notes", ""),
+        "consent_terms": p.get("consent_terms", False),
         "last_consultation_date": p.get("last_consultation_date", ""),
         "anonymized": p.get("anonymized", False),
         "created_at": p.get("created_at", ""),
@@ -309,7 +324,12 @@ async def create_patient(data: PatientInput, user: dict = Depends(get_current_us
         "cpf": encrypt_field(data.cpf), "birth_date": data.birth_date, "phone": data.phone,
         "email": data.email, "emergency_contact": data.emergency_contact,
         "initial_notes": data.initial_notes, "last_consultation_date": "",
-        "anonymized": False, "created_at": iso(now_utc()), "updated_at": iso(now_utc()),
+        "anonymized": False, "created_at": iso(now_utc()), "updated_at": iso(now_utc()),"rg": encrypt_field(data.rg), 
+        "age": data.age,
+        "education": data.education,
+        "profession": data.profession,
+        "address": encrypt_field(data.address),
+        "consent_terms": data.consent_terms,
     }
     await db.patients.insert_one(dict(doc))
     await log_audit(user["user_id"], user["email"], "criar", "paciente", pid, f"Paciente {data.full_name}")
@@ -332,6 +352,12 @@ async def update_patient(pid: str, data: PatientInput, user: dict = Depends(get_
         "full_name": data.full_name.strip(), "cpf": encrypt_field(data.cpf),
         "birth_date": data.birth_date, "phone": data.phone, "email": data.email,
         "emergency_contact": data.emergency_contact, "initial_notes": data.initial_notes,
+        "rg": encrypt_field(data.rg),
+        "age": data.age,
+        "education": data.education,
+        "profession": data.profession,
+        "address": encrypt_field(data.address),
+        "consent_terms": data.consent_terms,
         "updated_at": iso(now_utc()),
     }
     await db.patients.update_one({"id": pid}, {"$set": upd})
@@ -355,9 +381,16 @@ async def anonymize_patient(pid: str, user: dict = Depends(get_current_user)):
     if not p:
         raise HTTPException(status_code=404, detail="Paciente não encontrado")
     await db.patients.update_one({"id": pid}, {"$set": {
-        "full_name": "Paciente Anonimizado", "cpf": encrypt_field(""), "phone": "",
-        "email": "", "emergency_contact": "", "initial_notes": "",
-        "anonymized": True, "updated_at": iso(now_utc()),
+        "full_name": "Paciente Anonimizado", 
+        "cpf": encrypt_field(""), 
+        "rg": encrypt_field(""),
+        "address": encrypt_field(""),
+        "phone": "",
+        "email": "", 
+        "emergency_contact": "", 
+        "initial_notes": "",
+        "anonymized": True, 
+        "updated_at": iso(now_utc()),
     }})
     await log_audit(user["user_id"], user["email"], "anonimizar", "paciente", pid,
                     "Anonimização LGPD (prontuários mantidos p/ guarda legal CFP)")

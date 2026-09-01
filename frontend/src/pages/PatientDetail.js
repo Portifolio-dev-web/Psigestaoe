@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import {
   ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Save, Phone, Mail,
-  CalendarClock, ShieldCheck,
+  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard
 } from "lucide-react";
 
 const fmtDate = (s) => (s ? new Date(s).toLocaleDateString("pt-BR") : "—");
@@ -126,10 +126,14 @@ export default function PatientDetail() {
               </div>
             </div>
             <div className="mt-5 space-y-3 text-sm">
-              <InfoRow icon={CalendarClock} label="Nascimento" value={fmtDate(patient.birth_date)} />
+              <InfoRow icon={CalendarClock} label="Nascimento" value={`${fmtDate(patient.birth_date)} (${patient.age || '—'} anos)`} />
               <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
+              <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
+              <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
+              <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
               <InfoRow icon={Phone} label="Telefone" value={patient.phone || "—"} />
               <InfoRow icon={Mail} label="E-mail" value={patient.email || "—"} />
+              <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
               <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />
             </div>
             {patient.initial_notes && (
