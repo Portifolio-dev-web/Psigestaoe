@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Comando padrão para iniciar o Flask
+# Comando padrão para iniciar o FastAPI usando Uvicorn
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]

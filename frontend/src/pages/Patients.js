@@ -53,13 +53,29 @@ export default function Patients() {
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(null); // {type, patient}
 
+  // NOVOS ESTADOS PARA O WEBHOOK
+  const [integrationOpen, setIntegrationOpen] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [userToken, setUserToken] = useState("");
+
   // ========================================================================
   // HANDLERS - DATA LOADING
   // ========================================================================
-  const load = () => 
-    api.get("/patients")
-      .then(({ data }) => setPatients(data))
-      .catch(() => setPatients([]));
+  const load = async () => {
+    try {
+      // 1. Busca os pacientes
+      const resPatients = await api.get("/patients");
+      setPatients(resPatients.data);
+      
+      // 2. Busca os dados do usuário logado (que agora traz o webhook_token)
+      const resUser = await api.get("/auth/me");
+      setUserToken(resUser.data.webhook_token); 
+      
+    } catch (err) {
+      setPatients([]);
+      console.error("Erro ao carregar dados:", err);
+    }
+  };
 
   useEffect(() => { load(); }, []);
 
@@ -124,10 +140,85 @@ export default function Patients() {
   };
 
   // ========================================================================
+  // HANDLERS - INTEGRATION
+  // ========================================================================
+  const copyScript = () => {
+    navigator.clipboard.writeText(generatedScript);
+    setCopySuccess(true);
+    setTimeout(() => setCopySuccess(false), 2000);
+  };
+
+  // ========================================================================
   // DERIVED STATE
   // ========================================================================
   const filtered = (patients || []).filter((p) =>
     p.full_name.toLowerCase().includes(query.toLowerCase()));
+
+  const generatedScript = `
+const WEBHOOK_URL = "${process.env.WEBHOOK_URL}";
+const SECURITY_TOKEN = "${userToken}";
+
+function onFormSubmit(e) {
+  const response = e.response;
+  const itemResponses = response.getItemResponses();
+  
+  let patientData = {
+    full_name: "", 
+    cpf: "", 
+    rg: "", 
+    birth_date: "", 
+    age: "",
+    education: "", 
+    profession: "", 
+    phone: "", 
+    email: "", 
+    address: "", 
+    emergency_contact: "", 
+    initial_notes: "Cadastrado via Google Forms.", 
+    consent_terms: false
+  };
+  
+  itemResponses.forEach(itemResponse => {
+    const question = itemResponse.getItem().getTitle();
+    const answer = itemResponse.getResponse();
+    
+    if (question.includes("Nome Completo")) patientData.full_name = answer;
+    else if (question.includes("CPF")) patientData.cpf = answer;
+    else if (question.includes("RG")) patientData.rg = answer;
+    else if (question.includes("Data de Nascimento")) patientData.birth_date = answer;
+    else if (question.includes("Idade")) patientData.age = answer;
+    else if (question.includes("Escolaridade")) patientData.education = answer;
+    else if (question.includes("Profissão")) patientData.profession = answer;
+    else if (question.includes("Contato Telefônico")) patientData.phone = answer;
+    else if (question.includes("E-mail")) patientData.email = answer;
+    else if (question.includes("Endereço Completo")) patientData.address = answer;
+    else if (question.includes("risco iminente")) patientData.emergency_contact = answer;
+    else if (question.includes("TERMO DE CONSENTIMENTO")) {
+      patientData.consent_terms = (answer === "Estou Ciente e concordo.");
+    }
+    else if (question.includes("Estado Civil")) {
+      patientData.initial_notes += " | Estado Civil: " + answer;
+    }
+  });
+  
+  const payload = {
+    patient_data: patientData
+  };
+  
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'x-webhook-token': SECURITY_TOKEN
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  
+  const res = UrlFetchApp.fetch(WEBHOOK_URL, options);
+  console.log(res.getContentText());
+}
+  `.trim();
 
   // ========================================================================
   // RENDER
@@ -135,7 +226,7 @@ export default function Patients() {
 
   return (
     <div className="space-y-6">
-      <PatientHeader onNew={openNew} />
+      <PatientHeader onNew={openNew} onIntegration={() => setIntegrationOpen(true)} />
       <PatientSearch query={query} onQueryChange={setQuery} />
       <PatientContent patients={patients} filtered={filtered} navigate={navigate}
         onEdit={openEdit} onDelete={(p) => setConfirm({ type: "delete", patient: p })}
@@ -145,6 +236,10 @@ export default function Patients() {
         form={form} onFormChange={upd} saving={saving} onSubmit={save} />
       
       <PatientConfirmDialog confirm={confirm} onConfirm={doAction} onOpenChange={(o) => !o && setConfirm(null)} />
+      
+      <IntegrationDialog open={integrationOpen} onOpenChange={setIntegrationOpen} 
+        userToken={userToken} generatedScript={generatedScript} copySuccess={copySuccess} 
+        onCopyScript={copyScript} />
     </div>
   );
 }
@@ -153,16 +248,21 @@ export default function Patients() {
 // SUB-COMPONENTS
 // ============================================================================
 
-function PatientHeader({ onNew }) {
+function PatientHeader({ onNew, onIntegration }) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Pacientes</h1>
         <p className="mt-1 text-sm text-slate-500">Gerencie cadastros e acesse prontuários</p>
       </div>
-      <Button onClick={onNew} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-patient-btn">
-        <Plus className="h-4 w-4" /> Novo paciente
-      </Button>
+      <div className="flex gap-2">
+        <Button onClick={onIntegration} variant="outline" className="gap-2 border-slate-300">
+          <FileText className="h-4 w-4" /> Integrar Google Forms
+        </Button>
+        <Button onClick={onNew} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-patient-btn">
+          <Plus className="h-4 w-4" /> Novo paciente
+        </Button>
+      </div>
     </div>
   );
 }
@@ -457,6 +557,48 @@ function PatientConfirmDialog({ confirm, onConfirm, onOpenChange }) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+function IntegrationDialog({ open, onOpenChange, userToken, generatedScript, copySuccess, onCopyScript }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="font-head text-xl">Integração com Google Forms</DialogTitle>
+          <DialogDescription>
+            Vincule os cadastros do Forms direto na sua plataforma de forma segura e criptografada.
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="space-y-4 text-sm text-slate-700">
+          <div className="space-y-2">
+            <p><strong>Passo 1:</strong> No seu Google Forms, clique nos 3 pontos verticais (canto superior direito) e acesse <strong>Apps Script</strong>.</p>
+            <p><strong>Passo 2:</strong> Apague o código padrão e cole o seu script de integração pessoal gerado abaixo:</p>
+          </div>
+
+          <div className="relative rounded-md bg-slate-900 p-4">
+            <Button 
+              size="sm" 
+              onClick={onCopyScript} 
+              className="absolute right-2 top-2 bg-slate-700 hover:bg-slate-600 text-white"
+            >
+              {copySuccess ? "Copiado!" : "Copiar Script"}
+            </Button>
+            <pre className="overflow-x-auto text-xs text-green-400">
+              <code>{generatedScript}</code>
+            </pre>
+          </div>
+
+          <div className="space-y-2">
+            <p><strong>Passo 3:</strong> No menu central, salve o projeto no <strong>Drive</strong>.</p>
+            <p><strong>Passo 4:</strong> No menu lateral esquerdo do painel do Google, clique no ícone de <strong>Relógio (Acionadores)</strong>.</p>
+            <p><strong>Passo 5:</strong> Clique em "Adicionar Acionador" e configure para rodar a função <code>onFormSubmit</code> no evento <strong>"Ao enviar o formulário" <strong> e na Configurações de notificação de falha </strong> Receber Notificaçções Imediatamente</strong>.</p>
+            <p className="mt-2 text-xs text-slate-500">* Atenção: Este código contém seu Token de Segurança Pessoal. Não o compartilhe publicamente.</p>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

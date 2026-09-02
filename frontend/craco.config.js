@@ -1,5 +1,6 @@
 // craco.config.js
 const path = require("path");
+const webpack = require("webpack");
 require("dotenv").config();
 
 // Check if we're in development/preview mode (not production build)
@@ -84,6 +85,8 @@ let webpackConfig = {
       '@': path.resolve(__dirname, 'src'),
     },
     configure: (webpackConfig) => {
+
+    webpackConfig.plugins.push(new webpack.EnvironmentPlugin(["WEBHOOK_URL"]));
 
       // Add ignored patterns to reduce watched directories
         webpackConfig.watchOptions = {

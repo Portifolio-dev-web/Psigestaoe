@@ -195,10 +195,17 @@ async def log_audit(owner_id: str, user_email: str, action: str, entity_type: st
         "timestamp": iso(now_utc()),
     })
 
+# Atualize a função public_user para incluir o token
 def public_user(u: dict) -> dict:
-    return {"user_id": u["user_id"], "email": u["email"], "name": u.get("name", ""),
-            "picture": u.get("picture", ""), "auth_provider": u.get("auth_provider", "email"),
-            "terms_accepted": u.get("terms_accepted", False)}
+    return {
+        "user_id": u["user_id"], 
+        "email": u["email"], 
+        "name": u.get("name", ""),
+        "picture": u.get("picture", ""), 
+        "auth_provider": u.get("auth_provider", "email"),
+        "terms_accepted": u.get("terms_accepted", False),
+        "webhook_token": u.get("webhook_token", "") # NOVO
+    }
 
 # ---------------------------------------------------------------------------
 # Auth routes
@@ -215,6 +222,7 @@ async def register(data: RegisterInput, response: Response):
         "user_id": user_id, "email": email, "name": data.name.strip(),
         "password_hash": hash_password(data.password), "auth_provider": "email",
         "picture": "", "role": "psicologo", "terms_accepted": True,
+        "webhook_token": f"wh_{uuid.uuid4().hex}",
         "created_at": iso(now_utc()),
     }
     await db.users.insert_one(doc)
@@ -263,7 +271,9 @@ async def google_session(request: Request, response: Response):
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         user_doc = {"user_id": user_id, "email": email, "name": d.get("name", ""),
                     "picture": d.get("picture", ""), "auth_provider": "google",
-                    "role": "psicologo", "terms_accepted": True, "created_at": iso(now_utc())}
+                    "role": "psicologo", "terms_accepted": True, 
+                    "webhook_token": f"wh_{uuid.uuid4().hex}",
+                    "created_at": iso(now_utc())}
         await db.users.insert_one(dict(user_doc))
     session_token = d["session_token"]
     await db.user_sessions.insert_one({
@@ -274,8 +284,16 @@ async def google_session(request: Request, response: Response):
                         samesite="none", max_age=604800, path="/")
     return {"user": public_user(user_doc)}
 
+# Atualize a rota /auth/me para gerar o token retroativamente, se necessário
 @api_router.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
+    if not user.get("webhook_token"):
+        new_token = f"wh_{uuid.uuid4().hex}"
+        await db.users.update_one(
+            {"user_id": user["user_id"]}, 
+            {"$set": {"webhook_token": new_token}}
+        )
+        user["webhook_token"] = new_token
     return public_user(user)
 
 @api_router.post("/auth/logout")
@@ -459,6 +477,64 @@ async def update_record(rid: str, data: RecordInput, user: dict = Depends(get_cu
                     f"Nova versão v{new_version} (versão anterior arquivada)")
     r2 = await db.records.find_one({"id": rid}, {"_id": 0})
     return record_public(r2)
+
+
+# ---------------------------------------------------------------------------
+# Rota do Webhook Enterprise
+# ---------------------------------------------------------------------------
+
+from fastapi import Header
+
+class WebhookPayload(BaseModel):
+    patient_data: PatientInput
+
+@api_router.post("/webhook/google-forms")
+async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = Header(...)):
+    # 1. Identifica e Autentica o usuário pelo Token Único (Substitui o e-mail)
+    owner = await db.users.find_one({"webhook_token": x_webhook_token})
+    
+    if not owner:
+        raise HTTPException(status_code=401, detail="Token de integração inválido ou revogado")
+
+    # 2. Processamento e Criptografia
+    pid = f"pat_{uuid.uuid4().hex[:12]}"
+    data = payload.patient_data
+    
+    doc = {
+        "id": pid, 
+        "owner_id": owner["user_id"], 
+        "full_name": data.full_name.strip(),
+        "cpf": encrypt_field(data.cpf), 
+        "rg": encrypt_field(data.rg),
+        "birth_date": data.birth_date, 
+        "age": data.age,
+        "education": data.education,
+        "profession": data.profession,
+        "phone": data.phone, 
+        "email": data.email, 
+        "address": encrypt_field(data.address),
+        "emergency_contact": data.emergency_contact, 
+        "initial_notes": data.initial_notes, 
+        "consent_terms": data.consent_terms,
+        "last_consultation_date": "",
+        "anonymized": False, 
+        "created_at": iso(now_utc()), 
+        "updated_at": iso(now_utc()),
+    }
+    
+    await db.patients.insert_one(dict(doc))
+    
+    # 3. Trilha de Auditoria
+    await log_audit(
+        owner["user_id"], 
+        owner["email"], 
+        "criar", 
+        "paciente", 
+        pid, 
+        f"Integração Google Forms: {data.full_name}"
+    )
+    
+    return {"status": "sucesso", "paciente_id": pid}
 
 # ---------------------------------------------------------------------------
 # Dashboard
