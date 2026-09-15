@@ -613,8 +613,8 @@ function RowMenu({ p, onEdit, onOpen, onDelete, onAnon }) {
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={onOpen}><FileText className="mr-2 h-4 w-4" /> Prontuários</DropdownMenuItem>
         <DropdownMenuItem onClick={() => onEdit(p)}><Pencil className="mr-2 h-4 w-4" /> Editar</DropdownMenuItem>
-        <DropdownMenuItem onClick={onAnon}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
-        <DropdownMenuItem onClick={onDelete} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onAnon(p)}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onDelete(p)} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,15 +1,36 @@
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: psigestao
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d psigestao"]
+      interval: 10s
+      timeout: 20s
+      retries: 5
+
+  api:
+    build: ./backend
+    env_file:
+      - .env
     ports:
       - "5000:5000"
-    env_file:
-      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://admin:adminpassword@db:5432/psigestao
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./backend:/app
-  
+    depends_on:
+      db:
+        condition: service_healthy
 
   frontend:
     build:
@@ -21,9 +42,11 @@ services:
       - ./frontend/.env
     volumes:
       - ./frontend:/app
-      - /app/node_modules # Impede que o host sobrescreva os módulos do container
+      - /app/node_modules
     environment:
-      - WATCHPACK_POLLING=true # Força o hot-reload do React funcionar via Docker Desktop
-      
-    stdin_open: true # Necessário para o React não encerrar o container no modo dev
+      - WATCHPACK_POLLING=true
+    stdin_open: true
     tty: true
+
+volumes:
+  postgres_data:
