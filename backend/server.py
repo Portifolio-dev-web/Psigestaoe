@@ -134,6 +134,7 @@ class PatientInput(BaseModel):
     birth_date: Optional[date] = None # Tipagem alterada para date nativo
     age: Optional[str] = ""
     education: Optional[str] = ""
+    marital_status: Optional[str] = ""
     profession: Optional[str] = ""
     phone: Optional[str] = ""
     email: Optional[str] = ""
@@ -170,6 +171,7 @@ def patient_public(p: Patient) -> dict:
         "birth_date": p.birth_date.isoformat() if p.birth_date else "", 
         "age": p.age or "",
         "education": p.education or "",
+        "marital_status": p.marital_status or "",
         "profession": p.profession or "",
         "phone": p.phone or "",
         "email": p.email or "", 
@@ -238,7 +240,11 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
         result = await db.execute(stmt)
         sess = result.scalar_one_or_none()
         
-        if sess and sess.expires_at >= now_utc():
+        expires_at = sess.expires_at if sess else None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if sess and expires_at >= now_utc():
             stmt_user = select(User).where(User.user_id == sess.user_id)
             result_user = await db.execute(stmt_user)
             user = result_user.scalar_one_or_none()
@@ -437,6 +443,7 @@ async def create_patient(data: PatientInput, user: User = Depends(get_current_us
         birth_date=data.birth_date,
         age=data.age,
         education=data.education,
+        marital_status=data.marital_status,
         profession=data.profession,
         phone=data.phone,
         email=data.email,
@@ -452,6 +459,36 @@ async def create_patient(data: PatientInput, user: User = Depends(get_current_us
     
     await log_audit(db, user.user_id, user.email, "criar", "paciente", novo_paciente.id, f"Paciente {data.full_name}")
     return patient_public(novo_paciente)
+
+@api_router.put("/patients/{pid}")
+async def update_patient(pid: str, data: PatientInput, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    stmt = select(Patient).where(Patient.id == pid, Patient.owner_id == user.user_id)
+    p = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not p:
+        raise HTTPException(status_code=404, detail="Paciente não encontrado")
+
+    p.full_name = data.full_name.strip()
+    p.cpf = encrypt_field(data.cpf)
+    p.rg = encrypt_field(data.rg)
+    p.birth_date = data.birth_date
+    p.age = data.age
+    p.education = data.education
+    p.marital_status = data.marital_status
+    p.profession = data.profession
+    p.phone = data.phone
+    p.email = data.email
+    p.address = encrypt_field(data.address)
+    p.emergency_contact = data.emergency_contact
+    p.initial_notes = data.initial_notes
+    p.consent_terms = data.consent_terms
+    p.updated_at = now_utc()
+
+    await db.commit()
+    await db.refresh(p)
+
+    await log_audit(db, user.user_id, user.email, "editar", "paciente", p.id, f"Paciente {data.full_name}")
+    return patient_public(p)
 
 @api_router.put("/records/{rid}")
 async def update_record(rid: str, data: RecordInput, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -669,6 +706,7 @@ async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = H
         birth_date=data.birth_date, # Date nativo
         age=data.age,
         education=data.education,
+        marital_status=data.marital_status,
         profession=data.profession,
         phone=data.phone,
         email=data.email,

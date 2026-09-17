@@ -17,6 +17,11 @@ from server import app
 
 
 @pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
 async def client():
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -34,14 +39,14 @@ async def client():
 
     app.dependency_overrides[get_db] = override_get_db
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as test_client:
         yield test_client
 
     app.dependency_overrides.clear()
     await engine.dispose()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_all_backend_routes(client):
     email = "route.test@example.com"
     password = "Senha-segura-123"
@@ -50,6 +55,7 @@ async def test_all_backend_routes(client):
         "cpf": "12345678900",
         "birth_date": "1990-01-02",
         "phone": "11999999999",
+        "marital_status": "Casado(a)",
         "consent_terms": True,
     }
     record_payload = {
@@ -108,6 +114,15 @@ async def test_all_backend_routes(client):
     assert patient.status_code == 200
     patient_id = patient.json()["id"]
     assert patient.json()["cpf"] == patient_payload["cpf"]
+    assert patient.json()["marital_status"] == patient_payload["marital_status"]
+
+    updated_patient = await client.put(
+        f"/api/patients/{patient_id}",
+        headers=headers,
+        json={**patient_payload, "marital_status": "Divorciado(a)"},
+    )
+    assert updated_patient.status_code == 200
+    assert updated_patient.json()["marital_status"] == "Divorciado(a)"
 
     records = await client.get(f"/api/patients/{patient_id}/records", headers=headers)
     assert records.status_code == 200 and records.json() == []
@@ -185,7 +200,7 @@ async def test_all_backend_routes(client):
     assert logout.json() == {"ok": True}
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_google_session_route_uses_external_session_data(client):
     external_response = Mock(
         status_code=200,

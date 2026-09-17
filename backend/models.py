@@ -54,6 +54,7 @@ class Patient(Base):
     birth_date = Column(Date, nullable=True)
     age = Column(String, default="")
     education = Column(String, default="")
+    marital_status = Column(String, default="")
     profession = Column(String, default="")
     phone = Column(String, default="")
     email = Column(String, default="")

@@ -36,7 +36,7 @@ const fmtDate = (s) => (s ? new Date(s).toLocaleDateString("pt-BR") : "—");
 
 const EMPTY_FORM = { 
   full_name: "", cpf: "", rg: "", birth_date: "", age: "", 
-  education: "", profession: "", phone: "", email: "", 
+  education: "", marital_status: "", profession: "", phone: "", email: "", 
   address: "", emergency_contact: "", initial_notes: "", consent_terms: false 
 };
 
@@ -169,6 +169,7 @@ function onFormSubmit(e) {
     birth_date: "", 
     age: "",
     education: "", 
+    marital_status: "",
     profession: "", 
     phone: "", 
     email: "", 
@@ -188,6 +189,7 @@ function onFormSubmit(e) {
     else if (question.includes("Data de Nascimento")) patientData.birth_date = answer;
     else if (question.includes("Idade")) patientData.age = answer;
     else if (question.includes("Escolaridade")) patientData.education = answer;
+    else if (question.includes("Estado Civil")) patientData.marital_status = answer;
     else if (question.includes("Profissão")) patientData.profession = answer;
     else if (question.includes("Contato Telefônico")) patientData.phone = answer;
     else if (question.includes("E-mail")) patientData.email = answer;
@@ -195,9 +197,6 @@ function onFormSubmit(e) {
     else if (question.includes("risco iminente")) patientData.emergency_contact = answer;
     else if (question.includes("TERMO DE CONSENTIMENTO")) {
       patientData.consent_terms = (answer === "Estou Ciente e concordo.");
-    }
-    else if (question.includes("Estado Civil")) {
-      patientData.initial_notes += " | Estado Civil: " + answer;
     }
   });
   
@@ -458,14 +457,30 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </select>
             </div>
             <div>
-              <Label>Profissão</Label>
-              <Input 
-                value={form.profession} 
-                onChange={onFormChange("profession")} 
-                className="mt-1.5"
-                data-testid="patient-profession-input"
-              />
+              <Label>Estado civil</Label>
+              <select
+                value={form.marital_status}
+                onChange={onFormChange("marital_status")}
+                className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
+              >
+                <option value="">Selecione...</option>
+                <option value="Solteiro(a)">Solteiro(a)</option>
+                <option value="Casado(a)">Casado(a)</option>
+                <option value="Divorciado(a)">Divorciado(a)</option>
+                <option value="Viúvo(a)">Viúvo(a)</option>
+                <option value="União estável">União estável</option>
+              </select>
             </div>
+          </div>
+
+          <div>
+            <Label>Profissão</Label>
+            <Input 
+              value={form.profession} 
+              onChange={onFormChange("profession")} 
+              className="mt-1.5"
+              data-testid="patient-profession-input"
+            />
           </div>
 
           <div>

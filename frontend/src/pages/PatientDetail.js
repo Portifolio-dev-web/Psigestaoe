@@ -130,6 +130,7 @@ export default function PatientDetail() {
               <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
               <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
               <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
+              <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
               <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
               <InfoRow icon={Phone} label="Telefone" value={patient.phone || "—"} />
               <InfoRow icon={Mail} label="E-mail" value={patient.email || "—"} />
