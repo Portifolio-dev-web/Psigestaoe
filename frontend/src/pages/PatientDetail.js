@@ -20,7 +20,11 @@ import {
   CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard
 } from "lucide-react";
 
-const fmtDate = (s) => (s ? new Date(s).toLocaleDateString("pt-BR") : "—");
+const fmtDate = (s) => {
+  if (!s) return "—";
+  const [year, month, day] = String(s).slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : "—";
+};
 const fmtDateTime = (s) => (s ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
 const nowLocal = () => {
   const d = new Date();
@@ -136,7 +140,14 @@ export default function PatientDetail() {
               <InfoRow icon={Mail} label="E-mail" value={patient.email || "—"} />
               <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
               <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />
+              <InfoRow icon={ShieldCheck} label="Consentimento" value={patient.consent_terms ? "Concordo" : "Não concordo"} />
             </div>
+            <details className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+              <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
+                Termo de consentimento
+              </summary>
+              <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-slate-600">{patient.consent_terms_text}</p>
+            </details>
             {patient.initial_notes && (
               <div className="mt-4 rounded-md bg-[#F0F4F8] p-3">
                 <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Observações iniciais</p>

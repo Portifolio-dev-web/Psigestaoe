@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -25,6 +25,7 @@ from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from xml.sax.saxutils import escape
 
 from database import get_db, engine, Base
 from models import AuditLog, Patient, Record, RecordVersion, Session, User, UserSession, now_utc
@@ -143,6 +144,34 @@ class PatientInput(BaseModel):
     initial_notes: Optional[str] = ""
     consent_terms: bool = False
 
+    @field_validator("birth_date", mode="before")
+    @classmethod
+    def normalize_birth_date(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            parts = value.replace("/", "-").split("-")
+            if len(parts) == 3 and len(parts[0]) == 2 and len(parts[1]) == 2 and len(parts[2]) == 4:
+                try:
+                    return date(int(parts[2]), int(parts[1]), int(parts[0]))
+                except ValueError:
+                    return value
+        return value
+
+
+CONSENT_TERM_TEXT = (
+    "TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO\n\n"
+    "Declaro que fui informado(a) sobre os objetivos, procedimentos e natureza do atendimento "
+    "psicológico realizado pela Psicóloga Fernanda Andrade Da Silva – CRP 06/228054, profissional "
+    "regularmente inscrita e atuando conforme as normas estabelecidas pelo Conselho Federal de Psicologia "
+    "e pelo Código de Ética Profissional do Psicólogo.\n\n"
+    "Estou ciente de que o atendimento psicológico é pautado no respeito à dignidade e integridade humana "
+    "e que todas as informações compartilhadas serão mantidas sob sigilo profissional.\n\n"
+    "Compreendo que o sigilo poderá ser rompido apenas em situações previstas em lei ou diante de risco "
+    "iminente à vida (do paciente ou de terceiros), bem como em casos de negligência ou abuso de incapazes.\n\n"
+    "Os registros psicológicos serão armazenados de forma segura, conforme a Lei nº 13.709/2018 (LGPD).\n\n"
+    "Estou ciente de que posso interromper o atendimento a qualquer momento, mediante comunicação prévia."
+)
+
 class RecordInput(BaseModel):
     session_datetime: datetime # Tipagem alterada para datetime nativo
     content: str
@@ -179,6 +208,8 @@ def patient_public(p: Patient) -> dict:
         "emergency_contact": p.emergency_contact or "",
         "initial_notes": p.initial_notes or "",
         "consent_terms": p.consent_terms or False,
+        "consent_terms_status": "Concordo" if p.consent_terms else "Não concordo",
+        "consent_terms_text": CONSENT_TERM_TEXT,
         "last_consultation_date": p.last_consultation_date or "",
         "anonymized": p.anonymized or False,
         # Trata o DateTime com timezone para retornar string ISO completa
@@ -650,6 +681,8 @@ async def export_patient(pid: str, format: str = Query("json"), user: User = Dep
     elems.append(Paragraph(f"<b>Nascimento:</b> {pat['birth_date'] or '—'}", body))
     elems.append(Paragraph(f"<b>Telefone:</b> {pat['phone'] or '—'}", body))
     elems.append(Paragraph(f"<b>E-mail:</b> {pat['email'] or '—'}", body))
+    elems.append(Paragraph(f"<b>Termo de consentimento:</b> {pat['consent_terms_status']}", body))
+    elems.append(Paragraph(escape(pat["consent_terms_text"]).replace("\n", "<br/>"), body))
     elems.append(Spacer(1, 10))
     elems.append(Paragraph("Evolução Clínica", sub))
     if not recs:

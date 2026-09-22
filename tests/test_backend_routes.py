@@ -115,14 +115,19 @@ async def test_all_backend_routes(client):
     patient_id = patient.json()["id"]
     assert patient.json()["cpf"] == patient_payload["cpf"]
     assert patient.json()["marital_status"] == patient_payload["marital_status"]
+    assert patient.json()["consent_terms"] is True
+    assert patient.json()["consent_terms_status"] == "Concordo"
+    assert "TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO" in patient.json()["consent_terms_text"]
 
     updated_patient = await client.put(
         f"/api/patients/{patient_id}",
         headers=headers,
-        json={**patient_payload, "marital_status": "Divorciado(a)"},
+        json={**patient_payload, "marital_status": "Divorciado(a)", "consent_terms": False},
     )
     assert updated_patient.status_code == 200
     assert updated_patient.json()["marital_status"] == "Divorciado(a)"
+    assert updated_patient.json()["consent_terms"] is False
+    assert updated_patient.json()["consent_terms_status"] == "Não concordo"
 
     records = await client.get(f"/api/patients/{patient_id}/records", headers=headers)
     assert records.status_code == 200 and records.json() == []
@@ -157,7 +162,13 @@ async def test_all_backend_routes(client):
     assert changed_session.status_code == 200
     assert changed_session.json()["title"] == "Sessao atualizada"
 
-    webhook_payload = {"patient_data": {**patient_payload, "full_name": "Paciente via Forms"}}
+    webhook_payload = {
+        "patient_data": {
+            **patient_payload,
+            "full_name": "Paciente via Forms",
+            "birth_date": "14-01-1992",
+        }
+    }
     assert (await client.post(
         "/api/webhook/google-forms",
         headers={"X-Webhook-Token": "invalido"},
@@ -170,11 +181,15 @@ async def test_all_backend_routes(client):
     )
     assert webhook.status_code == 200
     assert webhook.json()["status"] == "sucesso"
+    forms_patient = await client.get("/api/patients", headers=headers)
+    assert forms_patient.status_code == 200
+    assert next(p for p in forms_patient.json() if p["full_name"] == "Paciente via Forms")["birth_date"] == "1992-01-14"
 
     json_export = await client.get(f"/api/patients/{patient_id}/export?format=json", headers=headers)
     assert json_export.status_code == 200
     assert json_export.headers["content-type"].startswith("application/json")
     assert json_export.json()["prontuarios"][0]["content"] == "Relato atualizado"
+    assert json_export.json()["paciente"]["consent_terms"] is False
 
     pdf_export = await client.get(f"/api/patients/{patient_id}/export?format=pdf", headers=headers)
     assert pdf_export.status_code == 200

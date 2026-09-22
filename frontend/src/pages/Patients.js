@@ -32,13 +32,29 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 // ============================================================================
 // CONSTANTS & HELPERS
 // ============================================================================
-const fmtDate = (s) => (s ? new Date(s).toLocaleDateString("pt-BR") : "—");
+const fmtDate = (s) => {
+  if (!s) return "—";
+  const [year, month, day] = String(s).slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : "—";
+};
 
 const EMPTY_FORM = { 
   full_name: "", cpf: "", rg: "", birth_date: "", age: "", 
   education: "", marital_status: "", profession: "", phone: "", email: "", 
   address: "", emergency_contact: "", initial_notes: "", consent_terms: false 
 };
+
+const CONSENT_TERM = `TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO
+
+Declaro que fui informado(a) sobre os objetivos, procedimentos e natureza do atendimento psicológico realizado pela Psicóloga Fernanda Andrade Da Silva – CRP 06/228054, profissional regularmente inscrita e atuando conforme as normas estabelecidas pelo Conselho Federal de Psicologia e pelo Código de Ética Profissional do Psicólogo.
+
+Estou ciente de que o atendimento psicológico é pautado no respeito à dignidade e integridade humana e que todas as informações compartilhadas serão mantidas sob sigilo profissional.
+
+Compreendo que o sigilo poderá ser rompido apenas em situações previstas em lei ou diante de risco iminente à vida (do paciente ou de terceiros), bem como em casos de negligência ou abuso de incapazes.
+
+Os registros psicológicos serão armazenados de forma segura, conforme a Lei nº 13.709/2018 (LGPD).
+
+Estou ciente de que posso interromper o atendimento a qualquer momento, mediante comunicação prévia.`;
 
 export default function Patients() {
   // ========================================================================
@@ -94,7 +110,10 @@ export default function Patients() {
     setDialogOpen(true); 
   };
 
-  const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const upd = (k) => (e) => setForm({
+    ...form,
+    [k]: k === "consent_terms" ? e.target.value === "true" : e.target.value,
+  });
 
   // ========================================================================
   // HANDLERS - FORM SUBMISSION
@@ -158,45 +177,84 @@ export default function Patients() {
 const WEBHOOK_URL = "${process.env.WEBHOOK_URL}";
 const SECURITY_TOKEN = "${userToken}";
 
+function formatCPF(cpf) {
+  let v = String(cpf).replace(/\\D/g, "");
+  if (v.length === 11) {
+    return v.replace(/(\\d{3})(\\d{3})(\\d{3})(\\d{2})/, "$1.$2.$3-$4");
+  }
+  return cpf;
+}
+
+function formatPhone(phone) {
+  let v = String(phone).replace(/\\D/g, "");
+  if (v.length === 11) {
+    return v.replace(/(\\d{2})(\\d{5})(\\d{4})/, "($1) $2-$3");
+  } else if (v.length === 10) {
+    return v.replace(/(\\d{2})(\\d{4})(\\d{4})/, "($1) $2-$3");
+  }
+  return phone;
+}
+
 function onFormSubmit(e) {
   const response = e.response;
   const itemResponses = response.getItemResponses();
   
   let patientData = {
-    full_name: "", 
-    cpf: "", 
-    rg: "", 
-    birth_date: "", 
-    age: "",
-    education: "", 
-    marital_status: "",
-    profession: "", 
-    phone: "", 
-    email: "", 
-    address: "", 
-    emergency_contact: "", 
-    initial_notes: "Cadastrado via Google Forms.", 
+    full_name: "", cpf: "", rg: "", birth_date: "", age: "",
+    education: "", marital_status: "", profession: "", phone: "", email: "", 
+    address: "", emergency_contact: "", initial_notes: "Cadastrado via Google Forms.", 
     consent_terms: false
   };
   
   itemResponses.forEach(itemResponse => {
     const question = itemResponse.getItem().getTitle();
     const answer = itemResponse.getResponse();
+    const normalizedQuestion = String(question).trim().toLowerCase();
+    const normalizedAnswer = String(answer).trim().toLowerCase();
+    const answerAsText = Array.isArray(answer) ? answer.join(", ") : String(answer).trim();
     
-    if (question.includes("Nome Completo")) patientData.full_name = answer;
-    else if (question.includes("CPF")) patientData.cpf = answer;
-    else if (question.includes("RG")) patientData.rg = answer;
-    else if (question.includes("Data de Nascimento")) patientData.birth_date = answer;
-    else if (question.includes("Idade")) patientData.age = answer;
-    else if (question.includes("Escolaridade")) patientData.education = answer;
-    else if (question.includes("Estado Civil")) patientData.marital_status = answer;
-    else if (question.includes("Profissão")) patientData.profession = answer;
-    else if (question.includes("Contato Telefônico")) patientData.phone = answer;
-    else if (question.includes("E-mail")) patientData.email = answer;
-    else if (question.includes("Endereço Completo")) patientData.address = answer;
-    else if (question.includes("risco iminente")) patientData.emergency_contact = answer;
-    else if (question.includes("TERMO DE CONSENTIMENTO")) {
-      patientData.consent_terms = (answer === "Estou Ciente e concordo.");
+    if (normalizedQuestion.includes("nome completo")) {
+      patientData.full_name = answerAsText;
+    } else if (normalizedQuestion.includes("cpf")) {
+      patientData.cpf = formatCPF(answerAsText);
+    } else if (
+      normalizedQuestion.includes("contato de emergência") ||
+      normalizedQuestion.includes("contato de emergencia") ||
+      normalizedQuestion.includes("risco iminente")
+    ) {
+      patientData.emergency_contact = answerAsText;
+    } else if (/\\brg\\b/.test(normalizedQuestion) || normalizedQuestion === "rg *") {
+      patientData.rg = answerAsText;
+    } else if (normalizedQuestion.includes("data de nascimento")) {
+      const [day, month, year] = String(answer).trim().split(/[/-]/);
+      patientData.birth_date = day && month && year
+        ? year + "-" + month.padStart(2, "0") + "-" + day.padStart(2, "0")
+        : String(answer).trim();
+    } else if (normalizedQuestion.includes("escolaridade")) {
+      patientData.education = answerAsText;
+    } else if (/\\bidade\\b/.test(normalizedQuestion) || normalizedQuestion === "idade *") {
+      patientData.age = answerAsText;
+    } else if (normalizedQuestion.includes("estado civil")) {
+      patientData.marital_status = answerAsText;
+    } else if (normalizedQuestion.includes("profissão") || normalizedQuestion.includes("profissao")) {
+      patientData.profession = answerAsText;
+    } else if (normalizedQuestion.includes("contato telefônico") || normalizedQuestion.includes("contato telefonico")) {
+      patientData.phone = formatPhone(answerAsText);
+    } else if (normalizedQuestion.includes("e-mail") || normalizedQuestion.includes("email")) {
+      patientData.email = answerAsText;
+    } else if (normalizedQuestion.includes("endereço completo") || normalizedQuestion.includes("endereco completo")) {
+      patientData.address = answerAsText;
+    } else if (
+      normalizedQuestion.includes("termo de consentimento") ||
+      normalizedQuestion.includes("consentimento livre e esclarecido") ||
+      normalizedQuestion.includes("estou de acordo")
+    ) {
+      // Aceita qualquer frase que contenha uma destas palavras
+      patientData.consent_terms = normalizedAnswer.includes("concordo") || 
+                                  normalizedAnswer.includes("sim") || 
+                                  normalizedAnswer.includes("aceito");
+    } else if (normalizedQuestion.includes("notas finais")) {
+      patientData.initial_notes = answer;
     }
   });
   
@@ -534,6 +592,37 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               data-testid="patient-notes-input"
               rows={3}
             />
+          </div>
+
+          <div className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4">
+            <div>
+              <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
+              <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-slate-600">{CONSENT_TERM}</p>
+            </div>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="radio"
+                  name="consent_terms"
+                  value="true"
+                  checked={form.consent_terms === true}
+                  onChange={onFormChange("consent_terms")}
+                  required
+                />
+                Concordo
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="radio"
+                  name="consent_terms"
+                  value="false"
+                  checked={form.consent_terms === false}
+                  onChange={onFormChange("consent_terms")}
+                />
+                Não concordo
+              </label>
+            </fieldset>
           </div>
 
           <DialogFooter>
