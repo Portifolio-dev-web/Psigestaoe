@@ -4,9 +4,11 @@ import io
 import json
 import logging
 import os
+import sys
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from fastapi import Response
 
 import bcrypt
 import httpx
@@ -33,8 +35,59 @@ from models import AuditLog, Patient, Record, RecordVersion, Session, User, User
 # -----------------------------------------------------------
 # Configurações Iniciais (Mantenha as suas variáveis de ambiente aqui)
 # -----------------------------------------------------------
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret")
+# -----------------------------------------------------------
+# Configurações Iniciais e Validação de Segurança
+# -----------------------------------------------------------
+# Define o ambiente. Em produção, a variável de ambiente DEVE ser configurada como "production".
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+JWT_SECRET = os.environ.get("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
+
+# Validação Fail-Fast do JWT
+if not JWT_SECRET:
+    if ENVIRONMENT == "production":
+        logging.critical("SECURITY ALERT: JWT_SECRET ausente em produção. Abortando inicialização.")
+        sys.exit(1)
+    else:
+        logging.warning("Usando JWT_SECRET inseguro para desenvolvimento.")
+        JWT_SECRET = "dev-secret"
+
+def _get_fernet_key() -> bytes:
+    raw_key = os.environ.get("FERNET_KEY")
+    
+    if not raw_key:
+        if ENVIRONMENT == "production":
+            logging.critical("SECURITY ALERT: FERNET_KEY ausente em produção. Abortando para proteger prontuários.")
+            sys.exit(1)
+        else:
+            logging.warning("Usando FERNET_KEY insegura de fallback para desenvolvimento local.")
+            return base64.urlsafe_b64encode(hashlib.sha256(b"dev-secret-fernet-key-12345").digest())
+    
+    # Validação rigorosa: A chave Fernet DEVE ser um Base64 URL-safe de exatos 32 bytes (44 caracteres).
+    if len(raw_key) != 44:
+        logging.critical("SECURITY ALERT: FERNET_KEY inválida. A chave deve conter exatos 44 caracteres.")
+        sys.exit(1)
+        
+    return raw_key.encode("utf-8")
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    """
+    Configura o cookie de autenticação com restrições baseadas no ambiente.
+    """
+    is_prod = ENVIRONMENT == "production"
+    
+    response.set_cookie(
+        key="access_token", 
+        value=token, 
+        httponly=True, 
+        # Em produção, SameSite="strict" mitiga ataques CSRF de forma agressiva.
+        samesite="strict" if is_prod else "lax", 
+        path="/", 
+        # Em produção, obriga o navegador a enviar o cookie apenas via HTTPS.
+        secure=is_prod 
+    )
 
 # 1. Inicializa o app UMA ÚNICA VEZ
 app = FastAPI(title="PsiGestão API")
