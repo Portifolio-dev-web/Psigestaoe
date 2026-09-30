@@ -21,6 +21,9 @@ class User(Base):
     auth_provider = Column(String, default="email")
     picture = Column(String, default="")
     role = Column(String, default="psicologo")
+    # Item 6 da auditoria: registro no Conselho Regional de Psicologia (ex.: "06/123456"),
+    # usado no termo de consentimento. Migração: alembic/versions/20260930_add_user_crp.py
+    crp = Column(String, default="")
     terms_accepted = Column(Boolean, default=False)
     webhook_token = Column(String, default=lambda: f"wh_{uuid.uuid4().hex}")
     created_at = Column(DateTime(timezone=True), default=now_utc)

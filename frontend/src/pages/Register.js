@@ -9,6 +9,18 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Stethoscope, Loader2 } from "lucide-react";
 
+// Item 10 da auditoria: mesma política de senha do backend (server.py ->
+// validate_password_strength). A checagem aqui é só para dar retorno imediato;
+// quem garante a regra é o servidor, que recusa senhas fracas com erro 422.
+const PASSWORD_RULE = "Mínimo 8 caracteres, com letras e números";
+
+function passwordProblem(password) {
+  if (password.length < 8) return "A senha deve ter pelo menos 8 caracteres.";
+  if (new TextEncoder().encode(password).length > 72) return "A senha é longa demais (máximo de 72 caracteres).";
+  if (!/[A-Za-zÀ-ÿ]/.test(password) || !/\d/.test(password)) return "A senha deve conter letras e números.";
+  return null;
+}
+
 const WAVE = "https://images.unsplash.com/photo-1620121478247-ec786b9be2fa?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODd8MHwxfHNlYXJjaHw0fHxhYnN0cmFjdCUyMHNvZnQlMjBibHVlJTIwd2F2ZXN8ZW58MHx8fHwxNzg3NDA0NDM4fDA&ixlib=rb-4.1.0&q=85";
 
 export default function Register() {
@@ -24,6 +36,11 @@ export default function Register() {
     e.preventDefault();
     if (!terms) {
       toast.warning("É necessário aceitar os Termos de Privacidade (LGPD).");
+      return;
+    }
+    const problem = passwordProblem(form.password);
+    if (problem) {
+      toast.warning(problem);
       return;
     }
     setLoading(true);
@@ -82,8 +99,11 @@ export default function Register() {
             </div>
             <div>
               <Label htmlFor="password" className="text-slate-700">Senha</Label>
-              <Input id="password" type="password" required value={form.password} onChange={upd("password")}
-                className="mt-1.5" placeholder="Mínimo 6 caracteres" data-testid="register-password-input" />
+              <Input id="password" type="password" required minLength={8} maxLength={72}
+                autoComplete="new-password" aria-describedby="password-rule"
+                value={form.password} onChange={upd("password")}
+                className="mt-1.5" placeholder={PASSWORD_RULE} data-testid="register-password-input" />
+              <p id="password-rule" className="mt-1 text-xs text-slate-500">{PASSWORD_RULE}.</p>
             </div>
             <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-3">
               <Checkbox id="terms" checked={terms} onCheckedChange={setTerms}

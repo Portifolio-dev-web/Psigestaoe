@@ -25,7 +25,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://admin:adminpassword@db:5432/psigestao
       JWT_SECRET: ${JWT_SECRET}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # Chave dos campos criptografados (CPF, RG, endereço, prontuários).
+      # Precisa ser uma chave Fernet válida e NÃO pode ser perdida: sem ela os prontuários ficam ilegíveis.
+      FERNET_KEY: ${FERNET_KEY}
+      FERNET_OLD_KEYS: ${FERNET_OLD_KEYS:-}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./backend:/app

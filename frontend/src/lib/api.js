@@ -18,16 +18,25 @@ async function request(method, path, body) {
   }
   const url = `${API}${path}`;
 
+  // CORREÇÃO (item 5 da auditoria): novas tentativas só para GET.
+  // Antes, TODA requisição era repetida até 3x quando passava de 6s sem
+  // resposta. Num POST/PUT, o timeout não significa que o servidor não gravou:
+  // ele pode ter criado o paciente/prontuário/sessão e só demorado para
+  // responder. Repetir gerava registros DUPLICADOS (e versões extras de
+  // prontuário). GET é idempotente (só lê), então repetir é seguro.
+  // Escritas agora têm 1 tentativa e um prazo maior (30s); se falharem,
+  // o erro chega à tela e o usuário decide se tenta de novo.
+  const isIdempotent = method === "GET";
+  const maxAttempts = isIdempotent ? 3 : 1;
+  const timeoutMs = isIdempotent ? 6000 : 30000;
+
   let res;
-  let lastErr;
-  // Retry on stalled/aborted requests (environment can stall the first request on mount).
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      res = await doFetch(url, opts, 6000);
+      res = await doFetch(url, opts, timeoutMs);
       break;
     } catch (e) {
-      lastErr = e;
-      if (attempt === 2) throw e;
+      if (attempt === maxAttempts) throw e;
     }
   }
 

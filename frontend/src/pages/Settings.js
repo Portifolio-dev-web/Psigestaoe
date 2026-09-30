@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
-import api from "@/lib/api";
+import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
 import {
-  Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2,
+  Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
 } from "lucide-react";
 
 const ACTION_LABEL = {
@@ -13,6 +17,62 @@ const ACTION_LABEL = {
   excluir: "Exclusão", anonimizar: "Anonimização", exportar: "Exportação",
 };
 const ENTITY_LABEL = { paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário" };
+
+// Item 6 da auditoria: o termo de consentimento dos pacientes passou a usar o
+// nome e o CRP de quem está logado (antes era o nome de uma psicóloga fixo no
+// backend). Este formulário grava esses dados via PUT /api/auth/profile.
+function ProfessionalProfile() {
+  const { user, setUser } = useAuth();
+  const [form, setForm] = useState({ name: user?.name || "", crp: user?.crp || "" });
+  const [saving, setSaving] = useState(false);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const { data } = await api.put("/auth/profile", form);
+      setUser(data);
+      toast.success("Dados profissionais atualizados.");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex items-center gap-2">
+        <UserRound className="h-4 w-4 text-[#1E3A8A]" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Dados profissionais</h2>
+      </div>
+      <p className="mt-1 text-sm text-slate-500">
+        Nome e CRP aparecem no Termo de Consentimento exibido e exportado para os seus pacientes.
+      </p>
+      {!user?.crp && (
+        <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          Seu CRP ainda não foi informado. Os termos dos pacientes mostram "CRP não informado".
+        </p>
+      )}
+      <form onSubmit={save} className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_180px_auto] sm:items-end">
+        <div>
+          <Label htmlFor="profile-name" className="text-slate-700">Nome completo</Label>
+          <Input id="profile-name" required maxLength={120} className="mt-1.5" value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="profile-name-input" />
+        </div>
+        <div>
+          <Label htmlFor="profile-crp" className="text-slate-700">CRP</Label>
+          <Input id="profile-crp" placeholder="06/123456" pattern="\d{2}/\d{1,6}"
+            title="Formato: região/número, ex.: 06/123456" className="mt-1.5" value={form.crp}
+            onChange={(e) => setForm({ ...form, crp: e.target.value })} data-testid="profile-crp-input" />
+        </div>
+        <Button type="submit" disabled={saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="profile-save-btn">
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
+        </Button>
+      </form>
+    </Card>
+  );
+}
 
 export default function Settings() {
   const { user } = useAuth();
@@ -46,6 +106,8 @@ export default function Settings() {
           </div>
         </div>
       </Card>
+
+      <ProfessionalProfile />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {items.map((it) => (
