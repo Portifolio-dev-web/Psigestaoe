@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -216,37 +216,40 @@ async def test_all_backend_routes(client):
 
 
 @pytest.mark.anyio
-async def test_google_session_route_uses_external_session_data(client):
-    external_response = Mock(
-        status_code=200,
-        json=lambda: {
-            "email": "google.test@example.com",
-            "name": "Google Test",
-            "picture": "https://example.com/avatar.png",
-            "session_token": "google-session-token",
-        },
-    )
-    with patch("server.httpx.AsyncClient.get", new=AsyncMock(return_value=external_response)):
-        response = await client.post("/api/auth/session", json={"session_id": "oauth-id"})
+async def test_google_auth_route_creates_user_and_session(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    id_info = {
+        "email": "Google.Test@example.com",
+        "email_verified": True,
+        "name": "Google Test",
+        "picture": "https://example.com/avatar.png",
+    }
+    with patch("server.id_token.verify_oauth2_token", return_value=id_info):
+        response = await client.post("/api/auth/google", json={"credential": "google-id-token"})
 
     assert response.status_code == 200
-    assert response.json()["user"]["auth_provider"] == "google"
-    assert "session_token" in response.cookies
+    body = response.json()
+    assert body["user"]["auth_provider"] == "google"
+    assert body["user"]["email"] == "google.test@example.com"
+    assert "access_token" in response.cookies
     assert (await client.get("/api/auth/me")).status_code == 200
 
 
 @pytest.mark.anyio
-async def test_google_session_route_rejects_invalid_external_session(client):
-    external_response = Mock(status_code=401, json=lambda: {})
-    with patch("server.httpx.AsyncClient.get", new=AsyncMock(return_value=external_response)):
-        response = await client.post("/api/auth/session", json={"session_id": "expired-session"})
+async def test_google_auth_route_rejects_invalid_token(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    with patch("server.id_token.verify_oauth2_token", side_effect=ValueError("invalid")):
+        response = await client.post("/api/auth/google", json={"credential": "forged-token"})
 
     assert response.status_code == 401
-    assert "session_token" not in response.cookies
+    assert "access_token" not in response.cookies
 
 
 @pytest.mark.anyio
-async def test_google_session_route_rejects_oversized_session_id(client):
-    response = await client.post("/api/auth/session", json={"session_id": "x" * 513})
+async def test_google_auth_route_rejects_unverified_email(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    id_info = {"email": "unverified@example.com", "email_verified": False}
+    with patch("server.id_token.verify_oauth2_token", return_value=id_info):
+        response = await client.post("/api/auth/google", json={"credential": "google-id-token"})
 
-    assert response.status_code == 400
+    assert response.status_code == 403

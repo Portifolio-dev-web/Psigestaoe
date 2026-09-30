@@ -1,5 +1,5 @@
 // constants/testIds/ — central registry of data-testid values used by the
-// end-to-end testing agent (qabot) to locate and interact with UI elements
+// end-to-end tests to locate and interact with UI elements
 // during automated tests. UI without testids cannot be automatically verified.
 //
 // Structure: each feature lives in its own file (auth.js, cart.js, ...) and
@@ -12,4 +12,3 @@
 //   3. Re-export here: `export * from './<feature>';`
 
 export * from './auth';
-export * from './home';
