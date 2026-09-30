@@ -11,7 +11,8 @@ from typing import Optional
 from fastapi import Response
 
 import bcrypt
-import httpx
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 import jwt
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -180,6 +181,9 @@ class RegisterInput(BaseModel):
 class LoginInput(BaseModel):
     email: EmailStr
     password: str
+
+class GoogleAuthInput(BaseModel):
+    credential: str # O ID Token JWT retornado pelo Google Identity Services no frontend
 
 class PatientInput(BaseModel):
     full_name: str
@@ -405,67 +409,67 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
     
     return {"user": public_user(user), "token": token}
 
-@api_router.post("/auth/session")
-async def google_session(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    session_id = request.headers.get("X-Session-ID")
-    if not session_id:
-        body = {}
-        try:
-            body = await request.json()
-        except Exception:
-            pass
-        session_id = body.get("session_id")
-        
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id ausente")
-        
-    async with httpx.AsyncClient() as http:
-        r = await http.get("https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                           headers={"X-Session-ID": session_id})
-                           
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Sessão Google inválida")
-        
-    d = r.json()
-    email = d["email"].lower().strip()
+@api_router.post("/auth/google")
+async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSession = Depends(get_db)):
+    GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
     
+    if not GOOGLE_CLIENT_ID:
+        logging.critical("SECURITY ALERT: GOOGLE_CLIENT_ID não configurado.")
+        raise HTTPException(status_code=500, detail="Configuração de autenticação ausente.")
+
+    try:
+        # 1. VALIDAÇÃO CRIPTOGRÁFICA OFICIAL
+        # A função verifica a assinatura do JWT contra os servidores do Google.
+        # O parâmetro GOOGLE_CLIENT_ID protege contra o "Confused Deputy Attack",
+        # garantindo que o token foi emitido especificamente para o seu software.
+        id_info = id_token.verify_oauth2_token(
+            data.credential, 
+            google_requests.Request(), 
+            GOOGLE_CLIENT_ID
+        )
+        
+        # 2. Validação de conta verificada
+        if not id_info.get("email_verified", False):
+            raise HTTPException(status_code=403, detail="Acesso negado: E-mail não verificado pelo Google.")
+
+        email = id_info["email"].lower().strip()
+        name = id_info.get("name", "")
+        picture = id_info.get("picture", "")
+
+    except ValueError as e:
+        # Disparado se o token for inválido, estiver expirado ou o Audience (Client ID) não bater.
+        logging.warning(f"Tentativa de falsificação de token Google: {str(e)}")
+        raise HTTPException(status_code=401, detail="Token de autenticação inválido ou expirado.")
+
+    # 3. Lógica de Persistência no Banco (Segura)
     stmt = select(User).where(User.email == email)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
     
     if user:
-        # Atualiza o usuário existente
-        user.name = d.get("name", user.name)
-        user.picture = d.get("picture", user.picture)
+        user.name = name
+        user.picture = picture
     else:
-        # Cria novo usuário via Google
+        # Nota de Segurança: O ideal em sistemas médicos é que a conta seja 
+        # pré-aprovada ou que exista um fluxo explícito de aceite dos termos da LGPD
         user = User(
             email=email,
-            name=d.get("name", ""),
-            picture=d.get("picture", ""),
+            name=name,
+            picture=picture,
             auth_provider="google",
-            terms_accepted=True
+            terms_accepted=True 
         )
         db.add(user)
     
     await db.commit()
     await db.refresh(user)
     
-    session_token = d["session_token"]
-    
-    # Salva a sessão do usuário
-    new_session = UserSession(
-        session_token=session_token,
-        user_id=user.user_id,
-        expires_at=now_utc() + timedelta(days=7)
-    )
-    db.add(new_session)
-    await db.commit()
-    
-    response.set_cookie(key="session_token", value=session_token, httponly=True, secure=True,
-                        samesite="none", max_age=604800, path="/")
+    # 4. Geração da NOSSA sessão. Nunca dependemos da sessão do Google a longo prazo.
+    # Reutilizamos a lógica sólida que você já tem para login via senha.
+    token = create_access_token(user.user_id, email)
+    set_auth_cookie(response, token)
                         
-    return {"user": public_user(user)}
+    return {"user": public_user(user), "token": token}
 
 @api_router.get("/auth/me")
 async def me(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):

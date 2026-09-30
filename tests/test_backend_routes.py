@@ -227,9 +227,26 @@ async def test_google_session_route_uses_external_session_data(client):
         },
     )
     with patch("server.httpx.AsyncClient.get", new=AsyncMock(return_value=external_response)):
-        response = await client.post("/api/auth/session", headers={"X-Session-ID": "oauth-id"})
+        response = await client.post("/api/auth/session", json={"session_id": "oauth-id"})
 
     assert response.status_code == 200
     assert response.json()["user"]["auth_provider"] == "google"
     assert "session_token" in response.cookies
     assert (await client.get("/api/auth/me")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_google_session_route_rejects_invalid_external_session(client):
+    external_response = Mock(status_code=401, json=lambda: {})
+    with patch("server.httpx.AsyncClient.get", new=AsyncMock(return_value=external_response)):
+        response = await client.post("/api/auth/session", json={"session_id": "expired-session"})
+
+    assert response.status_code == 401
+    assert "session_token" not in response.cookies
+
+
+@pytest.mark.anyio
+async def test_google_session_route_rejects_oversized_session_id(client):
+    response = await client.post("/api/auth/session", json={"session_id": "x" * 513})
+
+    assert response.status_code == 400
