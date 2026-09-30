@@ -126,7 +126,7 @@ zipp==4.1.0
 certifi
 pymongo[srv]
 dnspython
-sqlalchemy>=2.0.0
+sqlalchemy[asyncio]>=2.0.0
 aiosqlite
 asyncpg
 alembic
