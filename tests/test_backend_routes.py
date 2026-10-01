@@ -369,8 +369,11 @@ async def test_pdf_export_escapes_user_markup(client):
 
 
 @pytest.mark.anyio
-async def test_consent_term_uses_owner_name_and_crp(client):
+async def test_consent_term_uses_owner_name_and_crp(client, monkeypatch):
     # Item 6: o termo não pode mais citar uma psicóloga fixa no código.
+    # Recurso desligado na primeira versão; este teste garante que ele volta
+    # funcionando quando SHOW_PROFESSIONAL_IDENTIFICATION for ligado.
+    monkeypatch.setattr(server, "SHOW_PROFESSIONAL_IDENTIFICATION", True)
     patient_id = await _create_patient(client, "termo@example.com")
     assert (await client.put("/api/auth/profile", json={"name": "Dra. Ana Souza", "crp": "abc"})).status_code == 422
 
@@ -615,8 +618,9 @@ async def test_privacy_policy_is_public(client):
 
 
 @pytest.mark.anyio
-async def test_consent_keeps_exact_copy_of_the_accepted_term(client):
+async def test_consent_keeps_exact_copy_of_the_accepted_term(client, monkeypatch):
     # Termo por profissional: texto próprio + evidência imutável do que foi aceito.
+    monkeypatch.setattr(server, "SHOW_PROFESSIONAL_IDENTIFICATION", True)  # ver teste acima
     await _create_patient(client, "consent@example.com")
     await client.put("/api/auth/profile", json={"name": "Dra. Original", "crp": "06/111111"})
     await client.put("/api/consent-term", json={"body": "Cláusula personalizada: sessões online."})
@@ -1143,3 +1147,30 @@ async def test_schedule_conflicts_require_confirmation(client):
         "title": "Primeira", "start": "2026-10-06T14:00:00Z", "end": "2026-10-06T14:50:00Z",
     })
     assert retry.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_first_version_hides_professional_name_and_crp(client, monkeypatch):
+    # Produto (primeira versão): sistema só para profissionais; o nome e o CRP
+    # do profissional não aparecem no termo nem no PDF.
+    patient_id = await _create_patient(client, "versao1@example.com")
+    await client.put("/api/auth/profile", json={"name": "Dra. Escondida", "crp": "06/999999"})
+
+    me = (await client.get("/api/auth/me")).json()
+    assert me["features"] == {"professional_identification": False}
+
+    term = (await client.get("/api/consent-term")).json()["text"]
+    assert term.startswith("TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO")
+    assert "Profissional responsável" not in term and "CRP 06/999999" not in term and "Dra. Escondida" not in term
+    assert "acima identificado" not in term  # o texto padrão não depende mais do cabeçalho
+
+    patient_term = (await client.get(f"/api/patients/{patient_id}")).json()["consent_terms_text"]
+    assert "Dra. Escondida" not in patient_term
+
+    # PDF sem compressão no teste, para o texto ser legível nos bytes: a
+    # verificação só vale se provar que o e-mail aparece E o nome não.
+    import reportlab.rl_config as rl_config
+    monkeypatch.setattr(rl_config, "pageCompression", 0)
+    pdf = (await client.get(f"/api/patients/{patient_id}/export", params={"format": "pdf"})).content
+    assert b"Exportado por: versao1@example.com" in pdf
+    assert b"Dra. Escondida" not in pdf

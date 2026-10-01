@@ -32,7 +32,7 @@ logger = logging.getLogger("psigestao.legal")
 PRIVACY_POLICY_VERSION = "2026-09-30"
 PRIVACY_POLICY_UPDATED_AT = "30/09/2026"
 
-_PLACEHOLDER = "[A PREENCHER]"
+_PLACEHOLDER = "[Douglas Ferreira do Nascimento - DG TECNOLOGIA]"
 
 
 def _controller() -> dict:
@@ -62,7 +62,7 @@ def privacy_policy() -> dict:
     sections = [
         ("1. Quem somos", [
             f"O PsiGestão é um sistema de gestão clínica e prontuário eletrônico para profissionais de "
-            f"psicologia, operado por {c['name']} (CNPJ/CPF {c['document']}).",
+            f"psicologia, operado por {c['name']} (344.405.258.81 {c['document']}).",
             "Esta política explica quais dados pessoais tratamos, por que, com quem compartilhamos, por "
             "quanto tempo guardamos e como você exerce seus direitos, conforme a Lei Geral de Proteção de "
             "Dados Pessoais (Lei nº 13.709/2018 – LGPD).",

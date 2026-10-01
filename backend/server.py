@@ -448,11 +448,25 @@ class PatientInput(BaseModel):
 #   2. Corpo: o modelo padrão abaixo OU um texto próprio do profissional
 #      (Configurações -> Termo de consentimento), para incluir cláusulas como
 #      atendimento online, faltas ou gravação.
+#
+# PRODUTO (primeira versão): identificação do profissional DESLIGADA.
+# Nesta versão o sistema é usado só pelos profissionais; os pacientes ainda
+# não têm acesso. Por isso o nome e o CRP do profissional saem do termo de
+# consentimento e do PDF exportado, e o cadastro de nome/CRP some das
+# Configurações. Nada foi apagado: quando o sistema for aberto aos pacientes,
+# basta definir SHOW_PROFESSIONAL_IDENTIFICATION=true para tudo voltar
+# (inclusive os nomes e CRPs já cadastrados), sem mudar código.
+# Consentimentos já registrados NÃO mudam: cada paciente guarda a cópia do
+# texto que aceitou (ver apply_consent).
+SHOW_PROFESSIONAL_IDENTIFICATION = os.environ.get("SHOW_PROFESSIONAL_IDENTIFICATION", "false").lower() == "true"
+
+# O corpo padrão não depende do cabeçalho: antes dizia "profissional acima
+# identificado(a)", o que ficaria sem sentido com a identificação desligada.
 DEFAULT_CONSENT_TERM_BODY = (
     "Declaro que fui informado(a) sobre os objetivos, procedimentos e natureza do atendimento "
-    "psicológico realizado pelo(a) profissional acima identificado(a), regularmente inscrito(a) e "
-    "atuando conforme as normas estabelecidas pelo Conselho Federal de Psicologia e pelo Código de "
-    "Ética Profissional do Psicólogo.\n\n"
+    "psicológico realizado pelo(a) psicólogo(a) responsável pelo meu atendimento, regularmente "
+    "inscrito(a) no Conselho Regional de Psicologia e atuando conforme as normas estabelecidas pelo "
+    "Conselho Federal de Psicologia e pelo Código de Ética Profissional do Psicólogo.\n\n"
     "Estou ciente de que o atendimento psicológico é pautado no respeito à dignidade e integridade humana "
     "e que todas as informações compartilhadas serão mantidas sob sigilo profissional.\n\n"
     "Compreendo que o sigilo poderá ser rompido apenas em situações previstas em lei ou diante de risco "
@@ -469,14 +483,13 @@ def consent_term_body(owner: User) -> str:
 
 def consent_term_text(owner: User) -> str:
     """Texto ATUAL do termo deste profissional (usado para novos consentimentos)."""
-    professional = owner.name or "o(a) psicólogo(a) responsável"
-    # Sem CRP cadastrado, o termo avisa explicitamente em vez de inventar um número.
-    professional += f" – CRP {owner.crp}" if owner.crp else " (CRP não informado)"
-    return (
-        "TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO\n\n"
-        f"Profissional responsável: {professional}\n\n"
-        f"{consent_term_body(owner)}"
-    )
+    header = "TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO\n\n"
+    if SHOW_PROFESSIONAL_IDENTIFICATION:  # desligado na primeira versão (ver acima)
+        professional = owner.name or "o(a) psicólogo(a) responsável"
+        # Sem CRP cadastrado, o termo avisa explicitamente em vez de inventar um número.
+        professional += f" – CRP {owner.crp}" if owner.crp else " (CRP não informado)"
+        header += f"Profissional responsável: {professional}\n\n"
+    return header + consent_term_body(owner)
 
 
 def apply_consent(p: Patient, consent: bool, owner: User) -> Optional[str]:
@@ -723,6 +736,9 @@ def public_user(u: User) -> dict:
         # (senha para quem tem; Google para quem só entra pelo Google).
         "lock_minutes": u.lock_minutes or DEFAULT_LOCK_MINUTES,
         "has_password": bool(u.password_hash),
+        # Recursos ligados/desligados nesta implantação (o frontend esconde o
+        # que estiver desligado, ex.: o cadastro de nome/CRP nas Configurações).
+        "features": {"professional_identification": SHOW_PROFESSIONAL_IDENTIFICATION},
     }
 
 # Refatoração da trilha de auditoria para usar o SQLAlchemy
@@ -1765,7 +1781,12 @@ def _render_patient_pdf(pat: dict, recs: list, professional_name: str, professio
         return escape(str(value or "")).replace("\n", "<br/>")
 
     elems = [Paragraph("Prontuário Clínico — PsiGestão", h), Spacer(1, 4)]
-    elems.append(Paragraph(f"Profissional: {pdf_text(professional_name)} · {pdf_text(professional_email)}", meta))
+    # Primeira versão: sem o nome do profissional no documento (só a conta que
+    # exportou, como era antes). Volta com SHOW_PROFESSIONAL_IDENTIFICATION=true.
+    if SHOW_PROFESSIONAL_IDENTIFICATION:
+        elems.append(Paragraph(f"Profissional: {pdf_text(professional_name)} · {pdf_text(professional_email)}", meta))
+    else:
+        elems.append(Paragraph(f"Exportado por: {pdf_text(professional_email)}", meta))
     elems.append(Paragraph(f"Emitido em: {now_utc().strftime('%d/%m/%Y %H:%M UTC')}", meta))
     elems.append(Spacer(1, 8))
     elems.append(HRFlowable(width="100%", color=navy))

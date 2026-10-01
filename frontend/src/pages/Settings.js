@@ -96,10 +96,13 @@ function ProfessionalProfile() {
 
 // Termo de consentimento POR PROFISSIONAL.
 // Cada profissional pode adaptar o corpo do termo (ex.: atendimento online,
-// faltas). O cabeçalho com nome e CRP é sempre gerado pelo sistema.
+// faltas). Com a identificação do profissional ligada (ver server.py,
+// SHOW_PROFESSIONAL_IDENTIFICATION), o sistema acrescenta nome e CRP no topo.
 // Mudanças aqui valem só para NOVOS consentimentos: cada paciente guarda a
 // cópia exata do texto que aceitou (backend: apply_consent).
 function ConsentTermEditor() {
+  const { user } = useAuth();
+  const showIdentification = Boolean(user?.features?.professional_identification);
   const [term, setTerm] = useState(null);
   const [body, setBody] = useState("");
   const [saving, setSaving] = useState(false);
@@ -136,8 +139,8 @@ function ConsentTermEditor() {
         )}
       </div>
       <p className="mt-1 text-sm text-slate-500">
-        O cabeçalho com seu nome e CRP é incluído automaticamente. Alterações valem para novos consentimentos;
-        os já registrados guardam a cópia do texto que o paciente aceitou.
+        {showIdentification && "O cabeçalho com seu nome e CRP é incluído automaticamente. "}
+        Alterações valem para novos consentimentos; os já registrados guardam a cópia do texto que o paciente aceitou.
       </p>
       {!term ? (
         <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
@@ -311,7 +314,10 @@ export default function Settings() {
         </div>
       </Card>
 
-      <ProfessionalProfile />
+      {/* PRODUTO (primeira versão): o cadastro de nome/CRP só aparece com a
+          identificação do profissional ligada no servidor. Nesta versão o
+          sistema é usado só pelos profissionais; volta ao abrir para pacientes. */}
+      {user?.features?.professional_identification && <ProfessionalProfile />}
       <ConsentTermEditor />
       <SessionSecurity />
 
