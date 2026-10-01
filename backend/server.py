@@ -12,7 +12,7 @@ import threading
 import time
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import Response
 
 import bcrypt
@@ -25,7 +25,7 @@ from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -278,7 +278,8 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
 
     expires_at = now_utc() + timedelta(hours=JWT_EXPIRE_HOURS)
     session_id = secrets.token_urlsafe(32)
-    db.add(UserSession(session_token=session_id, user_id=user.user_id, expires_at=expires_at))
+    db.add(UserSession(session_token=session_id, user_id=user.user_id, expires_at=expires_at,
+                       last_activity_at=now_utc()))  # produto: ponto de partida da inatividade
     await db.commit()
 
     payload = {
@@ -513,19 +514,101 @@ class AcceptTermsInput(BaseModel):
     # estava aberta, o aceite é recusado em vez de valer para um texto não lido.
     version: str
 
+# CORREÇÃO DE PRODUTO (horários deslocados):
+# O frontend mandava a data do campo "datetime-local" SEM fuso horário
+# ("2026-10-02T09:00"). O servidor a gravava como se fosse UTC, e a pessoa
+# no Brasil (UTC-3) via a sessão das 09:00 aparecer às 06:00, inclusive na
+# data das evoluções do prontuário. Agora o servidor RECUSA data sem fuso:
+# quem chama precisa dizer qual instante quer (o frontend envia em UTC).
+def _require_timezone(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise ValueError("Data e hora sem fuso horário. Envie em ISO 8601 com fuso (ex.: 2026-10-02T09:00:00-03:00).")
+    return value.astimezone(timezone.utc)
+
+
 class RecordInput(BaseModel):
     session_datetime: datetime # Tipagem alterada para datetime nativo
     content: str
     diagnosis: Optional[str] = ""
 
+    @field_validator("session_datetime")
+    @classmethod
+    def validate_timezone(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+
+# PRODUTO (visões da agenda): regras que o servidor passa a garantir.
+SESSION_STATUSES = ("agendada", "realizada", "cancelada")
+# Duração padrão de uma sessão de psicoterapia, usada quando não há horário de
+# término (inclusive na detecção de conflito). O frontend usa o mesmo valor.
+DEFAULT_SESSION_MINUTES = 50
+MAX_SESSION_DURATION = timedelta(hours=12)
+
+
 class SessionInput(BaseModel):
     patient_id: Optional[str] = ""
     patient_name: Optional[str] = ""
-    title: str
+    title: str = Field(max_length=200)
     start: datetime # Tipagem alterada para datetime nativo
     end: Optional[datetime] = None # Tipagem alterada para datetime nativo
-    status: str = "agendada"
-    notes: Optional[str] = ""
+    # Antes aceitava qualquer texto (item 17 da auditoria); a agenda só conhece estes três.
+    status: Literal["agendada", "realizada", "cancelada"] = "agendada"
+    notes: Optional[str] = Field(default="", max_length=5000)
+    # Conflito de horário: o servidor recusa (409) uma sessão que se sobrepõe a
+    # outra, a menos que o profissional confirme ("salvar mesmo assim").
+    allow_conflict: bool = False
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Informe um título para a sessão.")
+        return value
+
+    @field_validator("start", "end")
+    @classmethod
+    def validate_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _require_timezone(value)
+
+    @model_validator(mode="after")
+    def validate_period(self):
+        # Antes era possível gravar uma sessão que terminava antes de começar.
+        if self.end is not None:
+            if self.end <= self.start:
+                raise ValueError("O horário de término deve ser depois do início.")
+            if self.end - self.start > MAX_SESSION_DURATION:
+                raise ValueError("Uma sessão não pode durar mais de 12 horas.")
+        return self
+
+
+# PRODUTO (bloqueio por inatividade)
+LOCK_MINUTES_OPTIONS = (5, 10, 15, 30)
+DEFAULT_LOCK_MINUTES = 10
+
+
+class LockInput(BaseModel):
+    # "idle" = o navegador detectou inatividade; "manual" = botão "Bloquear agora".
+    reason: Literal["idle", "manual"] = "manual"
+
+
+class UnlockInput(BaseModel):
+    # Quem tem senha desbloqueia com a senha; quem entra pelo Google, com o Google.
+    password: Optional[str] = Field(default=None, max_length=256)
+    credential: Optional[str] = Field(default=None, max_length=8192)
+
+
+class LockSettingsInput(BaseModel):
+    minutes: int
+
+    @field_validator("minutes")
+    @classmethod
+    def validate_minutes(cls, value: int) -> int:
+        if value not in LOCK_MINUTES_OPTIONS:
+            raise ValueError("Escolha 5, 10, 15 ou 30 minutos.")
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +719,10 @@ def public_user(u: User) -> dict:
         # toda resposta de /auth/me, ou seja, em toda carga de página. Agora ele
         # só aparece uma vez, ao ser gerado (POST /integrations/google-forms/token).
         "webhook_configured": bool(u.webhook_token_hash),
+        # Produto: tempo do bloqueio por inatividade e como desbloquear a tela
+        # (senha para quem tem; Google para quem só entra pelo Google).
+        "lock_minutes": u.lock_minutes or DEFAULT_LOCK_MINUTES,
+        "has_password": bool(u.password_hash),
     }
 
 # Refatoração da trilha de auditoria para usar o SQLAlchemy
@@ -688,21 +775,87 @@ async def _session_from_token(token: str, db: AsyncSession) -> Optional[UserSess
     return sess if expires_at >= now_utc() else None
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    # CORREÇÃO DE SEGURANÇA (itens 7 e 8 da auditoria):
-    # - A autenticação agora vem SOMENTE do cookie httpOnly `access_token`.
-    #   O suporte a "Authorization: Bearer" foi removido junto com o token no
-    #   corpo das respostas: não existe mais forma de o JavaScript obter o token.
-    # - O antigo ramo "session_token" (resto do login Google anterior) foi
-    #   unificado: toda sessão, seja de senha ou Google, é uma linha em
-    #   `user_sessions` referenciada pelo JWT.
+async def _authenticated_session(request: Request, db: AsyncSession) -> UserSession:
+    """Sessão válida do cookie, SEM checar o bloqueio por inatividade.
+
+    CORREÇÃO DE SEGURANÇA (itens 7 e 8 da auditoria):
+    - A autenticação agora vem SOMENTE do cookie httpOnly `access_token`.
+      O suporte a "Authorization: Bearer" foi removido junto com o token no
+      corpo das respostas: não existe mais forma de o JavaScript obter o token.
+    - O antigo ramo "session_token" (resto do login Google anterior) foi
+      unificado: toda sessão, seja de senha ou Google, é uma linha em
+      `user_sessions` referenciada pelo JWT.
+    """
     token = request.cookies.get("access_token")
     sess = await _session_from_token(token, db) if token else None
-
-    if sess and sess.user:
-        return sess.user  # já carregado junto com a sessão (joinedload)
-
+    if sess and sess.user:  # usuário já carregado junto com a sessão (joinedload)
+        return sess
     raise HTTPException(status_code=401, detail="Usuário não autenticado")
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO: bloqueio por inatividade, controlado NO SERVIDOR
+# ---------------------------------------------------------------------------
+# Em consultório o computador fica aberto na frente do paciente ou da
+# recepção. Depois de N minutos sem uso (Configurações: 5, 10, 15 ou 30),
+# a tela trava e só volta com a senha (ou o Google, para quem entra por ele).
+#
+# Por que no servidor e não só na tela: um bloqueio só visual cai com um F5
+# ou com uma chamada direta à API. Aqui a SESSÃO fica bloqueada, e todas as
+# rotas de dados respondem 423 até o desbloqueio. O navegador avisa a
+# inatividade (POST /auth/lock) e manda um "sinal de vida" enquanto a pessoa
+# usa a tela (POST /auth/activity); mesmo que o navegador não avise (notebook
+# que hibernou, aba congelada), o servidor bloqueia sozinho quando passa do
+# tempo, com 1 minuto de folga para o atraso do sinal de vida.
+LOCK_GRACE = timedelta(minutes=1)
+# Atualiza last_activity_at no máximo 1x por minuto: sem isso, TODA requisição
+# viraria uma escrita no banco.
+ACTIVITY_WRITE_INTERVAL = timedelta(seconds=60)
+MAX_UNLOCK_FAILURES = 5
+SESSION_LOCKED_DETAIL = {
+    "code": "session_locked",
+    "msg": "Sessão bloqueada por inatividade. Desbloqueie para continuar.",
+}
+
+
+def _session_is_idle(sess: UserSession) -> bool:
+    last_activity = _as_utc(sess.last_activity_at or sess.created_at) or now_utc()
+    limit = timedelta(minutes=sess.user.lock_minutes or DEFAULT_LOCK_MINUTES) + LOCK_GRACE
+    return now_utc() - last_activity > limit
+
+
+async def _is_locked(db: AsyncSession, sess: UserSession) -> bool:
+    """True se a sessão está bloqueada. Bloqueia (e audita) se passou do tempo."""
+    if sess.locked_at is not None:
+        return True
+    if _session_is_idle(sess):
+        sess.locked_at = now_utc()
+        await db.commit()
+        await log_audit(db, sess.user.user_id, sess.user.email, "bloquear", "sessao", sess.user.user_id,
+                        "Bloqueio por inatividade (detectado no servidor)")
+        return True
+    return False
+
+
+async def _touch_activity(db: AsyncSession, sess: UserSession) -> None:
+    now = now_utc()
+    last_activity = _as_utc(sess.last_activity_at)
+    if last_activity is None or now - last_activity > ACTIVITY_WRITE_INTERVAL:
+        sess.last_activity_at = now
+        await db.commit()
+
+
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
+    """Usuário autenticado com a sessão DESBLOQUEADA (todas as rotas de dados).
+
+    Sessão bloqueada responde 423 com code "session_locked": o frontend
+    mostra a tela de bloqueio sem perder o que estava aberto (ex.: rascunho).
+    """
+    sess = await _authenticated_session(request, db)
+    if await _is_locked(db, sess):
+        raise HTTPException(status_code=423, detail=SESSION_LOCKED_DETAIL)
+    await _touch_activity(db, sess)
+    return sess.user
 
 
 TERMS_REQUIRED_DETAIL = "É necessário aceitar a versão atual da Política de Privacidade para continuar."
@@ -843,11 +996,14 @@ class CachedGoogleCertsRequest(google.auth.transport.Request):
 _google_request = CachedGoogleCertsRequest()
 
 
-@api_router.post("/auth/google", dependencies=[Depends(rate_limit("google", 10, 60))])
-async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSession = Depends(get_db)):
-    GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+async def verify_google_credential(credential: str) -> dict:
+    """Valida o ID token do Google e devolve os dados da conta.
 
-    if not GOOGLE_CLIENT_ID:
+    Usada no login com Google e, no produto, no desbloqueio da tela para quem
+    não tem senha (antes esta lógica existia só dentro da rota de login).
+    """
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
         logging.critical("SECURITY ALERT: GOOGLE_CLIENT_ID não configurado.")
         raise HTTPException(status_code=500, detail="Configuração de autenticação ausente.")
 
@@ -858,18 +1014,7 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
         # garantindo que o token foi emitido especificamente para o seu software.
         # ESCALA: roda numa thread (a verificação é síncrona e pode precisar
         # da rede) e usa o transporte com cache de certificados acima.
-        id_info = await run_in_threadpool(
-            id_token.verify_oauth2_token, data.credential, _google_request, GOOGLE_CLIENT_ID,
-        )
-
-        # 2. Validação de conta verificada
-        if not id_info.get("email_verified", False):
-            raise HTTPException(status_code=403, detail="Acesso negado: E-mail não verificado pelo Google.")
-
-        email = id_info["email"].lower().strip()
-        name = id_info.get("name", "")
-        picture = id_info.get("picture", "")
-
+        id_info = await run_in_threadpool(id_token.verify_oauth2_token, credential, _google_request, client_id)
     except ValueError as e:
         # Disparado se o token for inválido, estiver expirado ou o Audience (Client ID) não bater.
         logging.warning(f"Tentativa de falsificação de token Google: {str(e)}")
@@ -879,6 +1024,19 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
         # genérico). 503 deixa claro que é temporário e de um terceiro.
         logger.exception("Não foi possível obter os certificados do Google.")
         raise HTTPException(status_code=503, detail="Login com Google temporariamente indisponível. Tente novamente.")
+
+    # 2. Validação de conta verificada
+    if not id_info.get("email_verified", False):
+        raise HTTPException(status_code=403, detail="Acesso negado: E-mail não verificado pelo Google.")
+    return id_info
+
+
+@api_router.post("/auth/google", dependencies=[Depends(rate_limit("google", 10, 60))])
+async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSession = Depends(get_db)):
+    id_info = await verify_google_credential(data.credential)  # passos 1 e 2 (ver acima)
+    email = id_info["email"].lower().strip()
+    name = id_info.get("name", "")
+    picture = id_info.get("picture", "")
 
     # 3. Lógica de Persistência no Banco (Segura)
     stmt = select(User).where(User.email == email)
@@ -916,11 +1074,19 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
     return {"user": public_user(user)}
 
 @api_router.get("/auth/me")
-async def me(user: User = Depends(get_current_user)):
+async def me(request: Request, db: AsyncSession = Depends(get_db)):
     # Item 15: antes esta rota criava um token de webhook para TODO usuário e o
     # devolvia a cada carregamento de página. Agora o token só existe se o
     # profissional gerar um (rota /integrations/google-forms/token).
-    return public_user(user)
+    #
+    # Produto: responde MESMO com a sessão bloqueada (informando `locked`),
+    # para o frontend mostrar a tela de bloqueio. Recarregar a página não
+    # desbloqueia nada: os dados continuam recusados até o desbloqueio.
+    sess = await _authenticated_session(request, db)
+    locked = await _is_locked(db, sess)
+    if not locked:
+        await _touch_activity(db, sess)  # abrir/recarregar a página é uso real
+    return {**public_user(sess.user), "locked": locked}
 
 @api_router.post("/auth/accept-terms")
 async def accept_terms(data: AcceptTermsInput, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -973,6 +1139,121 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
     is_prod = ENVIRONMENT == "production"
     response.delete_cookie("access_token", path="/", httponly=True,
                            samesite="strict" if is_prod else "lax", secure=is_prod)
+    return {"ok": True}
+
+# ---------------------------------------------------------------------------
+# PRODUTO: rotas do bloqueio por inatividade
+# ---------------------------------------------------------------------------
+
+@api_router.post("/auth/lock")
+async def lock_session(data: LockInput, request: Request, db: AsyncSession = Depends(get_db)):
+    """O navegador detectou inatividade, ou a pessoa clicou em "Bloquear agora"."""
+    sess = await _authenticated_session(request, db)
+    if sess.locked_at is None:
+        sess.locked_at = now_utc()
+        await db.commit()
+        detail = "Bloqueio manual" if data.reason == "manual" else "Bloqueio por inatividade"
+        await log_audit(db, sess.user.user_id, sess.user.email, "bloquear", "sessao", sess.user.user_id, detail)
+    return {"locked": True}
+
+
+@api_router.post("/auth/unlock", dependencies=[Depends(rate_limit("unlock", 10, 60))])
+async def unlock_session(data: UnlockInput, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Desbloqueia a sessão confirmando a identidade (senha ou Google).
+
+    Segurança: cada erro conta. Na 5ª senha errada a sessão é ENCERRADA e a
+    pessoa volta à tela de login (que tem os próprios limites). Sem isso,
+    quem achasse o computador travado teria horas para testar senhas.
+    """
+    sess = await _authenticated_session(request, db)
+    user = sess.user
+
+    if data.password and user.password_hash:
+        verified = await verify_password_async(data.password, user.password_hash)
+    elif data.credential:
+        id_info = await verify_google_credential(data.credential)
+        # A conta do Google precisa ser A MESMA da sessão bloqueada.
+        verified = id_info.get("email", "").lower().strip() == user.email
+    else:
+        verified = False
+
+    if not verified:
+        sess.unlock_failures = (sess.unlock_failures or 0) + 1
+        if sess.unlock_failures >= MAX_UNLOCK_FAILURES:
+            await db.delete(sess)
+            await db.commit()
+            await log_audit(db, user.user_id, user.email, "encerrar", "sessao", user.user_id,
+                            "Sessão encerrada: limite de tentativas de desbloqueio")
+            is_prod = ENVIRONMENT == "production"
+            response.delete_cookie("access_token", path="/", httponly=True,
+                                   samesite="strict" if is_prod else "lax", secure=is_prod)
+            # Lançar a exceção descartaria o delete_cookie acima; por isso a
+            # resposta de erro é montada aqui, já com o cookie removido.
+            response.status_code = 401
+            return {"detail": {"code": "session_ended",
+                               "msg": "Muitas tentativas. Por segurança, a sessão foi encerrada. Entre novamente."}}
+        await db.commit()
+        await log_audit(db, user.user_id, user.email, "desbloquear_falha", "sessao", user.user_id,
+                        f"Tentativa de desbloqueio inválida ({sess.unlock_failures}/{MAX_UNLOCK_FAILURES})")
+        remaining = MAX_UNLOCK_FAILURES - sess.unlock_failures
+        raise HTTPException(status_code=403, detail={
+            "code": "unlock_failed",
+            "msg": f"Senha incorreta. Restam {remaining} tentativa(s) antes de a sessão ser encerrada.",
+            "remaining": remaining,
+        })
+
+    sess.locked_at = None
+    sess.unlock_failures = 0
+    sess.last_activity_at = now_utc()
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "desbloquear", "sessao", user.user_id, "Sessão desbloqueada")
+    return {"user": {**public_user(user), "locked": False}}
+
+
+@api_router.post("/auth/activity")
+async def register_activity(user: User = Depends(get_current_user)):
+    """"Sinal de vida": o navegador avisa que a pessoa está usando a tela
+    (no máximo 1x por minuto). get_current_user já atualiza a atividade e
+    responde 423 se a sessão estiver bloqueada."""
+    return {"ok": True}
+
+
+@api_router.put("/auth/lock-settings")
+async def update_lock_settings(data: LockSettingsInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    user.lock_minutes = data.minutes
+    await db.commit()
+    await db.refresh(user)
+    await log_audit(db, user.user_id, user.email, "editar", "usuario", user.user_id,
+                    f"Bloqueio por inatividade: {data.minutes} min")
+    return public_user(user)
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO: chave dos rascunhos automáticos de prontuário
+# ---------------------------------------------------------------------------
+# O rascunho fica no NAVEGADOR (para sobreviver a queda de rede, sessão
+# expirada, aba fechada ou travamento), mas nunca em texto puro: o navegador
+# o criptografa (AES-GCM) com esta chave, que só é entregue a quem está
+# logado. Um rascunho copiado do disco do computador é ilegível sem login.
+
+@api_router.get("/auth/draft-key")
+async def get_draft_key(response: Response, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    if not user.draft_key:
+        user.draft_key = encrypt_field(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+        await db.commit()
+    # Nunca guardar esta resposta em cache (navegador, proxy ou CDN).
+    response.headers["Cache-Control"] = "no-store"
+    return {"key": decrypt_field(user.draft_key)}
+
+
+@api_router.delete("/auth/draft-key")
+async def rotate_draft_key(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Troca a chave: os rascunhos de TODOS os aparelhos deixam de abrir.
+    Para usar quando um computador com rascunhos é perdido ou roubado."""
+    user.draft_key = None  # a próxima leitura gera uma chave nova
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "editar", "usuario", user.user_id,
+                    "Rascunhos invalidados em todos os dispositivos")
     return {"ok": True}
 
 # ---------------------------------------------------------------------------
@@ -1716,15 +1997,63 @@ def session_public(s: Session) -> dict:
     }
 
 
-def _apply_session_input(s: Session, data: SessionInput) -> None:
-    """Item 13: grava os campos livres da agenda criptografados (criar e editar)."""
-    s.patient_id = data.patient_id
-    s.patient_name = encrypt_field(data.patient_name)
+async def _apply_session_input(db: AsyncSession, user: User, s: Session, data: SessionInput) -> None:
+    """Item 13: grava os campos livres da agenda criptografados (criar e editar).
+
+    Produto (item 17 da auditoria): o paciente vinculado precisa ser DESTE
+    profissional, e o nome gravado vem do cadastro (não do que o navegador
+    mandou), para a agenda nunca mostrar um nome que não bate com o paciente.
+    """
+    patient_name = data.patient_name or ""
+    if data.patient_id:
+        patient = (await db.execute(select(Patient).where(
+            Patient.id == data.patient_id, Patient.owner_id == user.user_id,
+        ))).scalar_one_or_none()
+        if not patient:
+            raise HTTPException(status_code=422, detail="Paciente não encontrado para este profissional.")
+        patient_name = decrypt_field(patient.full_name)
+
+    s.patient_id = data.patient_id or None
+    s.patient_name = encrypt_field(patient_name)
     s.title = encrypt_field(data.title)
-    s.start_time = data.start  # Pydantic já entregou um datetime
+    s.start_time = data.start  # Pydantic já entregou um datetime (UTC, com fuso)
     s.end_time = data.end      # Pydantic já entregou um datetime ou None
     s.status = data.status
     s.notes = encrypt_field(data.notes)
+
+
+def _session_end(start: datetime, end: Optional[datetime]) -> datetime:
+    """Sem término informado, a sessão dura o padrão (DEFAULT_SESSION_MINUTES)."""
+    return _as_utc(end) if end else _as_utc(start) + timedelta(minutes=DEFAULT_SESSION_MINUTES)
+
+
+async def _check_conflicts(db: AsyncSession, user: User, data: SessionInput, exclude_id: Optional[str] = None) -> None:
+    """PRODUTO: detecção de conflito de horário (antes era possível marcar
+    dois pacientes no mesmo horário sem nenhum aviso).
+
+    Sessões canceladas não contam. A busca usa o índice (owner_id,
+    start_time) e uma janela limitada pela duração máxima de uma sessão; a
+    sobreposição exata é calculada aqui, igual no SQLite e no Postgres.
+    """
+    if data.status == "cancelada" or data.allow_conflict:
+        return
+    start, end = data.start, _session_end(data.start, data.end)
+    stmt = select(Session).where(
+        Session.owner_id == user.user_id,
+        Session.status != "cancelada",
+        Session.start_time < end,
+        Session.start_time >= start - MAX_SESSION_DURATION,
+    )
+    if exclude_id:
+        stmt = stmt.where(Session.id != exclude_id)
+    candidates = (await db.execute(stmt)).scalars().all()
+    conflicts = [c for c in candidates if _session_end(c.start_time, c.end_time) > start]
+    if conflicts:
+        raise HTTPException(status_code=409, detail={
+            "code": "schedule_conflict",
+            "msg": "Já existe sessão neste horário.",
+            "conflicts": [session_public(c) for c in conflicts],
+        })
 
 # ---------------------------------------------------------------------------
 # Rotas da Agenda (Sessions)
@@ -1765,8 +2094,9 @@ async def list_sessions(
 
 @api_router.post("/sessions")
 async def create_session(data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    await _check_conflicts(db, user, data)
     nova_sessao = Session(owner_id=user.user_id)
-    _apply_session_input(nova_sessao, data)
+    await _apply_session_input(db, user, nova_sessao, data)
     db.add(nova_sessao)
     await db.commit()
     await db.refresh(nova_sessao)
@@ -1784,7 +2114,9 @@ async def update_session(sid: str, data: SessionInput, user: User = Depends(get_
     if not s:
         raise HTTPException(status_code=404, detail="Sessão não encontrada")
 
-    _apply_session_input(s, data)
+    # A própria sessão não conta como conflito (remarcar 10 min para frente, por exemplo).
+    await _check_conflicts(db, user, data, exclude_id=sid)
+    await _apply_session_input(db, user, s, data)
 
     await db.commit()
     await db.refresh(s)

@@ -1,3 +1,4 @@
+import base64
 import os
 import sys
 import threading
@@ -964,3 +965,181 @@ def test_sentry_events_are_scrubbed_of_patient_data():
     assert request["headers"]["X-Webhook-Token"] == "[removido]"
     assert request["headers"]["User-Agent"] == "Firefox"
     assert scrubbed["user"] == {"id": "user_1"}
+
+
+# ---------------------------------------------------------------------------
+# Produto: bloqueio por inatividade, rascunho automático e agenda
+# ---------------------------------------------------------------------------
+
+async def _set_session_activity(client, minutes_ago):
+    async with client.session_factory() as db:
+        await db.execute(update(UserSession).values(
+            last_activity_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
+        ))
+        await db.commit()
+
+
+@pytest.mark.anyio
+async def test_manual_lock_blocks_data_until_password_unlock(client):
+    await _register(client, "bloqueio@example.com")
+    assert (await client.post("/api/auth/lock", json={"reason": "manual"})).json() == {"locked": True}
+
+    # Bloqueio de verdade: a API recusa os dados (423), não é só a tela.
+    blocked = await client.get("/api/patients")
+    assert blocked.status_code == 423 and blocked.json()["detail"]["code"] == "session_locked"
+    # /auth/me continua respondendo, para o frontend mostrar a tela de bloqueio.
+    me = (await client.get("/api/auth/me")).json()
+    assert me["locked"] is True and me["has_password"] is True
+
+    wrong = await client.post("/api/auth/unlock", json={"password": "errada-123"})
+    assert wrong.status_code == 403 and wrong.json()["detail"]["remaining"] == 4
+
+    ok = await client.post("/api/auth/unlock", json={"password": "Senha-segura-123"})
+    assert ok.status_code == 200 and ok.json()["user"]["locked"] is False
+    assert (await client.get("/api/patients")).status_code == 200
+
+    actions = [log["action"] for log in (await client.get("/api/audit")).json()["items"]]
+    assert {"bloquear", "desbloquear_falha", "desbloquear"} <= set(actions)
+
+
+@pytest.mark.anyio
+async def test_too_many_wrong_unlocks_end_the_session(client):
+    await _register(client, "forca.bruta@example.com")
+    await client.post("/api/auth/lock", json={"reason": "idle"})
+
+    statuses = [
+        (await client.post("/api/auth/unlock", json={"password": f"chute-{i}-x"})).status_code for i in range(5)
+    ]
+
+    assert statuses == [403, 403, 403, 403, 401]
+    assert (await client.get("/api/auth/me")).status_code == 401  # sessão encerrada, cookie removido
+
+
+@pytest.mark.anyio
+async def test_server_locks_idle_session_even_without_the_browser(client):
+    # Notebook que hibernou: o navegador não avisou, mas o servidor bloqueia sozinho.
+    await _register(client, "ocioso@example.com")
+    await _set_session_activity(client, minutes_ago=12)  # padrão: 10 min + 1 de folga
+
+    assert (await client.get("/api/patients")).status_code == 423
+    assert (await client.get("/api/auth/me")).json()["locked"] is True
+
+
+@pytest.mark.anyio
+async def test_activity_heartbeat_and_lock_settings(client):
+    await _register(client, "atividade@example.com")
+    await _set_session_activity(client, minutes_ago=8)
+    assert (await client.post("/api/auth/activity")).json() == {"ok": True}
+    async with client.session_factory() as db:
+        last = (await db.execute(select(UserSession.last_activity_at))).scalar_one()
+    assert datetime.now(timezone.utc) - server._as_utc(last) < timedelta(seconds=30)
+
+    assert (await client.put("/api/auth/lock-settings", json={"minutes": 7})).status_code == 422
+    assert (await client.put("/api/auth/lock-settings", json={"minutes": 5})).json()["lock_minutes"] == 5
+    await _set_session_activity(client, minutes_ago=7)  # 5 min + 1 de folga já passou
+    assert (await client.get("/api/patients")).status_code == 423
+
+
+@pytest.mark.anyio
+async def test_google_account_unlocks_with_google_only_if_same_email(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    same = {"email": "google.lock@example.com", "email_verified": True, "name": "G"}
+    with patch("server.id_token.verify_oauth2_token", return_value=same):
+        await client.post("/api/auth/google", json={"credential": "t"})
+    await client.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
+    await client.post("/api/auth/lock", json={"reason": "manual"})
+    assert (await client.get("/api/auth/me")).json()["has_password"] is False
+
+    other = {"email": "outra.pessoa@example.com", "email_verified": True}
+    with patch("server.id_token.verify_oauth2_token", return_value=other):
+        assert (await client.post("/api/auth/unlock", json={"credential": "t"})).status_code == 403
+    with patch("server.id_token.verify_oauth2_token", return_value=same):
+        assert (await client.post("/api/auth/unlock", json={"credential": "t"})).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_draft_key_is_per_user_encrypted_uncached_and_rotatable(client):
+    await _register(client, "rascunho@example.com")
+    first = await client.get("/api/auth/draft-key")
+    assert first.headers["cache-control"] == "no-store"
+    key = first.json()["key"]
+    assert len(base64.b64decode(key)) == 32  # AES-256
+    assert (await client.get("/api/auth/draft-key")).json()["key"] == key  # estável entre sessões
+
+    async with client.session_factory() as db:
+        stored = (await db.execute(select(User.draft_key).where(User.email == "rascunho@example.com"))).scalar_one()
+    assert stored.startswith("gAAAAA") and key not in stored  # guardada criptografada
+
+    assert (await client.delete("/api/auth/draft-key")).json() == {"ok": True}
+    assert (await client.get("/api/auth/draft-key")).json()["key"] != key  # rascunhos antigos invalidados
+
+    await _register(client, "outro.rascunho@example.com")
+    assert (await client.get("/api/auth/draft-key")).json()["key"] != key
+
+
+@pytest.mark.anyio
+async def test_dates_without_timezone_are_rejected(client):
+    # Bug corrigido: "09:00" sem fuso virava 09:00 UTC (06:00 no Brasil).
+    patient_id = await _create_patient(client, "fuso@example.com")
+    naive_session = await client.post("/api/sessions", json={"title": "Sessão", "start": "2026-10-02T09:00"})
+    assert naive_session.status_code == 422
+    naive_record = await client.post(f"/api/patients/{patient_id}/records",
+                                     json={"session_datetime": "2026-10-02T09:00", "content": "x"})
+    assert naive_record.status_code == 422
+
+    aware = await client.post("/api/sessions", json={"title": "Sessão", "start": "2026-10-02T09:00:00-03:00"})
+    assert aware.json()["start"].startswith("2026-10-02T12:00:00")  # gravado em UTC, mesmo instante
+
+
+@pytest.mark.anyio
+async def test_session_validation_and_patient_ownership(client):
+    patient_id = await _create_patient(client, "agenda.regras@example.com")
+    base = {"title": "Sessão", "start": "2026-10-05T13:00:00Z"}
+
+    assert (await client.post("/api/sessions", json={**base, "status": "qualquer"})).status_code == 422
+    assert (await client.post("/api/sessions", json={**base, "end": "2026-10-05T12:00:00Z"})).status_code == 422
+    assert (await client.post("/api/sessions", json={**base, "title": "   "})).status_code == 422
+
+    # O nome gravado vem do cadastro do paciente, não do que o navegador mandou.
+    linked = await client.post("/api/sessions", json={**base, "patient_id": patient_id, "patient_name": "Nome falso"})
+    assert linked.json()["patient_name"] == "Paciente Cripto"
+
+    await _register(client, "outro.agenda@example.com")
+    foreign = await client.post("/api/sessions", json={**base, "patient_id": patient_id})
+    assert foreign.status_code == 422  # paciente de outro profissional
+
+
+@pytest.mark.anyio
+async def test_schedule_conflicts_require_confirmation(client):
+    await _register(client, "conflito@example.com")
+    first = (await client.post("/api/sessions", json={
+        "title": "Primeira", "start": "2026-10-06T14:00:00Z", "end": "2026-10-06T14:50:00Z",
+    })).json()
+
+    # Sem término: assume 50 min, então 14:30 se sobrepõe à das 14:00.
+    clash = await client.post("/api/sessions", json={"title": "Segunda", "start": "2026-10-06T14:30:00Z"})
+    assert clash.status_code == 409
+    assert [c["id"] for c in clash.json()["detail"]["conflicts"]] == [first["id"]]
+
+    forced = await client.post("/api/sessions", json={
+        "title": "Segunda", "start": "2026-10-06T14:30:00Z", "allow_conflict": True,
+    })
+    assert forced.status_code == 200
+
+    # Encostada (começa quando a outra termina) não é conflito.
+    touching = await client.post("/api/sessions", json={"title": "Terceira", "start": "2026-10-06T15:20:00Z"})
+    assert touching.status_code == 200
+
+    # Remarcar a própria sessão alguns minutos não conflita com ela mesma...
+    moved = await client.put(f"/api/sessions/{first['id']}", json={
+        "title": "Primeira", "start": "2026-10-06T13:50:00Z", "end": "2026-10-06T14:40:00Z", "allow_conflict": True,
+    })
+    assert moved.status_code == 200
+    # ...e sessões canceladas não bloqueiam o horário.
+    await client.put(f"/api/sessions/{forced.json()['id']}", json={
+        "title": "Segunda", "start": "2026-10-06T14:30:00Z", "status": "cancelada",
+    })
+    retry = await client.put(f"/api/sessions/{first['id']}", json={
+        "title": "Primeira", "start": "2026-10-06T14:00:00Z", "end": "2026-10-06T14:50:00Z",
+    })
+    assert retry.status_code == 200

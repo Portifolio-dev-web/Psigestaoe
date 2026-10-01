@@ -1,118 +1,196 @@
-import { useEffect, useState, useMemo } from "react";
-import api, { formatApiErrorDetail } from "@/lib/api";
-import PatientPicker from "@/components/PatientPicker";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { format } from "date-fns";
+import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
+import { CalendarDays, ChevronLeft, ChevronRight, Clock, Loader2, Plus } from "lucide-react";
+import api, { formatApiErrorDetail } from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
-  ChevronLeft, ChevronRight, Plus, CalendarDays, Clock, Trash2, Link2, Loader2, X,
-} from "lucide-react";
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import SessionDialog from "@/components/agenda/SessionDialog";
+import MonthView from "@/components/agenda/MonthView";
+import TimeGridView from "@/components/agenda/TimeGridView";
+import ListView from "@/components/agenda/ListView";
+import {
+  STATUS, VIEWS, VIEW_IDS, daysBetween, defaultNewSessionStart, formatDateParam, formatTimeRange,
+  parseDateParam, sessionInterval, shiftDate, viewRange, viewTitle,
+} from "@/components/agenda/agendaUtils";
 
-const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
-const MONTHS = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
-const STATUS = {
-  agendada: { label: "Agendada", cls: "bg-blue-100 text-[#1E3A8A]" },
-  realizada: { label: "Realizada", cls: "bg-emerald-100 text-emerald-700" },
-  cancelada: { label: "Cancelada", cls: "bg-red-100 text-red-600" },
-};
-const toLocalInput = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
+// ---------------------------------------------------------------------------
+// AGENDA (produto: visões da agenda).
+//
+// Antes: só uma grade mensal, apertada no celular, sem horários visíveis e
+// sem aviso quando dois pacientes eram marcados no mesmo horário. Havia
+// ainda botões "Conectar Google Calendar/Calendly" que não faziam nada
+// (removidos: um botão que parece funcionar e não funciona quebra a
+// confiança no sistema; voltam quando a integração existir de fato).
+//
+// Agora:
+//   - visões Mês, Semana, Dia e Lista. Padrão: Semana no computador,
+//     Lista no celular;
+//   - visão e data ficam na URL (?visao=semana&data=2026-10-01): recarregar
+//     a página ou voltar da ficha de um paciente mantém onde você estava;
+//   - busca só o período visível (paginação por período, ver backend);
+//   - arrastar uma sessão remarca (Semana/Dia: horário e dia; Mês: dia), com
+//     "Desfazer" no aviso;
+//   - conflito de horário: o servidor recusa e aqui a pessoa decide se salva
+//     mesmo assim (ex.: um horário propositalmente encaixado).
+// ---------------------------------------------------------------------------
+
+const defaultView = () =>
+  (typeof window !== "undefined" && window.matchMedia?.("(min-width: 768px)").matches ? "semana" : "lista");
+
+// Dados completos de uma sessão para o PUT, com novos horários.
+const sessionPayload = (session, start, end) => ({
+  patient_id: session.patient_id || "",
+  patient_name: session.patient_name || "",
+  title: session.title,
+  start: start.toISOString(),
+  end: end ? end.toISOString() : null,
+  status: session.status,
+  notes: session.notes || "",
+});
 
 export default function Agenda() {
-  const [cursor, setCursor] = useState(new Date());
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = VIEW_IDS.includes(searchParams.get("visao")) ? searchParams.get("visao") : defaultView();
+  const dateParam = searchParams.get("data");
+  const date = useMemo(() => parseDateParam(dateParam), [dateParam]);
+  const range = useMemo(() => viewRange(view, date), [view, date]);
+
   const [sessions, setSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [upcoming, setUpcoming] = useState([]);
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState(null);
+  const [dialog, setDialog] = useState({ open: false, initial: null });
   const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(null); // { conflicts, resolve }
+  const requestSeq = useRef(0);
 
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
+  // `replace`: navegar pelos períodos não enche o histórico do navegador.
+  const navigateTo = useCallback((nextView, nextDate) => {
+    setSearchParams({ visao: nextView, data: formatDateParam(nextDate) }, { replace: true });
+  }, [setSearchParams]);
 
-  // ESCALA: a agenda busca só o que mostra.
-  // Antes: GET /sessions trazia TODAS as sessões desde o primeiro dia de uso,
-  // e GET /patients trazia todos os pacientes só para a lista suspensa.
-  // Agora: o mês visível (início do mês até o início do seguinte) e, à
-  // parte, as 8 próximas sessões. O seletor de paciente busca sob demanda.
-  const load = () => {
-    const monthStart = new Date(year, month, 1);
-    const nextMonthStart = new Date(year, month + 1, 1);
-    const range = new URLSearchParams({ start: monthStart.toISOString(), end: nextMonthStart.toISOString() });
-    api.get(`/sessions?${range}`).then(({ data }) => setSessions(data)).catch(() => {});
-    const next = new URLSearchParams({ start: new Date().toISOString(), limit: 8 });
-    api.get(`/sessions?${next}`).then(({ data }) => setUpcoming(data)).catch(() => {});
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(); }, [year, month]);
-  const grid = useMemo(() => {
-    const first = new Date(year, month, 1);
-    const startDay = first.getDay();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const cells = [];
-    for (let i = 0; i < startDay; i++) cells.push(null);
-    for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
-    return cells;
-  }, [year, month]);
-
-  const sessionsByDay = useMemo(() => {
-    const map = {};
-    sessions.forEach((s) => {
-      if (!s.start) return;
-      const d = new Date(s.start);
-      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      (map[key] = map[key] || []).push(s);
-    });
-    return map;
-  }, [sessions]);
-
-  const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  const isToday = (d) => dayKey(d) === dayKey(new Date());
-
-  const openNew = (date) => {
-    const base = date || new Date();
-    base.setHours(9, 0, 0, 0);
-    setForm({ id: null, patient_id: "", patient_name: "", title: "Sessão", start: toLocalInput(base), end: "", status: "agendada", notes: "" });
-    setOpen(true);
-  };
-  const openEdit = (s) => {
-    setForm({ ...s, start: s.start ? s.start.slice(0, 16) : "", end: s.end ? s.end.slice(0, 16) : "" });
-    setOpen(true);
-  };
-
-  const save = async () => {
-    if (!form.title.trim()) { toast.warning("Informe um título."); return; }
-    setSaving(true);
-    // O nome do paciente já vem do seletor (PatientPicker) junto com o id.
-    const payload = { ...form, patient_name: form.patient_id ? form.patient_name : "" };
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
     try {
-      if (form.id) await api.put(`/sessions/${form.id}`, payload);
-      else await api.post("/sessions", payload);
-      toast.success("Sessão salva.");
-      setOpen(false);
-      load();
+      const params = new URLSearchParams({ start: range.start.toISOString(), end: range.end.toISOString(), limit: 1000 });
+      const [periodResponse, upcomingResponse] = await Promise.all([
+        api.get(`/sessions?${params}`),
+        api.get(`/sessions?${new URLSearchParams({ start: new Date().toISOString(), limit: 8 })}`),
+      ]);
+      if (seq !== requestSeq.current) return; // a pessoa já mudou de período
+      setSessions(periodResponse.data);
+      setUpcoming(upcomingResponse.data);
     } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+      if (seq === requestSeq.current && ![401, 423].includes(err.response?.status)) {
+        toast.error("Não foi possível carregar a agenda.");
+      }
     } finally {
-      setSaving(false);
+      if (seq === requestSeq.current) setLoading(false);
+    }
+  }, [range]);
+
+  useEffect(() => { load(); }, [load]);
+
+  /**
+   * Salva (cria ou altera) tratando conflito de horário: se o servidor
+   * responder 409, pergunta antes de salvar por cima ("allow_conflict").
+   * Devolve true se salvou.
+   */
+  const attemptSave = useCallback(async (id, payload, { successMessage, undo } = {}) => {
+    try {
+      if (id) await api.put(`/sessions/${id}`, payload);
+      else await api.post("/sessions", payload);
+      toast.success(successMessage || "Sessão salva.", undo ? { action: { label: "Desfazer", onClick: undo } } : undefined);
+      load();
+      return true;
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409 && detail?.code === "schedule_conflict") {
+        return new Promise((resolve) => {
+          // Só a PRIMEIRA resposta vale: o clique em "Salvar mesmo assim" também
+          // fecha o diálogo (onOpenChange), que responderia "não" logo depois.
+          let answered = false;
+          setConflict({
+            conflicts: detail.conflicts,
+            resolve: async (confirmed) => {
+              if (answered) return;
+              answered = true;
+              setConflict(null);
+              if (!confirmed) {
+                load(); // desfaz a remarcação otimista do arraste
+                resolve(false);
+                return;
+              }
+              resolve(await attemptSave(id, { ...payload, allow_conflict: true }, { successMessage, undo }));
+            },
+          });
+        });
+      }
+      if (![401, 423].includes(err.response?.status)) {
+        toast.error(formatApiErrorDetail(detail) || err.message);
+      }
+      load();
+      return false;
+    }
+  }, [load]);
+
+  const submitDialog = async (id, payload) => {
+    setSaving(true);
+    const saved = await attemptSave(id, payload);
+    setSaving(false);
+    if (saved) setDialog({ open: false, initial: null });
+  };
+
+  const deleteSession = async (id) => {
+    const session = sessions.find((s) => s.id === id) || dialog.initial;
+    try {
+      await api.delete(`/sessions/${id}`);
+      setDialog({ open: false, initial: null });
+      load();
+      toast.success("Sessão removida.", {
+        // Recria a sessão com os mesmos dados (pode ganhar um novo id).
+        action: session ? {
+          label: "Desfazer",
+          onClick: () => {
+            const { start, end } = sessionInterval(session);
+            attemptSave(null, { ...sessionPayload(session, start, session.end ? end : null), allow_conflict: true },
+              { successMessage: "Sessão restaurada." });
+          },
+        } : undefined,
+      });
+    } catch (err) {
+      if (![401, 423].includes(err.response?.status)) toast.error("Erro ao remover.");
     }
   };
 
-  const remove = async () => {
-    try {
-      await api.delete(`/sessions/${form.id}`);
-      toast.success("Sessão removida.");
-      setOpen(false);
-      load();
-    } catch (e) { toast.error("Erro ao remover."); }
+  // Arrastar-e-soltar: remarca mantendo a duração, com "Desfazer".
+  const moveSession = (session, newStart) => {
+    const { start: oldStart, end: oldEnd } = sessionInterval(session);
+    if (newStart.getTime() === oldStart.getTime()) return;
+    const newEnd = new Date(newStart.getTime() + (oldEnd - oldStart));
+    // Otimista: a sessão aparece no novo lugar na hora; se falhar/cancelar, a agenda recarrega.
+    setSessions((list) => list.map((s) => (s.id === session.id ? { ...s, start: newStart.toISOString(), end: newEnd.toISOString() } : s)));
+    attemptSave(session.id, sessionPayload(session, newStart, newEnd), {
+      successMessage: `Sessão remarcada para ${format(newStart, "EEE, dd/MM 'às' HH:mm", { locale: ptBR })}.`,
+      undo: () => attemptSave(session.id, { ...sessionPayload(session, oldStart, session.end ? oldEnd : null), allow_conflict: true },
+        { successMessage: "Remarcação desfeita." }),
+    });
+  };
+
+  const openNew = (start) => setDialog({ open: true, initial: { start } });
+  const openSession = (session) => setDialog({ open: true, initial: session });
+
+  const viewProps = {
+    sessions, onCreateAt: openNew, onOpenSession: openSession, onMoveSession: moveSession,
+    onOpenDay: (day) => navigateTo("dia", day),
   };
 
   return (
@@ -122,135 +200,94 @@ export default function Agenda() {
           <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Agenda</h1>
           <p className="mt-1 text-sm text-slate-500">Gerencie horários e sessões</p>
         </div>
-        <Button onClick={() => openNew()} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-session-btn">
+        <Button onClick={() => openNew(defaultNewSessionStart(date))} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-session-btn">
           <Plus className="h-4 w-4" /> Nova sessão
         </Button>
       </div>
 
-      {/* Integration placeholders */}
-      <div className="flex flex-wrap gap-2">
-        <button className="flex items-center gap-2 rounded-full border border-dashed border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-500 transition-colors hover:border-[#0284C7] hover:text-[#0284C7]"
-          onClick={() => toast.info("Integração Google Calendar: configure o webhook em Privacidade & LGPD (em breve).")} data-testid="gcal-hook">
-          <Link2 className="h-3.5 w-3.5" /> Conectar Google Calendar
-        </button>
-        <button className="flex items-center gap-2 rounded-full border border-dashed border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-500 transition-colors hover:border-[#0284C7] hover:text-[#0284C7]"
-          onClick={() => toast.info("Integração Calendly: gancho de API preparado (em breve).")} data-testid="calendly-hook">
-          <Link2 className="h-3.5 w-3.5" /> Conectar Calendly
-        </button>
-      </div>
-
       <Card className="border-slate-200 p-4 shadow-sm sm:p-6">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-head text-lg font-bold text-[#0F172A]">{MONTHS[month]} {year}</h2>
-          <div className="flex items-center gap-1">
-            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor(new Date(year, month - 1, 1))} data-testid="prev-month"><ChevronLeft className="h-4 w-4" /></Button>
-            <Button variant="ghost" size="sm" className="text-xs" onClick={() => setCursor(new Date())}>Hoje</Button>
-            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor(new Date(year, month + 1, 1))} data-testid="next-month"><ChevronRight className="h-4 w-4" /></Button>
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => navigateTo(view, shiftDate(view, date, -1))}
+              aria-label="Período anterior" data-testid="prev-period"><ChevronLeft className="h-4 w-4" /></Button>
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => navigateTo(view, new Date())}>Hoje</Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => navigateTo(view, shiftDate(view, date, 1))}
+              aria-label="Próximo período" data-testid="next-period"><ChevronRight className="h-4 w-4" /></Button>
+            <h2 className="ml-1 font-head text-lg font-bold text-[#0F172A]" aria-live="polite">{viewTitle(view, date)}</h2>
+            {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" aria-label="Carregando" />}
+          </div>
+          <div className="inline-flex self-start rounded-lg bg-slate-100 p-1" role="group" aria-label="Visão da agenda">
+            {VIEWS.map((v) => (
+              <button key={v.id} type="button" onClick={() => navigateTo(v.id, date)} aria-pressed={view === v.id}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  view === v.id ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-500 hover:text-[#0F172A]"
+                }`} data-testid={`view-${v.id}`}>
+                {v.label}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="grid grid-cols-7 gap-1 text-center">
-          {WEEKDAYS.map((w) => <div key={w} className="py-2 text-xs font-medium uppercase tracking-wide text-slate-400">{w}</div>)}
-          {grid.map((d, i) => {
-            if (!d) return <div key={i} />;
-            const list = sessionsByDay[dayKey(d)] || [];
-            return (
-              <button key={i} onClick={() => openNew(new Date(d))}
-                className={`min-h-[84px] rounded-md border p-1.5 text-left transition-colors hover:bg-slate-50 ${isToday(d) ? "border-[#1E3A8A] bg-blue-50/40" : "border-slate-100"}`}
-                data-testid={`day-${d.getDate()}`}>
-                <span className={`text-xs font-medium ${isToday(d) ? "text-[#1E3A8A]" : "text-slate-500"}`}>{d.getDate()}</span>
-                <div className="mt-1 space-y-1">
-                  {list.slice(0, 2).map((s) => (
-                    <div key={s.id} onClick={(e) => { e.stopPropagation(); openEdit(s); }}
-                      className={`truncate rounded px-1 py-0.5 text-[10px] ${STATUS[s.status]?.cls || STATUS.agendada.cls}`}>
-                      {new Date(s.start).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} {s.title}
-                    </div>
-                  ))}
-                  {list.length > 2 && <div className="text-[10px] text-slate-400">+{list.length - 2}</div>}
+        {view === "mes" && <MonthView date={date} {...viewProps} />}
+        {(view === "semana" || view === "dia") && <TimeGridView days={daysBetween(range.start, range.end)} {...viewProps} />}
+        {view === "lista" && <ListView sessions={sessions} onOpenSession={openSession} />}
+      </Card>
+
+      {/* Próximas sessões (na visão Lista seria repetido). */}
+      {view !== "lista" && (
+        <Card className="border-slate-200 p-6 shadow-sm">
+          <div className="flex items-center gap-2">
+            <CalendarDays className="h-4 w-4 text-[#1E3A8A]" />
+            <h2 className="font-head text-lg font-bold text-[#0F172A]">Próximas sessões</h2>
+          </div>
+          <div className="mt-4 space-y-2">
+            {upcoming.length === 0 && <p className="py-6 text-center text-sm text-slate-400">Nenhuma sessão agendada.</p>}
+            {upcoming.map((s) => (
+              <button key={s.id} type="button" onClick={() => openSession(s)}
+                className="flex w-full items-center gap-3 rounded-md border border-slate-100 p-3 text-left transition-colors hover:bg-slate-50">
+                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F0F4F8] text-[#1E3A8A]"><Clock className="h-4 w-4" /></div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-[#0F172A]">{s.title}{s.patient_name ? ` · ${s.patient_name}` : ""}</p>
+                  <p className="text-xs text-slate-500">
+                    {format(new Date(s.start), "EEE, dd 'de' MMM", { locale: ptBR })} · {formatTimeRange(s)}
+                  </p>
                 </div>
+                <Badge className={`${STATUS[s.status]?.cls} hover:opacity-100`}>{STATUS[s.status]?.label}</Badge>
               </button>
-            );
-          })}
-        </div>
-      </Card>
+            ))}
+          </div>
+        </Card>
+      )}
 
-      {/* Upcoming list */}
-      <Card className="border-slate-200 p-6 shadow-sm">
-        <div className="flex items-center gap-2">
-          <CalendarDays className="h-4 w-4 text-[#1E3A8A]" />
-          <h2 className="font-head text-lg font-bold text-[#0F172A]">Próximas sessões</h2>
-        </div>
-        <div className="mt-4 space-y-2">
-          {upcoming.length === 0 && (
-            <p className="py-6 text-center text-sm text-slate-400">Nenhuma sessão agendada.</p>
-          )}
-          {upcoming.map((s) => (
-            <button key={s.id} onClick={() => openEdit(s)} className="flex w-full items-center gap-3 rounded-md border border-slate-100 p-3 text-left transition-colors hover:bg-slate-50">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F0F4F8] text-[#1E3A8A]"><Clock className="h-4 w-4" /></div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-[#0F172A]">{s.title}{s.patient_name ? ` · ${s.patient_name}` : ""}</p>
-                <p className="text-xs text-slate-500">{new Date(s.start).toLocaleString("pt-BR", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</p>
-              </div>
-              <Badge className={`${STATUS[s.status]?.cls} hover:opacity-100`}>{STATUS[s.status]?.label}</Badge>
-            </button>
-          ))}
-        </div>
-      </Card>
+      <SessionDialog open={dialog.open} initial={dialog.initial} saving={saving}
+        onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submitDialog} onDelete={deleteSession} />
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="font-head">{form?.id ? "Editar sessão" : "Nova sessão"}</DialogTitle>
-            <DialogDescription>Agende ou edite uma sessão clínica.</DialogDescription>
-          </DialogHeader>
-          {form && (
-            <div className="space-y-4">
+      {/* Conflito de horário: decisão da pessoa, com o que já está marcado. */}
+      <AlertDialog open={Boolean(conflict)} onOpenChange={(open) => { if (!open) conflict?.resolve(false); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Conflito de horário</AlertDialogTitle>
+            <AlertDialogDescription asChild>
               <div>
-                <Label>Título</Label>
-                <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="mt-1.5" data-testid="session-title-input" />
+                <p>Já existe sessão neste horário:</p>
+                <ul className="mt-2 space-y-1" data-testid="conflict-list">
+                  {conflict?.conflicts.map((c) => (
+                    <li key={c.id} className="rounded-md bg-slate-50 px-2 py-1 text-sm text-slate-700">
+                      {format(new Date(c.start), "dd/MM", { locale: ptBR })} · {formatTimeRange(c)} · {c.patient_name || c.title}
+                    </li>
+                  ))}
+                </ul>
               </div>
-              <div>
-                <Label>Paciente</Label>
-                <PatientPicker value={form.patient_id} valueLabel={form.patient_name}
-                  onChange={(p) => setForm({ ...form, patient_id: p ? p.id : "", patient_name: p ? p.full_name : "" })} />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label>Início</Label>
-                  <Input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className="mt-1.5" data-testid="session-start-input" />
-                </div>
-                <div>
-                  <Label>Fim</Label>
-                  <Input type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} className="mt-1.5" />
-                </div>
-              </div>
-              <div>
-                <Label>Status</Label>
-                <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>
-                  <SelectTrigger className="mt-1.5" data-testid="session-status-select"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="agendada">Agendada</SelectItem>
-                    <SelectItem value="realizada">Realizada</SelectItem>
-                    <SelectItem value="cancelada">Cancelada</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label>Notas</Label>
-                <Textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="mt-1.5" />
-              </div>
-            </div>
-          )}
-          <DialogFooter className="flex-row justify-between sm:justify-between">
-            {form?.id ? (
-              <Button variant="ghost" onClick={remove} className="gap-2 text-red-500 hover:bg-red-50 hover:text-red-600" data-testid="delete-session-btn"><Trash2 className="h-4 w-4" /> Remover</Button>
-            ) : <span />}
-            <Button onClick={save} disabled={saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="save-session-btn">
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => conflict?.resolve(false)}>Voltar</AlertDialogCancel>
+            <AlertDialogAction onClick={() => conflict?.resolve(true)} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="confirm-conflict">
+              Salvar mesmo assim
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

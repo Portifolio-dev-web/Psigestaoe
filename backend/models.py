@@ -79,6 +79,18 @@ class User(Base):
     webhook_token_hint = Column(String, default="")
     webhook_token_created_at = Column(DateTime(timezone=True), nullable=True)
 
+    # PRODUTO (bloqueio por inatividade): minutos sem uso até a tela travar e
+    # exigir a senha de novo. Escolhido pelo profissional em Configurações
+    # (5, 10, 15 ou 30). Vale no navegador E no servidor (ver server.py).
+    lock_minutes = Column(Integer, default=10)
+
+    # PRODUTO (rascunho automático): chave AES-256 aleatória deste profissional,
+    # usada pelo NAVEGADOR para criptografar os rascunhos de prontuário que
+    # ficam guardados no próprio computador. Sem login não há chave, então um
+    # rascunho copiado do disco é ilegível. Trocar a chave (Configurações)
+    # inutiliza os rascunhos de TODOS os aparelhos, ex.: notebook perdido.
+    draft_key = Column(Text, nullable=True)  # [CRIPTOGRAFADO]
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     # Relacionamentos
@@ -94,6 +106,18 @@ class UserSession(Base):
     user_id = Column(String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), default=now_utc)
+
+    # PRODUTO (bloqueio por inatividade), controlado NO SERVIDOR:
+    # - last_activity_at: último uso real (requisições e o "sinal de vida" que
+    #   o navegador manda enquanto a pessoa mexe na tela);
+    # - locked_at: quando a sessão foi bloqueada. Bloqueada, ela só aceita
+    #   desbloqueio e saída: recarregar a página ou chamar a API direto não
+    #   adianta, o bloqueio não é só visual;
+    # - unlock_failures: senhas erradas na tela de bloqueio. No limite, a
+    #   sessão é encerrada (impede força bruta de quem achou a tela travada).
+    last_activity_at = Column(DateTime(timezone=True), nullable=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    unlock_failures = Column(Integer, default=0)
 
     user = relationship("User", back_populates="sessions")
 

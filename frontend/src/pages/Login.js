@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,11 @@ const LOGIN_GRADIENT_COLORS = ["#0F2C59", "#1E3A8A", "#0369A1", "#1D4ED8"];
 export default function Login() {
   const { setUser } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // PRODUTO: depois de entrar, volta para a página onde a sessão expirou
+  // (ex.: a ficha do paciente com uma anotação em rascunho), se houver.
+  const from = location.state?.from;
+  const afterLogin = from ? `${from.pathname}${from.search || ""}` : "/dashboard";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -34,7 +39,7 @@ export default function Login() {
       const { data } = await api.post("/auth/login", { email, password });
       setUser(data.user);
       toast.success("Bem-vindo(a) de volta!");
-      navigate("/dashboard", { replace: true });
+      navigate(afterLogin, { replace: true });
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     } finally {
@@ -52,7 +57,7 @@ export default function Login() {
       });
       setUser(data.user);
       toast.success("Autenticação com Google efetuada com sucesso!");
-      navigate("/dashboard", { replace: true });
+      navigate(afterLogin, { replace: true });
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || "Erro na autenticação do Google");
     } finally {

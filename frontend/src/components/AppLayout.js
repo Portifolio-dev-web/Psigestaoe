@@ -1,7 +1,8 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, X, Stethoscope,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, X, Stethoscope, Lock,
 } from "lucide-react";
 import { useState } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -16,6 +17,7 @@ const nav = [
 
 export default function AppLayout() {
   const { user, logout } = useAuth();
+  const { lockNow } = useIdleLock();
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
 
@@ -96,6 +98,7 @@ export default function AppLayout() {
             <button
               className="absolute right-3 top-4 text-white/70"
               onClick={() => setOpen(false)}
+              aria-label="Fechar menu"
               data-testid="close-sidebar"
             >
               <X className="h-5 w-5" />
@@ -110,6 +113,7 @@ export default function AppLayout() {
           <button
             className="lg:hidden text-slate-600"
             onClick={() => setOpen(true)}
+            aria-label="Abrir menu"
             data-testid="open-sidebar"
           >
             <Menu className="h-5 w-5" />
@@ -119,6 +123,11 @@ export default function AppLayout() {
             {/* Antes: "(AES-256)", algoritmo que o sistema não usa. Ver legal.py, item 7. */}
             <Shield className="h-3.5 w-3.5" /> Dados criptografados
           </div>
+          {/* PRODUTO: travar a tela ao sair da sala, sem esperar a inatividade. */}
+          <Button variant="outline" size="sm" onClick={() => lockNow("manual")}
+            className="gap-1.5 border-slate-300 text-slate-600" title="Bloquear a tela agora" aria-label="Bloquear a tela agora" data-testid="lock-now-btn">
+            <Lock className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Bloquear</span>
+          </Button>
         </header>
         <main className="flex-1 px-4 py-6 lg:px-8">
           <Outlet />

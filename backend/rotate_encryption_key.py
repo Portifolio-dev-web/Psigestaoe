@@ -34,7 +34,7 @@ from sqlalchemy import select
 
 from crypto import dev_fallback_key, is_fernet_token, legacy_key_from_secret
 from database import AsyncSessionLocal
-from models import Patient, Record, RecordVersion, Session
+from models import Patient, Record, RecordVersion, Session, User
 
 # Tabela -> colunas criptografadas. Precisa acompanhar os encrypt_field() do server.py.
 #
@@ -48,6 +48,8 @@ ENCRYPTED_COLUMNS = {
     Record: ("content", "diagnosis"),
     RecordVersion: ("content", "diagnosis"),
     Session: ("title", "patient_name", "notes"),
+    # Produto: chave dos rascunhos do navegador (guardada criptografada no banco).
+    User: ("draft_key",),
 }
 
 
@@ -117,7 +119,7 @@ async def migrate(apply: bool) -> None:
 
 
 def row_id(row) -> str:
-    return getattr(row, "id", None) or getattr(row, "version_id", "?")
+    return getattr(row, "id", None) or getattr(row, "version_id", None) or getattr(row, "user_id", "?")
 
 
 if __name__ == "__main__":

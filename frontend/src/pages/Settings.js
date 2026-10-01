@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { clearUserDrafts, forgetDraftKey } from "@/lib/drafts";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -9,10 +10,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
-  FileSignature, Archive,
+  FileSignature, Archive, TimerReset,
 } from "lucide-react";
 
 // Rótulos das ações gravadas pelo backend em log_audit(). Ações novas da etapa
@@ -24,10 +26,12 @@ const ACTION_LABEL = {
   arquivar: "Arquivamento", desarquivar: "Reativação",
   consentir: "Consentimento", revogar: "Revogação",
   aceitar: "Aceite", gerar_token: "Novo token",
+  // Produto: bloqueio por inatividade.
+  bloquear: "Bloqueio", desbloquear: "Desbloqueio", desbloquear_falha: "Senha incorreta", encerrar: "Encerramento",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
-  termos: "Política", termo: "Termo", integracao: "Integração",
+  termos: "Política", termo: "Termo", integracao: "Integração", sessao: "Sessão",
 };
 
 const fmtDateTime = (s) => (s
@@ -163,6 +167,86 @@ function ConsentTermEditor() {
   );
 }
 
+// PRODUTO: segurança da sessão neste e em outros aparelhos.
+// - Bloqueio por inatividade: tempo até a tela travar e pedir a senha. Vale
+//   no navegador e no servidor (a sessão fica bloqueada de verdade).
+// - Rascunhos: as anotações não salvas ficam criptografadas em cada aparelho.
+//   Se um aparelho for perdido, trocar a chave torna os rascunhos dele
+//   ilegíveis, mesmo para quem conseguir entrar na conta depois.
+const LOCK_OPTIONS = [5, 10, 15, 30];
+
+function SessionSecurity() {
+  const { user, setUser } = useAuth();
+  const [saving, setSaving] = useState(false);
+
+  const changeLockMinutes = async (value) => {
+    setSaving(true);
+    try {
+      const { data } = await api.put("/auth/lock-settings", { minutes: Number(value) });
+      setUser((current) => ({ ...current, ...data }));
+      toast.success(`A tela será bloqueada após ${value} minutos sem uso.`);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const invalidateDrafts = async () => {
+    const confirmed = window.confirm(
+      "Isto apaga a chave dos rascunhos: anotações não salvas em QUALQUER aparelho (inclusive este) deixam de poder ser recuperadas. Continuar?",
+    );
+    if (!confirmed) return;
+    try {
+      await api.delete("/auth/draft-key");
+      forgetDraftKey();
+      clearUserDrafts(user.user_id);
+      toast.success("Rascunhos invalidados em todos os dispositivos.");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex items-center gap-2">
+        <TimerReset className="h-4 w-4 text-[#1E3A8A]" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Sessão e rascunhos</h2>
+      </div>
+      <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div>
+          <Label htmlFor="lock-minutes" className="text-slate-700">Bloquear a tela após</Label>
+          <Select value={String(user?.lock_minutes || 10)} onValueChange={changeLockMinutes} disabled={saving}>
+            <SelectTrigger id="lock-minutes" className="mt-1.5 w-full sm:w-56" data-testid="lock-minutes-select">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {LOCK_OPTIONS.map((minutes) => (
+                <SelectItem key={minutes} value={String(minutes)}>{minutes} minutos sem uso</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="mt-2 text-xs leading-relaxed text-slate-500">
+            Depois desse tempo a tela trava e pede a senha (ou o Google). O que estava aberto continua lá após
+            desbloquear. Use também o botão "Bloquear" no topo ao sair da sala.
+          </p>
+        </div>
+        <div>
+          <p className="text-sm font-medium text-slate-700">Rascunhos de anotações</p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+            Enquanto você escreve, a anotação é guardada criptografada neste aparelho, para não se perder se a
+            sessão expirar ou a internet cair. Rascunhos somem ao salvar e vencem em 7 dias.
+          </p>
+          <Button variant="outline" size="sm" onClick={invalidateDrafts}
+            className="mt-3 border-red-200 text-red-600 hover:bg-red-50" data-testid="invalidate-drafts-btn">
+            Invalidar rascunhos em todos os aparelhos
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const [logs, setLogs] = useState(null);
@@ -229,6 +313,7 @@ export default function Settings() {
 
       <ProfessionalProfile />
       <ConsentTermEditor />
+      <SessionSecurity />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {items.map((it) => (

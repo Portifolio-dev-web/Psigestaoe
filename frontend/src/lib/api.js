@@ -1,5 +1,8 @@
 export const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Rotas em que 401 é resposta normal (senha errada / visitante sem login).
+const PUBLIC_AUTH_PATHS = ["/auth/me", "/auth/login", "/auth/register", "/auth/google"];
+
 async function doFetch(url, opts, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -56,6 +59,21 @@ async function request(method, path, body) {
     // aparece sozinha, em vez de o usuário ver erros soltos em cada tela.
     if (res.status === 403 && data?.detail?.code === "terms_required") {
       window.dispatchEvent(new Event("psi:terms-required"));
+    }
+    // PRODUTO (bloqueio por inatividade): o servidor bloqueou a sessão (pode
+    // ter sido em outra aba, ou porque o computador hibernou). O AuthContext
+    // mostra a tela de bloqueio POR CIMA da tela atual, sem perder o que
+    // estava aberto (ex.: uma anotação sendo escrita).
+    if (res.status === 423 && data?.detail?.code === "session_locked") {
+      window.dispatchEvent(new Event("psi:session-locked"));
+    }
+    // PRODUTO: sessão expirada/encerrada no meio do uso. Antes, cada tela só
+    // mostrava "erro" e a pessoa ficava presa; agora o app volta ao login
+    // lembrando a página de origem (e os rascunhos continuam guardados).
+    // As rotas públicas de autenticação respondem 401 por senha errada e
+    // não devem disparar isso.
+    if (res.status === 401 && !PUBLIC_AUTH_PATHS.includes(path)) {
+      window.dispatchEvent(new Event("psi:session-expired"));
     }
     const err = new Error(`Request failed with status ${res.status}`);
     err.response = { status: res.status, data };

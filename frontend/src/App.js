@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useRef } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import Login from "@/pages/Login";
@@ -13,6 +13,8 @@ import Settings from "@/pages/Settings";
 import PrivacyPolicy from "@/pages/PrivacyPolicy";
 import AppLayout from "@/components/AppLayout";
 import TermsGate from "@/components/TermsGate";
+import LockScreen from "@/components/LockScreen";
+import { IdleLockProvider } from "@/context/IdleLockContext";
 import { Loader2 } from "lucide-react";
 
 function LoadingScreen() {
@@ -23,25 +25,53 @@ function LoadingScreen() {
   );
 }
 
-// O AuthCallback antigo foi totalmente removido daqui, 
+// O AuthCallback antigo foi totalmente removido daqui,
 // assim como os imports do useRef e useLocation, e do api, que não são mais necessários neste nível.
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
+  // Se o sistema já foi exibido nesta aba, um bloqueio NÃO o desmonta (ver abaixo).
+  const appMountedRef = useRef(false);
+
   if (loading) return <LoadingScreen />;
-  if (!user) return <Navigate to="/login" replace />;
+  // PRODUTO: lembra a página de origem; depois do login a pessoa volta para
+  // ela (ex.: sessão expirada no meio de uma anotação -> volta à ficha, onde
+  // o rascunho está esperando).
+  if (!user) return <Navigate to="/login" replace state={{ from: location }} />;
+  // Sessão já bloqueada ao abrir/recarregar a página: não há o que preservar,
+  // então só a tela de bloqueio (o servidor recusaria os dados de qualquer jeito).
+  if (user.locked && !appMountedRef.current) return <LockScreen />;
   // Conformidade (item 16): sem o aceite da versão VIGENTE da Política de
   // Privacidade, nenhuma tela do sistema é exibida, só a tela de aceite.
   // O backend aplica a mesma regra (get_active_user), então isto é a
   // experiência do usuário, não a única barreira.
   if (!user.terms_accepted) return <TermsGate />;
-  return children;
+
+  appMountedRef.current = true;
+  const locked = Boolean(user.locked);
+  // PRODUTO (bloqueio por inatividade): bloqueio DURANTE o uso. O sistema
+  // continua montado por baixo (nada do que estava aberto se perde), mas
+  // invisível e `inert`: sem foco de teclado, cliques ou leitor de tela.
+  return (
+    <IdleLockProvider>
+      <div inert={locked} aria-hidden={locked || undefined} className={locked ? "invisible" : undefined}>
+        {children}
+      </div>
+      {locked && <LockScreen />}
+    </IdleLockProvider>
+  );
 }
 
 function PublicOnly({ children }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) return <LoadingScreen />;
-  if (user) return <Navigate to="/dashboard" replace />;
+  if (user) {
+    // Volta para onde a pessoa estava quando precisou entrar de novo.
+    const from = location.state?.from;
+    return <Navigate to={from ? `${from.pathname}${from.search || ""}` : "/dashboard"} replace />;
+  }
   return children;
 }
 

@@ -2,22 +2,20 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { motion } from "framer-motion";
+import { useAuth } from "@/context/AuthContext";
+import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
+import { formatDateTime } from "@/lib/datetime";
+import RecordEditorDialog from "@/components/RecordEditorDialog";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Save, Phone, Mail,
-  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive
+  ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Phone, Mail,
+  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload
 } from "lucide-react";
 
 const fmtDate = (s) => {
@@ -25,7 +23,7 @@ const fmtDate = (s) => {
   const [year, month, day] = String(s).slice(0, 10).split("-");
   return year && month && day ? `${day}/${month}/${year}` : "—";
 };
-const fmtDateTime = (s) => (s ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+const fmtDateTime = formatDateTime; // sempre na hora local (ver lib/datetime.js)
 // Termo por profissional: o status do consentimento mostra a EVIDÊNCIA
 // (quando foi dado ou revogado), não só "Concordo"/"Não concordo".
 const consentLabel = (p) => {
@@ -35,15 +33,10 @@ const consentLabel = (p) => {
   return p.consent_revoked_at ? `Revogado em ${fmtDateTime(p.consent_revoked_at)}` : "Não concordo";
 };
 
-const nowLocal = () => {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-  return d.toISOString().slice(0, 16);
-};
-
 export default function PatientDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [patient, setPatient] = useState(null);
   const [records, setRecords] = useState([]);
   // ESCALA: a evolução clínica vem paginada (20 por vez, a mais recente
@@ -53,8 +46,9 @@ export default function PatientDetail() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingRec, setEditingRec] = useState(null);
-  const [rec, setRec] = useState({ session_datetime: nowLocal(), content: "", diagnosis: "" });
-  const [saving, setSaving] = useState(false);
+  // PRODUTO (rascunho automático): força recalcular os avisos de rascunho
+  // depois que o editor fecha (um rascunho pode ter sido criado ou apagado).
+  const [, setDraftsVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -67,12 +61,23 @@ export default function PatientDetail() {
       setRecordsCursor(r.data.next_cursor);
       setRecordsTotal(r.data.total);
     } catch (e) {
-      toast.error("Paciente não encontrado.");
-      navigate("/pacientes");
+      // Antes QUALQUER erro dizia "Paciente não encontrado" e voltava para a
+      // lista. Com a tela bloqueada (423) ou a sessão expirada (401), isso
+      // tirava a pessoa da ficha que ela estava usando: agora só sai no 404.
+      if (e.response?.status === 404) {
+        toast.error("Paciente não encontrado.");
+        navigate("/pacientes");
+      }
     }
   }, [id, navigate]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { purgeExpiredDrafts(); }, []); // minimização: rascunhos com mais de 7 dias somem
+
+  // Avisos de anotações não salvas neste dispositivo (só metadados, sem descriptografar).
+  const userId = user?.user_id;
+  const newDraft = userId ? draftInfo(draftSlot(userId, "record-new", id)) : null;
+  const editDraftOf = (recordId) => (userId ? draftInfo(draftSlot(userId, "record-edit", recordId)) : null);
 
   const loadMoreRecords = async () => {
     if (!recordsCursor) return;
@@ -90,35 +95,18 @@ export default function PatientDetail() {
     }
   };
 
+  // O editor (com rascunho automático) fica em components/RecordEditorDialog.js.
   const openNew = () => {
     setEditingRec(null);
-    setRec({ session_datetime: nowLocal(), content: "", diagnosis: "" });
     setEditorOpen(true);
   };
   const openEdit = (r) => {
     setEditingRec(r);
-    setRec({ session_datetime: (r.session_datetime || "").slice(0, 16), content: r.content, diagnosis: r.diagnosis });
     setEditorOpen(true);
   };
-
-  const saveRecord = async () => {
-    if (!rec.content.trim()) { toast.warning("A anotação clínica não pode estar vazia."); return; }
-    setSaving(true);
-    try {
-      if (editingRec) {
-        await api.put(`/records/${editingRec.id}`, rec);
-        toast.success("Prontuário atualizado (nova versão registrada em auditoria).");
-      } else {
-        await api.post(`/patients/${id}/records`, rec);
-        toast.success("Prontuário registrado.");
-      }
-      setEditorOpen(false);
-      load();
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
-    } finally {
-      setSaving(false);
-    }
+  const onEditorOpenChange = (open) => {
+    setEditorOpen(open);
+    if (!open) setDraftsVersion((v) => v + 1);
   };
 
   // Item 12: reativar um paciente arquivado (arquivar fica na lista de pacientes).
@@ -240,6 +228,18 @@ export default function PatientDetail() {
             <Badge variant="secondary" className="ml-1">{recordsTotal}</Badge>
           </div>
 
+          {/* PRODUTO: uma anotação começada e não salva não fica esquecida. */}
+          {newDraft && (
+            <div className="mb-4 flex flex-col gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-[#1E3A8A] sm:flex-row sm:items-center sm:justify-between"
+              data-testid="pending-draft-banner">
+              <span className="flex items-center gap-2">
+                <HardDriveDownload className="h-4 w-4 shrink-0" />
+                Você tem uma anotação não salva (rascunho de {fmtDateTime(newDraft.savedAt)} neste dispositivo).
+              </span>
+              <Button size="sm" onClick={openNew} className="bg-[#1E3A8A] hover:bg-[#0F2C59]">Continuar escrevendo</Button>
+            </div>
+          )}
+
           {records.length === 0 ? (
             <Card className="border-slate-200 py-16 text-center shadow-sm">
               <p className="text-sm text-slate-500">Nenhum prontuário registrado ainda.</p>
@@ -257,6 +257,11 @@ export default function PatientDetail() {
                         <CalendarClock className="h-4 w-4 text-[#0284C7]" />
                         {fmtDateTime(r.session_datetime)}
                         {r.version > 1 && <Badge variant="secondary" className="text-[10px]">v{r.version}</Badge>}
+                        {editDraftOf(r.id) && (
+                          <Badge className="bg-blue-100 text-[10px] text-[#1E3A8A] hover:bg-blue-100" title="Há uma edição não salva neste dispositivo">
+                            Edição não salva
+                          </Badge>
+                        )}
                       </div>
                       <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`edit-record-${r.id}`}>
                         <Pencil className="h-4 w-4 text-slate-400" />
@@ -289,47 +294,9 @@ export default function PatientDetail() {
         </div>
       </div>
 
-      {/* Record editor */}
-      <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="font-head">{editingRec ? "Editar anotação" : "Nova anotação clínica"}</DialogTitle>
-            <DialogDescription>
-              {editingRec
-                ? "A versão anterior será arquivada automaticamente na trilha de auditoria."
-                : "O conteúdo é criptografado antes de ser salvo."}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <Label>Data/Hora da sessão</Label>
-                <Input type="datetime-local" value={rec.session_datetime}
-                  onChange={(e) => setRec({ ...rec, session_datetime: e.target.value })}
-                  className="mt-1.5" data-testid="record-datetime-input" />
-              </div>
-              <div>
-                <Label>Diagnóstico / hipótese (opcional)</Label>
-                <Input value={rec.diagnosis} onChange={(e) => setRec({ ...rec, diagnosis: e.target.value })}
-                  className="mt-1.5" placeholder="CID / hipótese diagnóstica" data-testid="record-diagnosis-input" />
-              </div>
-            </div>
-            <div>
-              <Label>Anotação clínica</Label>
-              <Textarea value={rec.content} onChange={(e) => setRec({ ...rec, content: e.target.value })}
-                rows={12} className="mt-1.5 psi-scroll font-normal leading-relaxed"
-                placeholder="Descreva a evolução da sessão..." data-testid="record-content-input" />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditorOpen(false)}>Cancelar</Button>
-            <Button onClick={saveRecord} disabled={saving} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="save-record-btn">
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              Salvar
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Editor com rascunho automático (components/RecordEditorDialog.js). */}
+      <RecordEditorDialog open={editorOpen} onOpenChange={onEditorOpenChange} patientId={id}
+        record={editingRec} userId={userId} onSaved={load} />
     </div>
   );
 }
