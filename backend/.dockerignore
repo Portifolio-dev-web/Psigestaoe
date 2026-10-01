@@ -1,0 +1,14 @@
+# O Dockerfile faz `COPY . .`. Sem este arquivo, a imagem levava junto o
+# .env com JWT_SECRET, FERNET_KEY, senhas do banco etc.: qualquer pessoa com
+# acesso à imagem (registro, servidor, CI) leria os segredos com um
+# `docker run ... cat .env`. Segredos entram SÓ por variáveis de ambiente
+# no momento de rodar o container.
+.env
+.env.*
+!.env.example
+
+# Artefatos locais que não pertencem à imagem.
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db

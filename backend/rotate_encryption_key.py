@@ -34,13 +34,20 @@ from sqlalchemy import select
 
 from crypto import dev_fallback_key, is_fernet_token, legacy_key_from_secret
 from database import AsyncSessionLocal
-from models import Patient, Record, RecordVersion
+from models import Patient, Record, RecordVersion, Session
 
 # Tabela -> colunas criptografadas. Precisa acompanhar os encrypt_field() do server.py.
+#
+# Item 13 da auditoria: a lista cresceu. Nome, telefone, e-mail, contato de
+# emergência e observações do paciente, e título/nome/notas da agenda, antes
+# ficavam em texto puro. Depois de atualizar o código, rode este script com
+# --apply UMA vez: os valores antigos em texto puro são criptografados (o
+# servidor continua lendo texto puro legado até lá, então nada quebra no meio).
 ENCRYPTED_COLUMNS = {
-    Patient: ("cpf", "rg", "address"),
+    Patient: ("full_name", "cpf", "rg", "phone", "email", "address", "emergency_contact", "initial_notes"),
     Record: ("content", "diagnosis"),
     RecordVersion: ("content", "diagnosis"),
+    Session: ("title", "patient_name", "notes"),
 }
 
 

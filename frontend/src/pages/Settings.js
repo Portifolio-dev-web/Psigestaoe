@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card } from "@/components/ui/card";
@@ -7,16 +8,31 @@ import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
+  FileSignature, Archive,
 } from "lucide-react";
 
+// Rótulos das ações gravadas pelo backend em log_audit(). Ações novas da etapa
+// de conformidade: leituras (item 14), arquivamento (12), consentimento,
+// aceite da política (16) e token da integração (15).
 const ACTION_LABEL = {
   criar: "Criação", editar: "Edição", visualizar: "Visualização",
   excluir: "Exclusão", anonimizar: "Anonimização", exportar: "Exportação",
+  arquivar: "Arquivamento", desarquivar: "Reativação",
+  consentir: "Consentimento", revogar: "Revogação",
+  aceitar: "Aceite", gerar_token: "Novo token",
 };
-const ENTITY_LABEL = { paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário" };
+const ENTITY_LABEL = {
+  paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
+  termos: "Política", termo: "Termo", integracao: "Integração",
+};
+
+const fmtDateTime = (s) => (s
+  ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+  : "—");
 
 // Item 6 da auditoria: o termo de consentimento dos pacientes passou a usar o
 // nome e o CRP de quem está logado (antes era o nome de uma psicóloga fixo no
@@ -74,20 +90,117 @@ function ProfessionalProfile() {
   );
 }
 
+// Termo de consentimento POR PROFISSIONAL.
+// Cada profissional pode adaptar o corpo do termo (ex.: atendimento online,
+// faltas). O cabeçalho com nome e CRP é sempre gerado pelo sistema.
+// Mudanças aqui valem só para NOVOS consentimentos: cada paciente guarda a
+// cópia exata do texto que aceitou (backend: apply_consent).
+function ConsentTermEditor() {
+  const [term, setTerm] = useState(null);
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get("/consent-term")
+      .then(({ data }) => { setTerm(data); setBody(data.body); })
+      .catch(() => setTerm(false));
+  }, []);
+
+  const save = async (nextBody) => {
+    setSaving(true);
+    try {
+      const { data } = await api.put("/consent-term", { body: nextBody });
+      setTerm(data);
+      setBody(data.body);
+      toast.success(data.is_default ? "Modelo padrão restaurado." : "Termo de consentimento atualizado.");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (term === false) return null;
+
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <FileSignature className="h-4 w-4 text-[#1E3A8A]" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Termo de consentimento</h2>
+        {term && (
+          <Badge variant="secondary" className="text-[11px]">{term.is_default ? "Modelo padrão" : "Personalizado"}</Badge>
+        )}
+      </div>
+      <p className="mt-1 text-sm text-slate-500">
+        O cabeçalho com seu nome e CRP é incluído automaticamente. Alterações valem para novos consentimentos;
+        os já registrados guardam a cópia do texto que o paciente aceitou.
+      </p>
+      {!term ? (
+        <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
+      ) : (
+        <>
+          <Label htmlFor="consent-body" className="sr-only">Corpo do termo de consentimento</Label>
+          <Textarea id="consent-body" value={body} onChange={(e) => setBody(e.target.value)} rows={10} maxLength={10000}
+            className="psi-scroll mt-4 text-sm leading-relaxed" data-testid="consent-term-input" />
+          <details className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
+              Ver como o paciente vê
+            </summary>
+            <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-slate-600">{term.text}</p>
+          </details>
+          <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button type="button" variant="outline" disabled={saving || term.is_default} onClick={() => save("")}>
+              Restaurar modelo padrão
+            </Button>
+            <Button type="button" disabled={saving || body === term.body} onClick={() => save(body)}
+              className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="consent-term-save">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar termo"}
+            </Button>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const [logs, setLogs] = useState(null);
+  // ESCALA: a trilha é paginada. Antes só os 100 últimos registros apareciam,
+  // sem como ver os anteriores (e a trilha só cresce, pois inclui leituras).
+  const [logsCursor, setLogsCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
-    api.get("/audit").then(({ data }) => setLogs(data)).catch(() => setLogs([]));
+    api.get("/audit")
+      .then(({ data }) => { setLogs(data.items); setLogsCursor(data.next_cursor); })
+      .catch(() => setLogs([]));
   }, []);
 
+  const loadMoreLogs = async () => {
+    if (!logsCursor) return;
+    setLoadingMore(true);
+    try {
+      const { data } = await api.get(`/audit?${new URLSearchParams({ cursor: logsCursor })}`);
+      setLogs((current) => [...current, ...data.items]);
+      setLogsCursor(data.next_cursor);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // Descrições corrigidas para refletir o que o sistema FAZ. A versão anterior
+  // dizia "AES-256-GCM" (o sistema usa Fernet: AES-128-CBC + HMAC-SHA256) e
+  // chamava de "imutável" uma trilha que podia ser apagada em cascata.
   const items = [
-    { icon: Lock, title: "Criptografia em repouso", desc: "CPF, anotações clínicas e diagnósticos são cifrados com AES-256-GCM antes de gravar no banco.", ok: true },
-    { icon: Shield, title: "Criptografia em trânsito", desc: "Toda comunicação ocorre via HTTPS/TLS.", ok: true },
-    { icon: History, title: "Imutabilidade & versionamento", desc: "Prontuários não são sobrescritos: cada edição gera uma nova versão arquivada em auditoria.", ok: true },
-    { icon: KeyRound, title: "Multi-tenancy seguro", desc: "Cada profissional acessa apenas os próprios dados, com sessão isolada.", ok: true },
-    { icon: FileCheck, title: "Direitos do titular (LGPD)", desc: "Exportação segura (PDF/JSON) e anonimização respeitando o período de guarda do CFP.", ok: true },
+    { icon: Lock, title: "Criptografia em repouso", desc: "Nome, CPF, RG, contatos, endereço, observações, prontuários e agenda são cifrados (Fernet: AES-128 + HMAC-SHA256) antes de gravar no banco." },
+    { icon: Shield, title: "Criptografia em trânsito", desc: "Toda comunicação ocorre via HTTPS/TLS." },
+    { icon: History, title: "Imutabilidade & versionamento", desc: "Prontuários não são sobrescritos: cada edição gera uma nova versão arquivada." },
+    { icon: KeyRound, title: "Multi-tenancy seguro", desc: "Cada profissional acessa apenas os próprios dados, com sessão isolada." },
+    { icon: FileCheck, title: "Direitos do titular (LGPD)", desc: "Exportação (PDF/JSON), correção, anonimização e registro ou revogação do consentimento, com data." },
+    { icon: Archive, title: "Guarda legal (CFP)", desc: "Prontuários não podem ser excluídos antes de 5 anos do último registro. Até lá, o paciente pode ser arquivado." },
   ];
 
   return (
@@ -98,16 +211,24 @@ export default function Settings() {
       </div>
 
       <Card className="border-slate-200 p-6 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><CheckCircle2 className="h-5 w-5" /></div>
-          <div>
-            <p className="font-head font-bold text-[#0F172A]">Conta em conformidade</p>
-            <p className="text-sm text-slate-500">{user?.name} · {user?.email} · Termos aceitos</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><CheckCircle2 className="h-5 w-5" /></div>
+            <div className="min-w-0">
+              <p className="font-head font-bold text-[#0F172A]">Conta em conformidade</p>
+              <p className="truncate text-sm text-slate-500">{user?.name} · {user?.email}</p>
+              {/* Item 16: evidência do aceite (versão + data), não um "Termos aceitos" fixo. */}
+              <p className="text-xs text-slate-500">
+                Política de Privacidade versão {user?.terms_version} aceita em {fmtDateTime(user?.terms_accepted_at)}
+              </p>
+            </div>
           </div>
+          <Link to="/privacidade" className="text-sm font-medium text-[#1E3A8A] hover:underline">Ler a política</Link>
         </div>
       </Card>
 
       <ProfessionalProfile />
+      <ConsentTermEditor />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {items.map((it) => (
@@ -127,10 +248,11 @@ export default function Settings() {
       </div>
 
       <Card className="border-slate-200 p-6 shadow-sm">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <ScrollText className="h-4 w-4 text-[#1E3A8A]" />
           <h2 className="font-head text-lg font-bold text-[#0F172A]">Trilha de auditoria</h2>
-          <span className="text-xs text-slate-400">(imutável)</span>
+          {/* Item 14: agora é de fato somente inclusão (gatilho no banco) e inclui leituras e IP. */}
+          <span className="text-xs text-slate-400">(somente inclusão · inclui visualizações e IP)</span>
         </div>
         <Separator className="my-4" />
         {logs === null ? (
@@ -144,11 +266,24 @@ export default function Settings() {
                 <Badge variant="secondary" className="w-28 shrink-0 justify-center text-[11px]">{ACTION_LABEL[l.action] || l.action}</Badge>
                 <span className="text-slate-600">{ENTITY_LABEL[l.entity_type] || l.entity_type}</span>
                 <span className="truncate text-slate-400">{l.detail}</span>
-                <span className="ml-auto shrink-0 text-xs text-slate-400">
-                  {new Date(l.timestamp).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                <span className="ml-auto flex shrink-0 items-center gap-3">
+                  <span className="hidden font-mono text-[11px] text-slate-400 md:inline" title="Endereço IP da ação">
+                    {l.ip_address || "—"}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    {new Date(l.timestamp).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                  </span>
                 </span>
               </div>
             ))}
+            {logsCursor && (
+              <div className="flex justify-center pt-2">
+                <Button variant="outline" size="sm" onClick={loadMoreLogs} disabled={loadingMore}
+                  className="gap-2 border-slate-300" data-testid="audit-load-more">
+                  {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />} Carregar registros anteriores
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </Card>

@@ -1,0 +1,4 @@
+# Scripts de shell rodam no Linux do container: precisam de quebra de linha LF.
+# Com CRLF (padrão de editores no Windows), o `sh start.sh` falha com
+# "set: illegal option -" e o container não sobe.
+*.sh text eol=lf

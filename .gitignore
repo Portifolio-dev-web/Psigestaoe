@@ -50,6 +50,8 @@ dump.rdb
 *.pem
 
 # Python
+# Banco SQLite local (fallback de desenvolvimento): pode conter dados de pacientes.
+*.db
 __pycache__/
 *pyc*
 venv/

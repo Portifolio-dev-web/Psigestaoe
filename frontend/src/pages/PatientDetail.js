@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import {
   ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Save, Phone, Mail,
-  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard
+  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive
 } from "lucide-react";
 
 const fmtDate = (s) => {
@@ -26,6 +26,15 @@ const fmtDate = (s) => {
   return year && month && day ? `${day}/${month}/${year}` : "—";
 };
 const fmtDateTime = (s) => (s ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+// Termo por profissional: o status do consentimento mostra a EVIDÊNCIA
+// (quando foi dado ou revogado), não só "Concordo"/"Não concordo".
+const consentLabel = (p) => {
+  if (p.consent_terms) {
+    return p.consent_given_at ? `Concordo (em ${fmtDateTime(p.consent_given_at)})` : "Concordo (data não registrada)";
+  }
+  return p.consent_revoked_at ? `Revogado em ${fmtDateTime(p.consent_revoked_at)}` : "Não concordo";
+};
+
 const nowLocal = () => {
   const d = new Date();
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
@@ -37,6 +46,11 @@ export default function PatientDetail() {
   const navigate = useNavigate();
   const [patient, setPatient] = useState(null);
   const [records, setRecords] = useState([]);
+  // ESCALA: a evolução clínica vem paginada (20 por vez, a mais recente
+  // primeiro). Antes, abrir a ficha trazia TODAS as evoluções do paciente.
+  const [recordsCursor, setRecordsCursor] = useState(null);
+  const [recordsTotal, setRecordsTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingRec, setEditingRec] = useState(null);
   const [rec, setRec] = useState({ session_datetime: nowLocal(), content: "", diagnosis: "" });
@@ -49,7 +63,9 @@ export default function PatientDetail() {
         api.get(`/patients/${id}/records`),
       ]);
       setPatient(p.data);
-      setRecords(r.data);
+      setRecords(r.data.items);
+      setRecordsCursor(r.data.next_cursor);
+      setRecordsTotal(r.data.total);
     } catch (e) {
       toast.error("Paciente não encontrado.");
       navigate("/pacientes");
@@ -57,6 +73,22 @@ export default function PatientDetail() {
   }, [id, navigate]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadMoreRecords = async () => {
+    if (!recordsCursor) return;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ cursor: recordsCursor, limit: 20 });
+      const { data } = await api.get(`/patients/${id}/records?${params}`);
+      setRecords((current) => [...current, ...data.items]);
+      setRecordsCursor(data.next_cursor);
+      setRecordsTotal(data.total);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const openNew = () => {
     setEditingRec(null);
@@ -86,6 +118,17 @@ export default function PatientDetail() {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Item 12: reativar um paciente arquivado (arquivar fica na lista de pacientes).
+  const unarchive = async () => {
+    try {
+      await api.post(`/patients/${id}/unarchive`);
+      toast.success("Paciente reativado.");
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }
   };
 
@@ -126,7 +169,10 @@ export default function PatientDetail() {
               </div>
               <div className="min-w-0">
                 <h1 className="font-head text-xl font-bold text-[#0F172A]">{patient.full_name}</h1>
-                {patient.anonymized && <Badge className="mt-1 bg-amber-100 text-amber-700 hover:bg-amber-100">Anonimizado</Badge>}
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {patient.anonymized && <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">Anonimizado</Badge>}
+                  {patient.archived && <Badge className="bg-slate-200 text-slate-700 hover:bg-slate-200">Arquivado</Badge>}
+                </div>
               </div>
             </div>
             <div className="mt-5 space-y-3 text-sm">
@@ -140,8 +186,15 @@ export default function PatientDetail() {
               <InfoRow icon={Mail} label="E-mail" value={patient.email || "—"} />
               <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
               <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />
-              <InfoRow icon={ShieldCheck} label="Consentimento" value={patient.consent_terms ? "Concordo" : "Não concordo"} />
+              <InfoRow icon={ShieldCheck} label="Consentimento" value={consentLabel(patient)} />
             </div>
+            {/* Item 12: transparência sobre a guarda obrigatória dos prontuários. */}
+            {patient.retention_until && (
+              <p className="mt-3 flex items-start gap-2 rounded-md bg-slate-50 p-2.5 text-xs text-slate-500">
+                <Archive className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                Prontuário sob guarda obrigatória (CFP) até {fmtDate(patient.retention_until)}. Até lá ele não pode ser excluído.
+              </p>
+            )}
             <details className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
               <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
                 Termo de consentimento
@@ -155,6 +208,11 @@ export default function PatientDetail() {
               </div>
             )}
             <div className="mt-5 flex flex-col gap-2">
+              {patient.archived && (
+                <Button onClick={unarchive} variant="outline" className="w-full gap-2 border-slate-300" data-testid="unarchive-btn">
+                  <Archive className="h-4 w-4" /> Reativar paciente
+                </Button>
+              )}
               <Button onClick={openNew} className="w-full gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-record-btn">
                 <Plus className="h-4 w-4" /> Nova anotação
               </Button>
@@ -178,7 +236,8 @@ export default function PatientDetail() {
           <div className="mb-4 flex items-center gap-2">
             <FileText className="h-5 w-5 text-[#1E3A8A]" />
             <h2 className="font-head text-xl font-bold text-[#0F172A]">Evolução clínica</h2>
-            <Badge variant="secondary" className="ml-1">{records.length}</Badge>
+            {/* Total real (contado no servidor), não só os já carregados. */}
+            <Badge variant="secondary" className="ml-1">{recordsTotal}</Badge>
           </div>
 
           {records.length === 0 ? (
@@ -216,6 +275,15 @@ export default function PatientDetail() {
                   </Card>
                 </motion.div>
               ))}
+              {recordsCursor && (
+                <div className="flex justify-center pt-2">
+                  <Button variant="outline" onClick={loadMoreRecords} disabled={loadingMore}
+                    className="gap-2 border-slate-300" data-testid="records-load-more">
+                    {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
+                    Carregar registros anteriores ({recordsTotal - records.length} restantes)
+                  </Button>
+                </div>
+              )}
             </motion.div>
           )}
         </div>
@@ -229,7 +297,7 @@ export default function PatientDetail() {
             <DialogDescription>
               {editingRec
                 ? "A versão anterior será arquivada automaticamente na trilha de auditoria."
-                : "O conteúdo é criptografado (AES-256) antes de ser salvo."}
+                : "O conteúdo é criptografado antes de ser salvo."}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">

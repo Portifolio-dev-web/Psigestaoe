@@ -72,6 +72,11 @@ export default function AppLayout() {
         >
           <LogOut className="h-[18px] w-[18px]" strokeWidth={1.6} /> Sair
         </Button>
+        {/* Conformidade: a política fica sempre a um clique (LGPD, art. 9º: acesso facilitado). */}
+        <NavLink to="/privacidade" onClick={() => setOpen(false)}
+          className="mt-2 block px-3 text-[11px] text-blue-200/70 hover:text-white hover:underline">
+          Política de Privacidade
+        </NavLink>
       </div>
     </div>
   );
@@ -111,7 +116,8 @@ export default function AppLayout() {
           </button>
           <div className="flex-1" />
           <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-            <Shield className="h-3.5 w-3.5" /> Dados criptografados (AES-256)
+            {/* Antes: "(AES-256)", algoritmo que o sistema não usa. Ver legal.py, item 7. */}
+            <Shield className="h-3.5 w-3.5" /> Dados criptografados
           </div>
         </header>
         <main className="flex-1 px-4 py-6 lg:px-8">

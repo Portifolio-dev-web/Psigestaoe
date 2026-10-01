@@ -22,6 +22,14 @@ export function AuthProvider({ children }) {
     checkAuth();
   }, [checkAuth]);
 
+  // Conformidade (item 16): api.js dispara este evento quando o backend exige
+  // o aceite da versão atual da política; recarregar o usuário faz o
+  // ProtectedRoute mostrar a tela de aceite.
+  useEffect(() => {
+    window.addEventListener("psi:terms-required", checkAuth);
+    return () => window.removeEventListener("psi:terms-required", checkAuth);
+  }, [checkAuth]);
+
   const logout = async () => {
     try {
       await api.post("/auth/logout");

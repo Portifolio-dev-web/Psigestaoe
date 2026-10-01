@@ -21,9 +21,12 @@
 # ---------------------------------------------------------------------------
 import base64
 import hashlib
+import hmac
 import logging
 import os
+import re
 import sys
+import unicodedata
 
 from cryptography.fernet import Fernet, MultiFernet
 
@@ -54,6 +57,18 @@ def dev_fallback_key() -> bytes:
 
 def is_fernet_token(value: str) -> bool:
     return value.startswith(FERNET_TOKEN_PREFIX)
+
+
+def hash_token(token: str) -> str:
+    """Hash SHA-256 de um token de integração (item 15 da auditoria).
+
+    O banco guarda só este hash, nunca o token. Para tokens ALEATÓRIOS de alta
+    entropia (secrets.token_urlsafe(32) = 256 bits) um hash rápido é o
+    adequado: não há o que adivinhar por força bruta, ao contrário de senhas,
+    que precisam de bcrypt. Também é o que permite achar o dono do token com
+    uma busca indexada (`WHERE webhook_token_hash = ...`).
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _parse_key(raw_key: str, env_name: str) -> Fernet:
@@ -95,3 +110,78 @@ def load_fernet(environment: str) -> MultiFernet:
         if k.strip()
     ]
     return MultiFernet([primary, *old_keys])
+
+
+# ---------------------------------------------------------------------------
+# Índice cego ("blind index") para buscar pacientes por nome
+# (ESCALA: paginação e busca no servidor)
+# ---------------------------------------------------------------------------
+# O problema: o nome do paciente é criptografado (item 13), e cada
+# criptografia gera um valor diferente. O banco não consegue fazer
+# `WHERE nome LIKE 'mar%'`. Antes, a tela baixava TODOS os pacientes e
+# filtrava no navegador; isso impede paginar e não escala.
+#
+# A solução: para cada palavra do nome guardamos o HMAC-SHA256 dos seus
+# prefixos ("ma", "mar", "mari", "maria"), numa tabela à parte
+# (patient_search_tokens). Na busca, calculamos o HMAC do que foi digitado
+# e o banco compara HMAC com HMAC, usando índice.
+#
+# Propriedades e limites (documentados de propósito):
+#   - Sem a SEARCH_INDEX_KEY, os tokens não revelam os nomes. Com a chave,
+#     prefixos curtos podem ser testados por força bruta. Por isso a chave é
+#     separada da FERNET_KEY e obrigatória em produção.
+#   - O owner_id entra no HMAC: o mesmo nome em consultórios diferentes gera
+#     tokens diferentes, então não dá para cruzar pacientes entre profissionais.
+#   - Vaza apenas "estes dois pacientes do mesmo profissional têm nomes que
+#     começam igual". É o preço da busca por prefixo; busca por palavra exata
+#     vazaria menos, mas a experiência de digitar "mar" e achar "Maria" se perde.
+#   - Trocar a SEARCH_INDEX_KEY exige reconstruir o índice
+#     (python rebuild_search_index.py). Nenhum dado se perde: o índice é derivado.
+SEARCH_MIN_PREFIX = 2   # prefixos de 1 letra vazariam a inicial e quase não filtram
+SEARCH_MAX_PREFIX = 20  # nomes muito longos não precisam de prefixos maiores
+_DEV_SEARCH_KEY = b"dev-search-index-key-insegura-0001"
+
+
+def load_search_key(environment: str) -> bytes:
+    raw_key = os.environ.get("SEARCH_INDEX_KEY", "").strip()
+    if raw_key:
+        if len(raw_key) < 32:
+            logger.critical("SECURITY ALERT: SEARCH_INDEX_KEY deve ter pelo menos 32 caracteres aleatórios.")
+            sys.exit(1)
+        return raw_key.encode("utf-8")
+    if environment == "production":
+        # Com uma chave conhecida, os prefixos dos nomes poderiam ser descobertos.
+        logger.critical("SECURITY ALERT: SEARCH_INDEX_KEY ausente em produção. Abortando.")
+        sys.exit(1)
+    logger.warning("SEARCH_INDEX_KEY não definida: usando chave INSEGURA de desenvolvimento.")
+    return _DEV_SEARCH_KEY
+
+
+def normalize_search_words(text: str) -> list:
+    """Minúsculas, sem acento, só letras e números: "José da Silva" -> [jose, da, silva]."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    without_accents = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.findall(r"[a-z0-9]+", without_accents)
+
+
+def _search_token(key: bytes, owner_id: str, fragment: str) -> str:
+    digest = hmac.new(key, f"{owner_id}\x00{fragment}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[:32]  # 128 bits bastam para não haver colisão e economizam espaço no índice
+
+
+def name_search_tokens(key: bytes, owner_id: str, name: str) -> set:
+    """Tokens gravados para um nome (todos os prefixos de cada palavra)."""
+    tokens = set()
+    for word in normalize_search_words(name):
+        for size in range(SEARCH_MIN_PREFIX, min(len(word), SEARCH_MAX_PREFIX) + 1):
+            tokens.add(_search_token(key, owner_id, word[:size]))
+    return tokens
+
+
+def query_search_tokens(key: bytes, owner_id: str, query: str) -> list:
+    """Tokens da busca: um por palavra digitada (todas precisam bater)."""
+    return [
+        _search_token(key, owner_id, word[:SEARCH_MAX_PREFIX])
+        for word in normalize_search_words(query)
+        if len(word) >= SEARCH_MIN_PREFIX
+    ]

@@ -17,6 +17,11 @@ services:
 
   api:
     build: ./backend
+    # Desenvolvimento: aplica as migrações (prestart.py, o mesmo da produção)
+    # e sobe UM processo com recarga automática ao salvar arquivos.
+    # A imagem, por padrão, sobe em modo de PRODUÇÃO (start.sh: migração +
+    # gunicorn com vários workers); este comando substitui isso só aqui.
+    command: sh -c "python prestart.py && uvicorn server:app --host 0.0.0.0 --port 5000 --reload"
     env_file:
       - .env
       - ./backend/.env

@@ -84,6 +84,16 @@ async def run_async_migrations() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
+    # ESCALA (workers): o prestart.py roda as migrações UMA vez, antes de os
+    # workers subirem, segurando uma trava (pg_advisory_lock) numa conexão.
+    # Ele entrega essa mesma conexão aqui, para a migração rodar sob a trava.
+    # Sem conexão entregue (uso manual: `alembic upgrade head`), o
+    # comportamento é o de antes.
+    shared_connection = config.attributes.get("connection")
+    if shared_connection is not None:
+        do_run_migrations(shared_connection)
+        return
+
     asyncio.run(run_async_migrations())
 
 

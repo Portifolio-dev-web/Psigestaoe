@@ -130,3 +130,13 @@ sqlalchemy[asyncio]>=2.0.0
 aiosqlite
 asyncpg
 alembic
+
+# --- Escala e monitoramento ---
+# Servidor de produção com vários processos (workers uvicorn gerenciados pelo gunicorn).
+gunicorn==23.0.0
+# Métricas Prometheus (/api/metrics), com suporte a vários processos.
+prometheus-client==0.21.1
+# Rastreamento de erros (opcional, só liga com SENTRY_DSN).
+sentry-sdk[fastapi]==2.19.2
+# Limite de tentativas compartilhado entre workers/instâncias (opcional, REDIS_URL).
+redis==5.2.1

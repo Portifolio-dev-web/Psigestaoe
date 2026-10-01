@@ -1,11 +1,12 @@
 // ============================================================================
 // IMPORTS
 // ============================================================================
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Plus, Search, MoreVertical, Pencil, Trash2, ShieldOff, FileText, Users, Loader2,
+  Archive, ArchiveRestore, KeyRound,
 } from "lucide-react";
 
 // API & Utils
@@ -38,23 +39,20 @@ const fmtDate = (s) => {
   return year && month && day ? `${day}/${month}/${year}` : "—";
 };
 
-const EMPTY_FORM = { 
-  full_name: "", cpf: "", rg: "", birth_date: "", age: "", 
-  education: "", marital_status: "", profession: "", phone: "", email: "", 
-  address: "", emergency_contact: "", initial_notes: "", consent_terms: false 
+const EMPTY_FORM = {
+  full_name: "", cpf: "", rg: "", birth_date: "", age: "",
+  education: "", marital_status: "", profession: "", phone: "", email: "",
+  address: "", emergency_contact: "", initial_notes: "", consent_terms: false
 };
 
-const CONSENT_TERM = `TERMO DE CONSENTIMENTO LIVRE E ESCLARECIDO
+// Termo por profissional: aqui existia uma CÓPIA do termo com o nome e o CRP de
+// uma psicóloga fixos no código ("Fernanda Andrade Da Silva – CRP 06/228054"),
+// mostrada no cadastro de pacientes de TODOS os profissionais. O texto agora
+// vem do backend (GET /consent-term): o termo atual do profissional logado,
+// ou, para quem já consentiu, a cópia exata do texto aceito.
 
-Declaro que fui informado(a) sobre os objetivos, procedimentos e natureza do atendimento psicológico realizado pela Psicóloga Fernanda Andrade Da Silva – CRP 06/228054, profissional regularmente inscrita e atuando conforme as normas estabelecidas pelo Conselho Federal de Psicologia e pelo Código de Ética Profissional do Psicólogo.
-
-Estou ciente de que o atendimento psicológico é pautado no respeito à dignidade e integridade humana e que todas as informações compartilhadas serão mantidas sob sigilo profissional.
-
-Compreendo que o sigilo poderá ser rompido apenas em situações previstas em lei ou diante de risco iminente à vida (do paciente ou de terceiros), bem como em casos de negligência ou abuso de incapazes.
-
-Os registros psicológicos serão armazenados de forma segura, conforme a Lei nº 13.709/2018 (LGPD).
-
-Estou ciente de que posso interromper o atendimento a qualquer momento, mediante comunicação prévia.`;
+// ESCALA: tamanho da página da lista de pacientes (o servidor aceita até 100).
+const PAGE_SIZE = 50;
 
 export default function Patients() {
   // ========================================================================
@@ -63,51 +61,123 @@ export default function Patients() {
   const navigate = useNavigate();
   const [patients, setPatients] = useState(null);
   const [query, setQuery] = useState("");
+  // ESCALA: a busca roda no servidor. `debouncedQuery` espera 300 ms sem
+  // digitação antes de consultar, em vez de uma requisição por tecla.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [nextCursor, setNextCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Respostas que chegam fora de ordem (digitação rápida) são descartadas:
+  // só vale a resposta da requisição mais recente.
+  const requestSeq = useRef(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(null); // {type, patient}
+  // Item 12: pacientes arquivados ficam fora da lista ativa, em um filtro próprio.
+  const [showArchived, setShowArchived] = useState(false);
+  // Termo atual do profissional (para novos consentimentos).
+  const [currentTerm, setCurrentTerm] = useState("");
 
-  // NOVOS ESTADOS PARA O WEBHOOK
+  // Item 15: estado da integração. O token só existe no navegador logo após ser
+  // gerado (`newToken`); depois disso não pode ser recuperado, só trocado.
   const [integrationOpen, setIntegrationOpen] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
-  const [userToken, setUserToken] = useState("");
+  const [integration, setIntegration] = useState(null); // {configured, hint, created_at}
+  const [newToken, setNewToken] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
 
   // ========================================================================
   // HANDLERS - DATA LOADING
   // ========================================================================
+  // ESCALA: a lista vem paginada do servidor (antes vinham TODOS os pacientes
+  // e a busca filtrava no navegador).
+  // - Sem busca: GET /patients, página por página (cursor).
+  // - Com busca: POST /patients/search. O nome digitado vai no CORPO, nunca na
+  //   URL, para não ficar gravado em logs de proxy/servidor.
+  const fetchPage = (cursor) => {
+    const term = debouncedQuery.trim();
+    if (term.length >= 2) {
+      return api.post("/patients/search", { q: term, archived: showArchived, cursor, limit: PAGE_SIZE });
+    }
+    const params = new URLSearchParams({ archived: showArchived, limit: PAGE_SIZE });
+    if (cursor) params.set("cursor", cursor);
+    return api.get(`/patients?${params}`);
+  };
+
   const load = async () => {
+    const seq = ++requestSeq.current;
     try {
-      // 1. Busca os pacientes
-      const resPatients = await api.get("/patients");
-      setPatients(resPatients.data);
-      
-      // 2. Busca os dados do usuário logado (que agora traz o webhook_token)
-      const resUser = await api.get("/auth/me");
-      setUserToken(resUser.data.webhook_token); 
-      
+      const { data } = await fetchPage(null);
+      if (seq !== requestSeq.current) return; // chegou uma resposta mais nova
+      setPatients(data.items);
+      setNextCursor(data.next_cursor);
+      // Item 15: antes este load também buscava /auth/me só para pegar o token
+      // do webhook, deixando o token em memória em toda visita à tela.
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setPatients([]);
+      setNextCursor(null);
       console.error("Erro ao carregar dados:", err);
     }
   };
 
-  useEffect(() => { load(); }, []);
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    const seq = requestSeq.current;
+    setLoadingMore(true);
+    try {
+      const { data } = await fetchPage(nextCursor);
+      if (seq !== requestSeq.current) return; // filtro/busca mudou no meio do caminho
+      setPatients((current) => [...(current || []), ...data.items]);
+      setNextCursor(data.next_cursor);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const loadCurrentTerm = async () => {
+    try {
+      const { data } = await api.get("/consent-term");
+      setCurrentTerm(data.text);
+    } catch (err) {
+      setCurrentTerm("");
+    }
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setPatients(null); load(); }, [showArchived, debouncedQuery]);
 
   // ========================================================================
   // HANDLERS - DIALOG
   // ========================================================================
-  const openNew = () => { 
-    setEditing(null); 
-    setForm(EMPTY_FORM); 
-    setDialogOpen(true); 
+  const openNew = () => {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    loadCurrentTerm(); // sempre o texto mais recente (nome/CRP/modelo podem ter mudado)
+    setDialogOpen(true);
   };
 
-  const openEdit = (p) => { 
-    setEditing(p); 
-    setForm({ ...EMPTY_FORM, ...p }); 
-    setDialogOpen(true); 
+  // ESCALA: a lista agora traz só um resumo (nome e datas). A edição busca a
+  // ficha completa antes de abrir o formulário: sem isso, salvar enviaria
+  // CPF, endereço, observações etc. VAZIOS e apagaria esses dados.
+  const openEdit = async (p) => {
+    try {
+      const { data } = await api.get(`/patients/${p.id}`);
+      setEditing(data);
+      setForm({ ...EMPTY_FORM, ...data });
+      loadCurrentTerm();
+      setDialogOpen(true);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    }
   };
 
   const upd = (k) => (e) => setForm({
@@ -141,20 +211,39 @@ export default function Patients() {
   // ========================================================================
   // HANDLERS - DELETE / ANONYMIZE
   // ========================================================================
-  const doAction = async () => {
-    if (!confirm) return;
+  // Item 12: arquivar é reversível e não apaga nada, então não pede confirmação.
+  const setArchived = async (p, archived) => {
     try {
-      if (confirm.type === "delete") {
-        await api.delete(`/patients/${confirm.patient.id}`);
-        toast.success("Paciente excluído definitivamente.");
-      } else {
-        await api.post(`/patients/${confirm.patient.id}/anonymize`);
-        toast.success("Dados anonimizados (prontuários mantidos p/ guarda legal).");
-      }
-      setConfirm(null);
+      await api.post(`/patients/${p.id}/${archived ? "archive" : "unarchive"}`);
+      toast.success(archived ? "Paciente arquivado. Os prontuários continuam guardados." : "Paciente reativado.");
       load();
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    }
+  };
+
+  const doAction = async () => {
+    if (!confirm) return;
+    const { type, patient } = confirm;
+    setConfirm(null);
+    try {
+      if (type === "delete") {
+        await api.delete(`/patients/${patient.id}`);
+        toast.success("Paciente excluído definitivamente.");
+      } else {
+        await api.post(`/patients/${patient.id}/anonymize`);
+        toast.success("Dados anonimizados (prontuários mantidos p/ guarda legal).");
+      }
+      load();
+    } catch (err) {
+      const message = formatApiErrorDetail(err.response?.data?.detail) || err.message;
+      // Item 12: 409 = prontuários sob guarda do CFP. A mensagem do servidor
+      // traz a data em que a exclusão será possível; oferecemos arquivar na hora.
+      if (err.response?.status === 409 && !patient.archived) {
+        toast.error(message, { duration: 10000, action: { label: "Arquivar", onClick: () => setArchived(patient, true) } });
+      } else {
+        toast.error(message);
+      }
     }
   };
 
@@ -167,15 +256,62 @@ export default function Patients() {
     setTimeout(() => setCopySuccess(false), 2000);
   };
 
+  const openIntegration = async () => {
+    setNewToken("");
+    setIntegration(null);
+    setIntegrationOpen(true);
+    try {
+      const { data } = await api.get("/integrations/google-forms");
+      setIntegration(data);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  // Item 15: gerar um token novo revoga o anterior. O valor volta UMA vez e
+  // só fica neste estado enquanto a janela estiver aberta.
+  const generateToken = async () => {
+    setTokenBusy(true);
+    try {
+      const { data } = await api.post("/integrations/google-forms/token");
+      setNewToken(data.token);
+      setIntegration(data);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setTokenBusy(false);
+    }
+  };
+
+  const revokeToken = async () => {
+    setTokenBusy(true);
+    try {
+      const { data } = await api.delete("/integrations/google-forms/token");
+      setNewToken("");
+      setIntegration(data);
+      toast.success("Integração revogada. O formulário deixa de enviar pacientes.");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setTokenBusy(false);
+    }
+  };
+
+  const closeIntegration = (open) => {
+    setIntegrationOpen(open);
+    if (!open) setNewToken(""); // o token não fica guardado depois de fechar
+  };
+
   // ========================================================================
   // DERIVED STATE
   // ========================================================================
-  const filtered = (patients || []).filter((p) =>
-    p.full_name.toLowerCase().includes(query.toLowerCase()));
+  // ESCALA: a busca já vem filtrada do servidor (índice cego); não há mais
+  // filtro local sobre a lista inteira.
+  const filtered = patients || [];
 
   const generatedScript = `
 const WEBHOOK_URL = "${process.env.WEBHOOK_URL}";
-const SECURITY_TOKEN = "${userToken}";
+const SECURITY_TOKEN = "${newToken}";
 
 function formatCPF(cpf) {
   let v = String(cpf).replace(/\\D/g, "");
@@ -198,21 +334,21 @@ function formatPhone(phone) {
 function onFormSubmit(e) {
   const response = e.response;
   const itemResponses = response.getItemResponses();
-  
+
   let patientData = {
     full_name: "", cpf: "", rg: "", birth_date: "", age: "",
-    education: "", marital_status: "", profession: "", phone: "", email: "", 
-    address: "", emergency_contact: "", initial_notes: "Cadastrado via Google Forms.", 
+    education: "", marital_status: "", profession: "", phone: "", email: "",
+    address: "", emergency_contact: "", initial_notes: "Cadastrado via Google Forms.",
     consent_terms: false
   };
-  
+
   itemResponses.forEach(itemResponse => {
     const question = itemResponse.getItem().getTitle();
     const answer = itemResponse.getResponse();
     const normalizedQuestion = String(question).trim().toLowerCase();
     const normalizedAnswer = String(answer).trim().toLowerCase();
     const answerAsText = Array.isArray(answer) ? answer.join(", ") : String(answer).trim();
-    
+
     if (normalizedQuestion.includes("nome completo")) {
       patientData.full_name = answerAsText;
     } else if (normalizedQuestion.includes("cpf")) {
@@ -250,18 +386,18 @@ function onFormSubmit(e) {
       normalizedQuestion.includes("estou de acordo")
     ) {
       // Aceita qualquer frase que contenha uma destas palavras
-      patientData.consent_terms = normalizedAnswer.includes("concordo") || 
-                                  normalizedAnswer.includes("sim") || 
+      patientData.consent_terms = normalizedAnswer.includes("concordo") ||
+                                  normalizedAnswer.includes("sim") ||
                                   normalizedAnswer.includes("aceito");
     } else if (normalizedQuestion.includes("notas finais")) {
       patientData.initial_notes = answer;
     }
   });
-  
+
   const payload = {
     patient_data: patientData
   };
-  
+
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -271,7 +407,7 @@ function onFormSubmit(e) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   };
-  
+
   const res = UrlFetchApp.fetch(WEBHOOK_URL, options);
   console.log(res.getContentText());
 }
@@ -283,20 +419,33 @@ function onFormSubmit(e) {
 
   return (
     <div className="space-y-6">
-      <PatientHeader onNew={openNew} onIntegration={() => setIntegrationOpen(true)} />
-      <PatientSearch query={query} onQueryChange={setQuery} />
-      <PatientContent patients={patients} filtered={filtered} navigate={navigate}
+      <PatientHeader onNew={openNew} onIntegration={openIntegration} />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <PatientSearch query={query} onQueryChange={setQuery} />
+        <ArchiveFilter showArchived={showArchived} onChange={setShowArchived} />
+      </div>
+      <PatientContent patients={patients} filtered={filtered} navigate={navigate} showArchived={showArchived}
+        searching={debouncedQuery.trim().length >= 2}
         onEdit={openEdit} onDelete={(p) => setConfirm({ type: "delete", patient: p })}
-        onAnon={(p) => setConfirm({ type: "anon", patient: p })} />
-      
+        onAnon={(p) => setConfirm({ type: "anon", patient: p })} onArchive={setArchived} />
+      {nextCursor && (
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={loadMore} disabled={loadingMore} className="gap-2 border-slate-300"
+            data-testid="patients-load-more">
+            {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />} Carregar mais pacientes
+          </Button>
+        </div>
+      )}
+
       <PatientFormDialog open={dialogOpen} onOpenChange={setDialogOpen} editing={editing}
-        form={form} onFormChange={upd} saving={saving} onSubmit={save} />
-      
+        form={form} onFormChange={upd} saving={saving} onSubmit={save} currentTerm={currentTerm} />
+
       <PatientConfirmDialog confirm={confirm} onConfirm={doAction} onOpenChange={(o) => !o && setConfirm(null)} />
-      
-      <IntegrationDialog open={integrationOpen} onOpenChange={setIntegrationOpen} 
-        userToken={userToken} generatedScript={generatedScript} copySuccess={copySuccess} 
-        onCopyScript={copyScript} />
+
+      <IntegrationDialog open={integrationOpen} onOpenChange={closeIntegration}
+        integration={integration} newToken={newToken} tokenBusy={tokenBusy}
+        onGenerate={generateToken} onRevoke={revokeToken}
+        generatedScript={generatedScript} copySuccess={copySuccess} onCopyScript={copyScript} />
     </div>
   );
 }
@@ -328,18 +477,34 @@ function PatientSearch({ query, onQueryChange }) {
   return (
     <div className="relative max-w-sm">
       <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-      <Input 
-        placeholder="Buscar por nome..." 
-        value={query} 
+      <Input
+        placeholder="Buscar por nome (mín. 2 letras)..."
+        value={query}
         onChange={(e) => onQueryChange(e.target.value)}
-        className="pl-9" 
-        data-testid="patient-search-input" 
+        className="pl-9"
+        data-testid="patient-search-input"
       />
     </div>
   );
 }
 
-function PatientContent({ patients, filtered, navigate, onEdit, onDelete, onAnon }) {
+// Item 12: alterna entre a lista ativa e os pacientes arquivados.
+function ArchiveFilter({ showArchived, onChange }) {
+  const option = (active) =>
+    `rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+      active ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-500 hover:text-[#0F172A]"
+    }`;
+  return (
+    <div className="inline-flex self-start rounded-lg bg-slate-100 p-1" role="group" aria-label="Filtrar pacientes">
+      <button type="button" className={option(!showArchived)} aria-pressed={!showArchived}
+        onClick={() => onChange(false)} data-testid="filter-active">Ativos</button>
+      <button type="button" className={option(showArchived)} aria-pressed={showArchived}
+        onClick={() => onChange(true)} data-testid="filter-archived">Arquivados</button>
+    </div>
+  );
+}
+
+function PatientContent({ patients, filtered, navigate, showArchived, searching, onEdit, onDelete, onAnon, onArchive }) {
   if (patients === null) {
     return (
       <div className="flex justify-center py-16">
@@ -354,8 +519,16 @@ function PatientContent({ patients, filtered, navigate, onEdit, onDelete, onAnon
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#F0F4F8]">
           <Users className="h-6 w-6 text-[#1E3A8A]" />
         </div>
-        <p className="mt-4 font-head text-lg font-bold text-[#0F172A]">Nenhum paciente encontrado</p>
-        <p className="mt-1 text-sm text-slate-500">Cadastre seu primeiro paciente para começar.</p>
+        <p className="mt-4 font-head text-lg font-bold text-[#0F172A]">
+          {showArchived ? "Nenhum paciente arquivado" : "Nenhum paciente encontrado"}
+        </p>
+        <p className="mt-1 text-sm text-slate-500">
+          {searching
+            ? "Nenhum nome começa com o que foi digitado. A busca considera o início de cada palavra."
+            : showArchived
+              ? "Pacientes arquivados saem da lista ativa, mas os prontuários continuam guardados."
+              : "Cadastre seu primeiro paciente para começar."}
+        </p>
       </Card>
     );
   }
@@ -363,14 +536,14 @@ function PatientContent({ patients, filtered, navigate, onEdit, onDelete, onAnon
   return (
     <>
       <PatientTable filtered={filtered} navigate={navigate} onEdit={onEdit}
-        onDelete={onDelete} onAnon={onAnon} />
+        onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
       <PatientMobileCards filtered={filtered} navigate={navigate} onEdit={onEdit}
-        onDelete={onDelete} onAnon={onAnon} />
+        onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
     </>
   );
 }
 
-function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon }) {
+function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive }) {
   return (
     <Card className="hidden border-slate-200 shadow-sm md:block" data-testid="patients-table">
       <Table>
@@ -398,7 +571,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon }) {
               <TableCell className="text-slate-600">{fmtDate(p.last_consultation_date)}</TableCell>
               <TableCell onClick={(e) => e.stopPropagation()}>
                 <RowMenu p={p} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
-                  onDelete={onDelete} onAnon={onAnon} />
+                  onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
               </TableCell>
             </TableRow>
           ))}
@@ -408,7 +581,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon }) {
   );
 }
 
-function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon }) {
+function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onArchive }) {
   return (
     <div className="space-y-3 md:hidden">
       {filtered.map((p) => (
@@ -424,7 +597,7 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon }) {
               </div>
             </button>
             <RowMenu p={p} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
-              onDelete={onDelete} onAnon={onAnon} />
+              onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
           </div>
           <p className="mt-2 text-xs text-slate-500">Última consulta: {fmtDate(p.last_consultation_date)}</p>
         </Card>
@@ -433,32 +606,38 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon }) {
   );
 }
 
-function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit }) {
+function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm }) {
+  // Quem já consentiu vê a cópia do texto que aceitou; os demais, o termo atual.
+  const consentText = editing?.consent_terms ? editing.consent_terms_text : currentTerm;
+  const consentDate = editing?.consent_terms && editing.consent_given_at
+    ? new Date(editing.consent_given_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="font-head">{editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
-          <DialogDescription>O CPF é criptografado (AES-256) antes de ser salvo.</DialogDescription>
+          {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
+          <DialogDescription>Nome, documentos, contatos e observações são criptografados antes de serem salvos.</DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="space-y-4">
           <div>
             <Label>Nome completo *</Label>
-            <Input 
-              required 
-              value={form.full_name} 
-              onChange={onFormChange("full_name")} 
-              className="mt-1.5" 
-              data-testid="patient-name-input" 
+            <Input
+              required
+              value={form.full_name}
+              onChange={onFormChange("full_name")}
+              className="mt-1.5"
+              data-testid="patient-name-input"
             />
           </div>
 
           <div>
             <Label>CPF</Label>
-            <Input 
-              value={form.cpf} 
-              onChange={onFormChange("cpf")} 
-              className="mt-1.5" 
+            <Input
+              value={form.cpf}
+              onChange={onFormChange("cpf")}
+              className="mt-1.5"
               data-testid="patient-cpf-input"
               placeholder="000.000.000-00"
             />
@@ -466,9 +645,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>RG</Label>
-            <Input 
-              value={form.rg} 
-              onChange={onFormChange("rg")} 
+            <Input
+              value={form.rg}
+              onChange={onFormChange("rg")}
               className="mt-1.5"
               data-testid="patient-rg-input"
             />
@@ -476,10 +655,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Data de nascimento</Label>
-            <Input 
-              type="date" 
-              value={form.birth_date} 
-              onChange={onFormChange("birth_date")} 
+            <Input
+              type="date"
+              value={form.birth_date}
+              onChange={onFormChange("birth_date")}
               className="mt-1.5"
               data-testid="patient-birthdate-input"
             />
@@ -487,10 +666,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Idade</Label>
-            <Input 
-              type="number" 
-              value={form.age} 
-              onChange={onFormChange("age")} 
+            <Input
+              type="number"
+              value={form.age}
+              onChange={onFormChange("age")}
               className="mt-1.5"
               data-testid="patient-age-input"
             />
@@ -499,8 +678,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>Escolaridade *</Label>
-              <select 
-                value={form.education} 
+              <select
+                value={form.education}
                 onChange={onFormChange("education")}
                 className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
               >
@@ -533,9 +712,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Profissão</Label>
-            <Input 
-              value={form.profession} 
-              onChange={onFormChange("profession")} 
+            <Input
+              value={form.profession}
+              onChange={onFormChange("profession")}
               className="mt-1.5"
               data-testid="patient-profession-input"
             />
@@ -543,9 +722,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Telefone</Label>
-            <Input 
-              value={form.phone} 
-              onChange={onFormChange("phone")} 
+            <Input
+              value={form.phone}
+              onChange={onFormChange("phone")}
               className="mt-1.5"
               data-testid="patient-phone-input"
               placeholder="(XX) XXXX-XXXX"
@@ -554,10 +733,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Email</Label>
-            <Input 
-              type="email" 
-              value={form.email} 
-              onChange={onFormChange("email")} 
+            <Input
+              type="email"
+              value={form.email}
+              onChange={onFormChange("email")}
               className="mt-1.5"
               data-testid="patient-email-input"
             />
@@ -565,9 +744,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Endereço</Label>
-            <Input 
-              value={form.address} 
-              onChange={onFormChange("address")} 
+            <Input
+              value={form.address}
+              onChange={onFormChange("address")}
               className="mt-1.5"
               data-testid="patient-address-input"
             />
@@ -575,9 +754,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Contato de emergência</Label>
-            <Input 
-              value={form.emergency_contact} 
-              onChange={onFormChange("emergency_contact")} 
+            <Input
+              value={form.emergency_contact}
+              onChange={onFormChange("emergency_contact")}
               className="mt-1.5"
               data-testid="patient-emergency-input"
             />
@@ -585,9 +764,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div>
             <Label>Notas iniciais</Label>
-            <Textarea 
-              value={form.initial_notes} 
-              onChange={onFormChange("initial_notes")} 
+            <Textarea
+              value={form.initial_notes}
+              onChange={onFormChange("initial_notes")}
               className="mt-1.5"
               data-testid="patient-notes-input"
               rows={3}
@@ -597,7 +776,14 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4">
             <div>
               <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
-              <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-slate-600">{CONSENT_TERM}</p>
+              {consentText ? (
+                <p className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600">{consentText}</p>
+              ) : (
+                <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" /></div>
+              )}
+              {consentDate && (
+                <p className="mt-2 text-xs font-medium text-emerald-700">Consentimento registrado em {consentDate}.</p>
+              )}
             </div>
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
@@ -647,7 +833,7 @@ function PatientConfirmDialog({ confirm, onConfirm, onOpenChange }) {
           </AlertDialogTitle>
           <AlertDialogDescription>
             {confirm?.type === "delete"
-              ? "Esta ação é permanente e remove o paciente e seus prontuários."
+              ? "Pacientes sem prontuário são excluídos na hora e de forma permanente. Se houver prontuários, a exclusão só é permitida depois de 5 anos do último registro (guarda obrigatória do CFP); até lá, use Arquivar."
               : "Os dados pessoais serão removidos, mas os prontuários serão mantidos pelo período de guarda legal exigido pelo CFP."}
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -664,7 +850,14 @@ function PatientConfirmDialog({ confirm, onConfirm, onOpenChange }) {
   );
 }
 
-function IntegrationDialog({ open, onOpenChange, userToken, generatedScript, copySuccess, onCopyScript }) {
+// Item 15: o token não é mais carregado junto com a tela. O profissional gera
+// um token aqui, copia o script na hora (o token não pode ser visto de novo)
+// e pode trocá-lo ou revogá-lo a qualquer momento.
+function IntegrationDialog({ open, onOpenChange, integration, newToken, tokenBusy, onGenerate, onRevoke,
+  generatedScript, copySuccess, onCopyScript }) {
+  const createdAt = integration?.created_at
+    ? new Date(integration.created_at).toLocaleDateString("pt-BR")
+    : "";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
@@ -674,39 +867,85 @@ function IntegrationDialog({ open, onOpenChange, userToken, generatedScript, cop
             Vincule os cadastros do Forms direto na sua plataforma de forma segura e criptografada.
           </DialogDescription>
         </DialogHeader>
-        
+
         <div className="space-y-4 text-sm text-slate-700">
-          <div className="space-y-2">
-            <p><strong>Passo 1:</strong> No seu Google Forms, clique nos 3 pontos verticais (canto superior direito) e acesse <strong>Apps Script</strong>.</p>
-            <p><strong>Passo 2:</strong> Apague o código padrão e cole o seu script de integração pessoal gerado abaixo:</p>
-          </div>
+          {!integration ? (
+            <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
+          ) : (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-start gap-3">
+                <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-[#1E3A8A]" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-[#0F172A]">
+                    {integration.configured
+                      ? `Integração ativa · token terminado em …${integration.hint}${createdAt ? ` · gerado em ${createdAt}` : ""}`
+                      : "Nenhum token de integração ativo"}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Por segurança, o token é exibido só no momento em que é gerado. Gerar um novo token desativa o anterior
+                    (atualize o script no formulário depois disso).
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" onClick={onGenerate} disabled={tokenBusy} className="bg-[#1E3A8A] hover:bg-[#0F2C59]"
+                  data-testid="generate-webhook-token">
+                  {tokenBusy
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : integration.configured ? "Gerar novo token e script" : "Gerar token e script"}
+                </Button>
+                {integration.configured && (
+                  <Button size="sm" variant="outline" onClick={onRevoke} disabled={tokenBusy}
+                    className="border-red-200 text-red-600 hover:bg-red-50">
+                    Revogar integração
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
 
-          <div className="relative rounded-md bg-slate-900 p-4">
-            <Button 
-              size="sm" 
-              onClick={onCopyScript} 
-              className="absolute right-2 top-2 bg-slate-700 hover:bg-slate-600 text-white"
-            >
-              {copySuccess ? "Copiado!" : "Copiar Script"}
-            </Button>
-            <pre className="overflow-x-auto text-xs text-green-400">
-              <code>{generatedScript}</code>
-            </pre>
-          </div>
+          {newToken && (
+            <>
+              <div className="space-y-2">
+                <p><strong>Passo 1:</strong> No seu Google Forms, clique nos 3 pontos verticais (canto superior direito) e acesse <strong>Apps Script</strong>.</p>
+                <p><strong>Passo 2:</strong> Apague o código padrão e cole o seu script de integração pessoal gerado abaixo. <strong>Copie agora:</strong> depois de fechar esta janela o token não poderá ser exibido de novo.</p>
+              </div>
 
-          <div className="space-y-2">
-            <p><strong>Passo 3:</strong> No menu central, salve o projeto no <strong>Drive</strong>.</p>
-            <p><strong>Passo 4:</strong> No menu lateral esquerdo do painel do Google, clique no ícone de <strong>Relógio (Acionadores)</strong>.</p>
-            <p><strong>Passo 5:</strong> Clique em "Adicionar Acionador" e configure para rodar a função <code>onFormSubmit</code> no evento <strong>"Ao enviar o formulário" <strong> e na Configurações de notificação de falha </strong> Receber Notificaçções Imediatamente</strong>.</p>
-            <p className="mt-2 text-xs text-slate-500">* Atenção: Este código contém seu Token de Segurança Pessoal. Não o compartilhe publicamente.</p>
-          </div>
+              <div className="relative rounded-md bg-slate-900 p-4">
+                <Button
+                  size="sm"
+                  onClick={onCopyScript}
+                  className="absolute right-2 top-2 bg-slate-700 hover:bg-slate-600 text-white"
+                >
+                  {copySuccess ? "Copiado!" : "Copiar Script"}
+                </Button>
+                <pre className="overflow-x-auto text-xs text-green-400">
+                  <code>{generatedScript}</code>
+                </pre>
+              </div>
+
+              <div className="space-y-2">
+                <p><strong>Passo 3:</strong> No menu central, salve o projeto no <strong>Drive</strong>.</p>
+                <p><strong>Passo 4:</strong> No menu lateral esquerdo do painel do Google, clique no ícone de <strong>Relógio (Acionadores)</strong>.</p>
+                <p><strong>Passo 5:</strong> Clique em "Adicionar Acionador" e configure para rodar a função <code>onFormSubmit</code> no evento <strong>"Ao enviar o formulário"</strong> e, em Configurações de notificação de falha, escolha <strong>Receber notificações imediatamente</strong>.</p>
+                <p className="mt-2 text-xs text-slate-500">* Atenção: este código contém seu token de segurança pessoal. Não o compartilhe publicamente. Se ele vazar, gere um novo token aqui.</p>
+              </div>
+            </>
+          )}
+
+          {/* Termo por profissional: o consentimento marcado no formulário é
+              registrado com a cópia do termo configurado no sistema. */}
+          <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            Use no formulário o mesmo texto do seu Termo de consentimento (Privacidade &amp; LGPD). O consentimento
+            marcado no formulário é registrado com esse texto e a data do envio.
+          </p>
         </div>
       </DialogContent>
     </Dialog>
   );
 }
 
-function RowMenu({ p, onEdit, onOpen, onDelete, onAnon }) {
+function RowMenu({ p, onEdit, onOpen, onDelete, onAnon, onArchive }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -717,6 +956,12 @@ function RowMenu({ p, onEdit, onOpen, onDelete, onAnon }) {
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={onOpen}><FileText className="mr-2 h-4 w-4" /> Prontuários</DropdownMenuItem>
         <DropdownMenuItem onClick={() => onEdit(p)}><Pencil className="mr-2 h-4 w-4" /> Editar</DropdownMenuItem>
+        {/* Item 12: arquivar é a alternativa à exclusão durante a guarda do CFP. */}
+        {p.archived ? (
+          <DropdownMenuItem onClick={() => onArchive(p, false)}><ArchiveRestore className="mr-2 h-4 w-4" /> Reativar</DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onClick={() => onArchive(p, true)}><Archive className="mr-2 h-4 w-4" /> Arquivar</DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={() => onAnon(p)}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
         <DropdownMenuItem onClick={() => onDelete(p)} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
       </DropdownMenuContent>

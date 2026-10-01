@@ -50,6 +50,13 @@ async function request(method, path, body) {
     }
   }
   if (!res.ok) {
+    // Conformidade (item 16): se a Política de Privacidade mudar de versão
+    // durante o uso, o backend recusa as rotas de dados com este código.
+    // O AuthContext ouve o evento, recarrega o usuário e a tela de aceite
+    // aparece sozinha, em vez de o usuário ver erros soltos em cada tela.
+    if (res.status === 403 && data?.detail?.code === "terms_required") {
+      window.dispatchEvent(new Event("psi:terms-required"));
+    }
     const err = new Error(`Request failed with status ${res.status}`);
     err.response = { status: res.status, data };
     throw err;

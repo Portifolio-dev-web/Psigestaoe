@@ -77,7 +77,10 @@ export default function Register() {
               de ponta e conformidade com o CFP.
             </p>
           </div>
-          <p className="text-xs text-blue-200">Criptografia AES-256 · HTTPS/TLS · CFP</p>
+          {/* A política descreve o algoritmo real (Fernet: AES-128 + HMAC). O selo
+              antigo dizia "AES-256", que não é o que o sistema usa; afirmação de
+              segurança falsa é um problema de transparência (LGPD, art. 6º, VI). */}
+          <p className="text-xs text-blue-200">Dados criptografados · HTTPS/TLS · CFP</p>
         </div>
       </div>
 
@@ -108,9 +111,17 @@ export default function Register() {
             <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-3">
               <Checkbox id="terms" checked={terms} onCheckedChange={setTerms}
                 className="mt-0.5" data-testid="register-terms-checkbox" />
+              {/* Conformidade: antes o texto citava "Termos de Privacidade" que não
+                  existiam. Agora o link abre a política real, em nova aba para não
+                  perder o formulário preenchido. O backend registra o aceite com a
+                  versão vigente e a data. */}
               <Label htmlFor="terms" className="text-xs leading-relaxed text-slate-600">
-                Li e aceito os <span className="font-medium text-[#1E3A8A]">Termos de Privacidade</span> e
-                autorizo o tratamento de dados de saúde conforme a LGPD.
+                Li e aceito a{" "}
+                <Link to="/privacidade" target="_blank" rel="noopener noreferrer"
+                  className="font-medium text-[#1E3A8A] underline-offset-2 hover:underline" data-testid="register-privacy-link">
+                  Política de Privacidade
+                </Link>
+                , que explica como o PsiGestão trata os meus dados e os dados dos meus pacientes (LGPD).
               </Label>
             </div>
             <Button type="submit" disabled={loading}

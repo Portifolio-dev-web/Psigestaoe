@@ -7,14 +7,42 @@ from sqlalchemy.orm import declarative_base
 # A variável de ambiente que configuramos no docker-compose
 DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite+aiosqlite:///./psigestao_dev.db"
 
-# Criação da Engine Assíncrona. 
+
+def _pool_options(url: str) -> dict:
+    """Pool de conexões (ESCALA: workers).
+
+    Antes a engine usava o pool padrão (5 + 10 extras) sem nenhum ajuste.
+    Com vários workers isso importa, porque CADA processo tem o próprio pool:
+
+        conexões possíveis = workers × (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+
+    Esse total precisa ficar ABAIXO do max_connections do Postgres (100 por
+    padrão, e alguns planos gerenciados permitem bem menos), sobrando folga
+    para migrações, backups e acesso administrativo. Ex.: 4 workers × (5 + 5)
+    = 40 conexões. Para passar disso, use um PgBouncer na frente do banco.
+    """
+    if url.startswith("sqlite"):
+        return {}  # SQLite (testes e fallback local) não usa pool de rede
+    return {
+        "pool_size": int(os.environ.get("DB_POOL_SIZE", "5")),
+        "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "5")),
+        # Quanto esperar por uma conexão livre antes de falhar. Falhar rápido
+        # (503 na fila) é melhor que empilhar requisições até todas expirarem.
+        "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT", "10")),
+        # Recicla conexões antigas: proxies e bancos gerenciados derrubam
+        # conexões ociosas, e o erro só apareceria na próxima consulta.
+        "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE", "1800")),
+    }
+
+
+# Criação da Engine Assíncrona.
 # O pool_pre_ping=True verifica se a conexão está viva antes de usá-la, evitando quedas silenciosas.
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True, **_pool_options(DATABASE_URL))
 
 # Fábrica de sessões (SessionLocal) que injetaremos no FastAPI
 AsyncSessionLocal = async_sessionmaker(
-    bind=engine, 
-    class_=AsyncSession, 
+    bind=engine,
+    class_=AsyncSession,
     expire_on_commit=False
 )
 

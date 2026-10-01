@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import api, { formatApiErrorDetail } from "@/lib/api";
+import PatientPicker from "@/components/PatientPicker";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,19 +30,29 @@ const toLocalInput = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes()
 export default function Agenda() {
   const [cursor, setCursor] = useState(new Date());
   const [sessions, setSessions] = useState([]);
-  const [patients, setPatients] = useState([]);
+  const [upcoming, setUpcoming] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const load = () => api.get("/sessions").then(({ data }) => setSessions(data)).catch(() => {});
-  useEffect(() => {
-    load();
-    api.get("/patients").then(({ data }) => setPatients(data)).catch(() => {});
-  }, []);
-
   const year = cursor.getFullYear();
   const month = cursor.getMonth();
+
+  // ESCALA: a agenda busca só o que mostra.
+  // Antes: GET /sessions trazia TODAS as sessões desde o primeiro dia de uso,
+  // e GET /patients trazia todos os pacientes só para a lista suspensa.
+  // Agora: o mês visível (início do mês até o início do seguinte) e, à
+  // parte, as 8 próximas sessões. O seletor de paciente busca sob demanda.
+  const load = () => {
+    const monthStart = new Date(year, month, 1);
+    const nextMonthStart = new Date(year, month + 1, 1);
+    const range = new URLSearchParams({ start: monthStart.toISOString(), end: nextMonthStart.toISOString() });
+    api.get(`/sessions?${range}`).then(({ data }) => setSessions(data)).catch(() => {});
+    const next = new URLSearchParams({ start: new Date().toISOString(), limit: 8 });
+    api.get(`/sessions?${next}`).then(({ data }) => setUpcoming(data)).catch(() => {});
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [year, month]);
   const grid = useMemo(() => {
     const first = new Date(year, month, 1);
     const startDay = first.getDay();
@@ -80,8 +91,8 @@ export default function Agenda() {
   const save = async () => {
     if (!form.title.trim()) { toast.warning("Informe um título."); return; }
     setSaving(true);
-    const patient = patients.find((p) => p.id === form.patient_id);
-    const payload = { ...form, patient_name: patient ? patient.full_name : form.patient_name };
+    // O nome do paciente já vem do seletor (PatientPicker) junto com o id.
+    const payload = { ...form, patient_name: form.patient_id ? form.patient_name : "" };
     try {
       if (form.id) await api.put(`/sessions/${form.id}`, payload);
       else await api.post("/sessions", payload);
@@ -170,10 +181,10 @@ export default function Agenda() {
           <h2 className="font-head text-lg font-bold text-[#0F172A]">Próximas sessões</h2>
         </div>
         <div className="mt-4 space-y-2">
-          {sessions.filter((s) => new Date(s.start) >= new Date()).slice(0, 8).length === 0 && (
+          {upcoming.length === 0 && (
             <p className="py-6 text-center text-sm text-slate-400">Nenhuma sessão agendada.</p>
           )}
-          {sessions.filter((s) => new Date(s.start) >= new Date()).slice(0, 8).map((s) => (
+          {upcoming.map((s) => (
             <button key={s.id} onClick={() => openEdit(s)} className="flex w-full items-center gap-3 rounded-md border border-slate-100 p-3 text-left transition-colors hover:bg-slate-50">
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F0F4F8] text-[#1E3A8A]"><Clock className="h-4 w-4" /></div>
               <div className="min-w-0 flex-1">
@@ -200,13 +211,8 @@ export default function Agenda() {
               </div>
               <div>
                 <Label>Paciente</Label>
-                <Select value={form.patient_id || "none"} onValueChange={(v) => setForm({ ...form, patient_id: v === "none" ? "" : v })}>
-                  <SelectTrigger className="mt-1.5" data-testid="session-patient-select"><SelectValue placeholder="Selecione" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">Sem paciente</SelectItem>
-                    {patients.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <PatientPicker value={form.patient_id} valueLabel={form.patient_name}
+                  onChange={(p) => setForm({ ...form, patient_id: p ? p.id : "", patient_name: p ? p.full_name : "" })} />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

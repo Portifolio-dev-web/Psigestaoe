@@ -9,8 +9,16 @@ import { toast } from "sonner";
 import { Stethoscope, Loader2, Mail, Lock } from "lucide-react";
 // Importar o componente de Login do Google (necessita de 'npm install @react-oauth/google')
 import { GoogleLogin } from "@react-oauth/google";
+import { GradientWave } from "@/components/ui/gradient-wave";
 
-const WAVE = "https://images.unsplash.com/photo-1620121478247-ec786b9be2fa?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODd8MHwxfHNlYXJjaHw0fHxhYnN0cmFjdCUyMHNvZnQlMjBibHVlJTIwd2F2ZXN8ZW58MHx8fHwxNzg3NDA0NDM4fDA&ixlib=rb-4.1.0&q=85";
+// Fundo animado do painel esquerdo, nas cores da marca: o azul-marinho do
+// menu (#0F2C59), o azul primário (#1E3A8A) e dois azuis de apoio. As cores
+// padrão do componente (azul-claro e branco) deixariam o texto branco do
+// painel ilegível. Fica numa constante de MÓDULO para o fundo não ser
+// recriado a cada tecla digitada no formulário.
+// Substitui a foto que vinha do Unsplash: uma requisição a menos para um
+// servidor de terceiros a cada abertura da tela de login.
+const LOGIN_GRADIENT_COLORS = ["#0F2C59", "#1E3A8A", "#0369A1", "#1D4ED8"];
 
 export default function Login() {
   const { setUser } = useAuth();
@@ -39,8 +47,8 @@ export default function Login() {
     setLoading(true);
     try {
       // Envia o token JWT (credential) para a API
-      const { data } = await api.post("/auth/google", { 
-        credential: credentialResponse.credential 
+      const { data } = await api.post("/auth/google", {
+        credential: credentialResponse.credential
       });
       setUser(data.user);
       toast.success("Autenticação com Google efetuada com sucesso!");
@@ -54,10 +62,12 @@ export default function Login() {
 
   return (
     <div className="flex min-h-screen">
-      <div className="relative hidden w-1/2 lg:block">
-        <img src={WAVE} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        <div className="absolute inset-0 bg-[#0F2C59]/75" />
-        <div className="relative flex h-full flex-col justify-between p-12 text-white">
+      {/* bg-[#0F2C59]: cor de reserva caso o navegador não tenha WebGL. */}
+      <div className="relative hidden w-1/2 overflow-hidden bg-[#0F2C59] lg:block">
+        <GradientWave colors={LOGIN_GRADIENT_COLORS} />
+        {/* Véu escuro leve: mantém o texto branco legível quando as ondas mais claras passam por trás. */}
+        <div className="absolute inset-0 bg-[#0F2C59]/30" />
+        <div className="relative z-10 flex h-full flex-col justify-between p-12 text-white">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/15">
               <Stethoscope className="h-5 w-5" />
@@ -73,7 +83,7 @@ export default function Login() {
               profissionais de psicologia.
             </p>
           </div>
-          <p className="text-xs text-blue-200">Criptografia AES-256 · HTTPS/TLS · CFP</p>
+          <p className="text-xs text-blue-200">Dados criptografados · HTTPS/TLS · CFP</p>
         </div>
       </div>
 
@@ -145,6 +155,14 @@ export default function Login() {
             Não tem conta?{" "}
             <Link to="/register" className="font-medium text-[#1E3A8A] hover:underline" data-testid="go-register-link">
               Cadastre-se
+            </Link>
+          </p>
+          {/* Só um link de acesso. NÃO usar "ao entrar, você concorda...": aceite
+              implícito não vale como evidência. O aceite explícito acontece no
+              cadastro ou na tela de aceite (TermsGate). */}
+          <p className="mt-3 text-center text-xs">
+            <Link to="/privacidade" className="text-slate-400 hover:text-[#1E3A8A] hover:underline" data-testid="login-privacy-link">
+              Política de Privacidade
             </Link>
           </p>
         </div>

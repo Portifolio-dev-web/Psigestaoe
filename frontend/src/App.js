@@ -10,7 +10,9 @@ import Patients from "@/pages/Patients";
 import PatientDetail from "@/pages/PatientDetail";
 import Agenda from "@/pages/Agenda";
 import Settings from "@/pages/Settings";
+import PrivacyPolicy from "@/pages/PrivacyPolicy";
 import AppLayout from "@/components/AppLayout";
+import TermsGate from "@/components/TermsGate";
 import { Loader2 } from "lucide-react";
 
 function LoadingScreen() {
@@ -28,6 +30,11 @@ function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
+  // Conformidade (item 16): sem o aceite da versão VIGENTE da Política de
+  // Privacidade, nenhuma tela do sistema é exibida, só a tela de aceite.
+  // O backend aplica a mesma regra (get_active_user), então isto é a
+  // experiência do usuário, não a única barreira.
+  if (!user.terms_accepted) return <TermsGate />;
   return children;
 }
 
@@ -44,6 +51,8 @@ function AppRouter() {
     <Routes>
       <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
       <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
+      {/* Pública para todos (logado ou não): a política deve poder ser lida antes do aceite. */}
+      <Route path="/privacidade" element={<PrivacyPolicy />} />
       <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/pacientes" element={<Patients />} />
