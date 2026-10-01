@@ -24,8 +24,10 @@ from google.auth.transport import requests as google_requests
 import jwt
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -47,6 +49,7 @@ from crypto import (
 from rate_limit import client_ip, enforce, rate_limit, warn_if_not_shared
 from database import get_db, engine, Base
 from environment import get_environment
+from http_security import BodySizeLimitMiddleware, SecurityHeadersMiddleware, validation_error_handler
 from models import (
     AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
 )
@@ -211,6 +214,12 @@ def _load_cors_origins() -> list[str]:
 
 origins = _load_cors_origins()
 
+# SEGURANÇA (varredura, item 3): limite de tamanho do corpo (detalhes em
+# http_security.py). Registrado ANTES do CORS para ficar por dentro dele: a
+# resposta 413 também leva os cabeçalhos de CORS, e o frontend consegue ler
+# a mensagem em vez de ver um erro de rede genérico.
+app.add_middleware(BodySizeLimitMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -249,9 +258,17 @@ class AuditContextMiddleware:
 
 
 app.add_middleware(AuditContextMiddleware)
+# SEGURANÇA (varredura, item 12): cabeçalhos de segurança em TODA resposta,
+# inclusive as do CORS e as 413 (por isso fica por fora deles). O HSTS só em
+# produção, que roda atrás de HTTPS. Detalhes em http_security.py.
+app.add_middleware(SecurityHeadersMiddleware, hsts=ENVIRONMENT == "production")
 # Adicionado por último = camada mais externa: mede o tempo de TODA a
 # requisição (inclusive CORS) e garante o X-Request-ID em todas as respostas.
 app.add_middleware(observability.RequestContextMiddleware)
+
+# SEGURANÇA (varredura, itens 3 e 12): o erro 422 diz qual campo está errado e
+# por quê, sem devolver o valor enviado (senha, CPF, prontuário). Ver http_security.py.
+app.add_exception_handler(RequestValidationError, validation_error_handler)
 
 # Monitoramento: Sentry (só com SENTRY_DSN) e alerta de rate limit não
 # compartilhado entre workers (ver rate_limit.py).
@@ -473,29 +490,114 @@ class ProfileInput(BaseModel):
         return value
 
 class GoogleAuthInput(BaseModel):
-    credential: str # O ID Token JWT retornado pelo Google Identity Services no frontend
+    # O ID Token JWT retornado pelo Google Identity Services no frontend.
+    # Segurança (varredura, item 3): um token real tem ~1 a 2 KB.
+    credential: str = Field(max_length=8192)
+
+
+# ---------------------------------------------------------------------------
+# SEGURANÇA (varredura, itens 2 e 3): limites e formatos dos dados do paciente.
+# Antes nenhum campo tinha tamanho máximo, o e-mail aceitava qualquer texto e
+# o CPF não era conferido: dava para gravar megabytes num campo (que ainda é
+# criptografado, crescendo ~33%) e travar a geração do PDF. O frontend usa os
+# MESMOS limites (frontend/src/lib/validation.js); quem decide é o servidor.
+# ---------------------------------------------------------------------------
+PATIENT_NAME_MAX = 150
+PATIENT_NOTES_MAX = 10_000
+RECORD_CONTENT_MAX = 50_000  # ~10 páginas por evolução: sobra para o uso clínico
+RECORD_DIAGNOSIS_MAX = 5_000
+_CPF_CHARS = re.compile(r"[\d.\-\s]+")
+_PHONE_CHARS = re.compile(r"[\d\s()+.\-]+")
+
+
+def cpf_is_valid(digits: str) -> bool:
+    """Confere os dois dígitos verificadores do CPF (regra da Receita Federal)."""
+    if len(digits) != 11 or digits == digits[0] * 11:  # 000.000.000-00 etc. passam na conta, mas não existem
+        return False
+    for size in (9, 10):
+        total = sum(int(d) * weight for d, weight in zip(digits[:size], range(size + 1, 1, -1)))
+        if (total * 10) % 11 % 10 != int(digits[size]):
+            return False
+    return True
+
 
 class PatientInput(BaseModel):
-    full_name: str
-    cpf: Optional[str] = ""
-    rg: Optional[str] = ""
+    full_name: str = Field(max_length=PATIENT_NAME_MAX)
+    cpf: Optional[str] = Field(default="", max_length=20)
+    rg: Optional[str] = Field(default="", max_length=20)
     birth_date: Optional[date] = None # Tipagem alterada para date nativo
-    age: Optional[str] = ""
-    education: Optional[str] = ""
-    marital_status: Optional[str] = ""
-    profession: Optional[str] = ""
-    phone: Optional[str] = ""
-    email: Optional[str] = ""
-    address: Optional[str] = ""
-    emergency_contact: Optional[str] = ""
-    initial_notes: Optional[str] = ""
+    age: Optional[str] = Field(default="", max_length=20)
+    education: Optional[str] = Field(default="", max_length=100)
+    marital_status: Optional[str] = Field(default="", max_length=100)
+    profession: Optional[str] = Field(default="", max_length=100)
+    phone: Optional[str] = Field(default="", max_length=30)
+    email: Optional[str] = Field(default="", max_length=254)  # limite do próprio padrão de e-mail
+    address: Optional[str] = Field(default="", max_length=300)
+    emergency_contact: Optional[str] = Field(default="", max_length=200)
+    initial_notes: Optional[str] = Field(default="", max_length=PATIENT_NOTES_MAX)
     consent_terms: bool = False
+
+    @field_validator("*")
+    @classmethod
+    def reject_null_bytes(cls, value):
+        # O PostgreSQL recusa o caractere nulo em texto: antes, um "\x00" num
+        # campo virava erro 500 em vez de uma mensagem de validação.
+        if isinstance(value, str) and "\x00" in value:
+            raise ValueError("Texto com caractere inválido.")
+        return value
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Informe o nome completo do paciente.")
+        return value
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: Optional[str]) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        digits = re.sub(r"\D", "", value)
+        if not _CPF_CHARS.fullmatch(value) or not cpf_is_valid(digits):
+            raise ValueError("CPF inválido. Confira os 11 números.")
+        return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"  # sempre no mesmo formato
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: Optional[str]) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        digits = re.sub(r"\D", "", value)
+        # 10 ou 11 dígitos com DDD; até 15 com código do país (padrão E.164).
+        if not _PHONE_CHARS.fullmatch(value) or not 10 <= len(digits) <= 15:
+            raise ValueError("Telefone inválido. Informe o DDD e o número, ex.: (11) 91234-5678.")
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_address(cls, value: Optional[str]) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        try:
+            return validate_email(value, check_deliverability=False).normalized
+        except EmailNotValidError:
+            raise ValueError("E-mail inválido.") from None
 
     @field_validator("birth_date", mode="before")
     @classmethod
     def normalize_birth_date(cls, value):
         if isinstance(value, str):
             value = value.strip()
+            # Campo de data vazio no formulário = paciente sem data informada.
+            # Antes o "" ia direto para a conversão de data e o cadastro inteiro
+            # falhava com um erro em inglês (achado nos testes da varredura, Fase 4).
+            if not value:
+                return None
             parts = value.replace("/", "-").split("-")
             if len(parts) == 3 and len(parts[0]) == 2 and len(parts[1]) == 2 and len(parts[2]) == 4:
                 try:
@@ -503,6 +605,43 @@ class PatientInput(BaseModel):
                 except ValueError:
                     return value
         return value
+
+    @field_validator("birth_date")
+    @classmethod
+    def validate_birth_date(cls, value: Optional[date]) -> Optional[date]:
+        # Segurança (varredura, item 3): datas impossíveis (futuras ou de antes
+        # de 1900) eram aceitas e apareciam no prontuário e no PDF.
+        if value is not None and not date(1900, 1, 1) <= value <= date.today():
+            raise ValueError("Data de nascimento inválida.")
+        return value
+
+
+class WebhookPatientInput(PatientInput):
+    """Paciente vindo do Google Forms (webhook).
+
+    Segurança (varredura, item 3): os mesmos LIMITES de tamanho do cadastro
+    manual. Já o FORMATO de CPF, telefone e e-mail não bloqueia: quem preenche
+    o formulário é o paciente, e um erro de digitação recusaria o cadastro
+    inteiro sem ninguém ver (o Google Forms não mostra a resposta da API). O
+    dado entra como veio; ao editar o paciente, o profissional precisa corrigi-lo.
+    Os métodos abaixo têm o MESMO nome dos validadores de PatientInput, e por
+    isso os substituem.
+    """
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, value: Optional[str]) -> str:
+        return (value or "").strip()
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: Optional[str]) -> str:
+        return (value or "").strip()
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_address(cls, value: Optional[str]) -> str:
+        return (value or "").strip()
 
 
 # CORREÇÃO (item 6 da auditoria): termo de consentimento por profissional.
@@ -597,7 +736,7 @@ class ConsentTermInput(BaseModel):
 class AcceptTermsInput(BaseModel):
     # O cliente informa QUAL versão leu. Se a política mudou enquanto a tela
     # estava aberta, o aceite é recusado em vez de valer para um texto não lido.
-    version: str
+    version: str = Field(max_length=32)  # varredura, item 3: ex.: "2026-09-30"
 
 # CORREÇÃO DE PRODUTO (horários deslocados):
 # O frontend mandava a data do campo "datetime-local" SEM fuso horário
@@ -615,8 +754,10 @@ def _require_timezone(value: Optional[datetime]) -> Optional[datetime]:
 
 class RecordInput(BaseModel):
     session_datetime: datetime # Tipagem alterada para datetime nativo
-    content: str
-    diagnosis: Optional[str] = ""
+    # Segurança (varredura, item 3): antes sem limite. Os limites cobrem com
+    # folga o uso clínico e impedem gravar megabytes por evolução.
+    content: str = Field(max_length=RECORD_CONTENT_MAX)
+    diagnosis: Optional[str] = Field(default="", max_length=RECORD_DIAGNOSIS_MAX)
 
     @field_validator("session_datetime")
     @classmethod
@@ -633,8 +774,9 @@ MAX_SESSION_DURATION = timedelta(hours=12)
 
 
 class SessionInput(BaseModel):
-    patient_id: Optional[str] = ""
-    patient_name: Optional[str] = ""
+    # Segurança (varredura, item 3): limites também nos campos que faltavam.
+    patient_id: Optional[str] = Field(default="", max_length=64)
+    patient_name: Optional[str] = Field(default="", max_length=PATIENT_NAME_MAX)
     title: str = Field(max_length=200)
     start: datetime # Tipagem alterada para datetime nativo
     end: Optional[datetime] = None # Tipagem alterada para datetime nativo
@@ -1726,10 +1868,14 @@ def patient_summary(p: Patient) -> dict:
     }
 
 
+# Segurança (varredura, item 3): um cursor de paginação real tem ~60 caracteres.
+CURSOR_MAX = 200
+
+
 class PatientSearchInput(BaseModel):
     q: str = Field(default="", max_length=120)
     archived: bool = False
-    cursor: Optional[str] = None
+    cursor: Optional[str] = Field(default=None, max_length=CURSOR_MAX)
     limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
 
 
@@ -1764,7 +1910,7 @@ async def _patients_page(db: AsyncSession, user: User, *, archived: bool, query:
 @api_router.get("/patients")
 async def list_patients(
     archived: bool = Query(False, description="true = lista só os arquivados (item 12)"),
-    cursor: Optional[str] = Query(None, description="next_cursor da página anterior"),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
@@ -1947,7 +2093,7 @@ async def anonymize_patient(pid: str, user: User = Depends(get_active_user), db:
 @api_router.get("/patients/{pid}/records")
 async def list_records(
     pid: str,
-    cursor: Optional[str] = Query(None, description="next_cursor da página anterior"),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
@@ -2071,7 +2217,11 @@ def _render_patient_pdf(pat: dict, recs: list, professional_name: str, professio
 
 
 @api_router.get("/patients/{pid}/export")
-async def export_patient(pid: str, format: str = Query("json"), user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def export_patient(pid: str,
+                         # Segurança (varredura, item 3): antes qualquer texto era aceito, ia
+                         # para a auditoria e caía no PDF. Agora só os dois formatos existentes.
+                         format: Literal["json", "pdf"] = Query("json"),
+                         user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     p = await _get_owned_patient(db, pid, user)
 
     stmt_r = select(Record).where(Record.patient_id == pid, Record.owner_id == user.user_id).order_by(desc(Record.session_datetime))
@@ -2106,7 +2256,7 @@ async def export_patient(pid: str, format: str = Query("json"), user: User = Dep
 
 @api_router.get("/audit")
 async def get_audit(
-    cursor: Optional[str] = Query(None, description="next_cursor da página anterior"),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
@@ -2138,13 +2288,16 @@ async def get_audit(
 # (Header já importado no topo do arquivo)
 
 class WebhookPayload(BaseModel):
-    patient_data: PatientInput
+    # Segurança (varredura, item 3): mesmos limites do cadastro manual, sem
+    # recusar o cadastro por erro de formato do paciente (ver WebhookPatientInput).
+    patient_data: WebhookPatientInput
 
 # Item 9: o token do webhook é o único segredo desta rota pública. O limite
 # impede tanto adivinhar tokens quanto inundar a base com pacientes falsos
 # caso o token vaze. 30/min comporta com folga um formulário real.
 @api_router.post("/webhook/google-forms", dependencies=[Depends(rate_limit("webhook", 30, 60))])
-async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = Header(...), db: AsyncSession = Depends(get_db)):
+async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = Header(..., max_length=128),
+                               db: AsyncSession = Depends(get_db)):
     # Item 15: o banco só tem o HASH do token; comparamos hash com hash.
     # A busca é por igualdade em coluna indexada, sem comparar caractere a
     # caractere em Python, então não há vazamento útil por tempo de resposta.

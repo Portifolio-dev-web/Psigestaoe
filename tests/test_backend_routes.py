@@ -83,7 +83,9 @@ async def test_all_backend_routes(client):
     password = "Senha-segura-123"
     patient_payload = {
         "full_name": "Paciente de Teste",
-        "cpf": "12345678900",
+        # Segurança (varredura, item 3): o CPF agora é conferido (dígitos
+        # verificadores). 123.456.789-09 é válido; o antigo ...-00 não era.
+        "cpf": "12345678909",
         "birth_date": "1990-01-02",
         "phone": "11999999999",
         "marital_status": "Casado(a)",
@@ -147,7 +149,7 @@ async def test_all_backend_routes(client):
     patient = await client.post("/api/patients", headers=headers, json=patient_payload)
     assert patient.status_code == 200
     patient_id = patient.json()["id"]
-    assert patient.json()["cpf"] == patient_payload["cpf"]
+    assert patient.json()["cpf"] == "123.456.789-09"  # gravado sempre no mesmo formato
     assert patient.json()["marital_status"] == patient_payload["marital_status"]
     assert patient.json()["consent_terms"] is True
     assert patient.json()["consent_terms_status"] == "Concordo"
@@ -299,7 +301,7 @@ async def _create_patient(client, email="crypto.test@example.com"):
         "name": "Crypto Test", "email": email, "password": "Senha-segura-123", "terms_accepted": True,
     })
     response = await client.post("/api/patients", json={
-        "full_name": "Paciente Cripto", "cpf": "12345678900", "address": "Rua A, 1",
+        "full_name": "Paciente Cripto", "cpf": "123.456.789-09", "address": "Rua A, 1",
     })
     assert response.status_code == 200
     return response.json()["id"]
@@ -351,7 +353,7 @@ async def test_rotation_script_migrates_legacy_jwt_derived_key(client, monkeypat
     response = await client.get(f"/api/patients/{patient_id}")
 
     assert response.status_code == 200
-    assert response.json()["cpf"] == "12345678900"
+    assert response.json()["cpf"] == "123.456.789-09"
     assert response.json()["address"] == "Rua A, 1"
 
 
@@ -1415,3 +1417,140 @@ async def test_sign_out_of_other_devices(client):
 
     logs = (await client.get("/api/audit")).json()["items"]
     assert any(log["action"] == "encerrar" and "outros dispositivos" in log["detail"] for log in logs)
+
+
+# ---------------------------------------------------------------------------
+# Segurança (varredura, Fase 4): validação e exposição de informação (itens 2, 3 e 12)
+# ---------------------------------------------------------------------------
+
+def test_cpf_check_digits():
+    assert server.cpf_is_valid("12345678909")
+    assert not server.cpf_is_valid("12345678900")   # dígito verificador errado
+    assert not server.cpf_is_valid("11111111111")   # todos iguais: passa na conta, mas não existe
+    assert not server.cpf_is_valid("1234567890")    # 10 dígitos
+
+
+@pytest.mark.anyio
+async def test_patient_fields_are_validated(client):
+    await _register(client, "validacao@example.com")
+
+    async def create(**fields):
+        return await client.post("/api/patients", json={"full_name": "Paciente Válido", **fields})
+
+    ok = await create(cpf="123.456.789-09", phone="(11) 91234-5678", email="Paciente@Example.com")
+    assert ok.status_code == 200
+    assert ok.json()["cpf"] == "123.456.789-09" and ok.json()["email"] == "Paciente@example.com"
+
+    cases = {
+        "cpf": "123.456.789-00",          # dígito verificador errado
+        "phone": "1234",                  # sem DDD
+        "email": "nao-e-email",
+        "birth_date": "2999-01-01",       # no futuro
+        "full_name": "x" * 151,           # acima do limite
+        "address": "Rua " * 100,          # 400 caracteres (limite 300)
+        "initial_notes": "a" * 10_001,
+        "profession": "Psic\x00ologa",   # caractere nulo: antes virava erro 500 no PostgreSQL
+    }
+    for field, value in cases.items():
+        assert (await create(**{field: value})).status_code == 422, field
+    assert (await create(full_name="   ")).status_code == 422
+
+    # Mensagens em português, com o limite, sem repetir o valor enviado.
+    too_long = (await create(address="Rua " * 100)).json()["detail"][0]
+    assert too_long["msg"] == "Texto longo demais (máximo de 300 caracteres)."
+
+    # Data de nascimento em branco no formulário = sem data (antes: erro 422 em inglês).
+    blank_date = await create(birth_date="")
+    assert blank_date.status_code == 200 and blank_date.json()["birth_date"] in ("", None)
+
+
+@pytest.mark.anyio
+async def test_record_and_query_limits(client):
+    patient_id = await _create_patient(client, "limites@example.com")
+    record = {"session_datetime": "2026-09-15T10:00:00Z", "content": "a" * 50_001}
+    assert (await client.post(f"/api/patients/{patient_id}/records", json=record)).status_code == 422
+    assert (await client.post(f"/api/patients/{patient_id}/records", json={**record, "content": "ok"})).status_code == 200
+
+    assert (await client.get(f"/api/patients/{patient_id}/export", params={"format": "exe"})).status_code == 422
+    assert (await client.get("/api/patients", params={"cursor": "c" * 201})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_webhook_keeps_limits_but_not_format_rules(client):
+    # O paciente preenche o Google Forms: um CPF digitado errado não pode fazer
+    # o cadastro inteiro sumir. Os limites de tamanho continuam valendo.
+    await _register(client, "forms.validacao@example.com")
+    token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
+
+    def send(data):
+        return client.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
+                           json={"patient_data": {"full_name": "Paciente do Forms", **data}})
+
+    accepted = await send({"cpf": "123.456.789-00", "phone": "1234", "email": "sem-arroba"})
+    assert accepted.status_code == 200
+    stored = (await client.get(f"/api/patients/{accepted.json()['paciente_id']}")).json()
+    assert stored["cpf"] == "123.456.789-00"  # o profissional corrige ao editar
+    assert (await send({"address": "x" * 301})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_request_body_size_is_limited(client):
+    # Antes o corpo inteiro ia para a memória, sem limite, até em rotas sem login.
+    huge = {"email": "a@example.com", "password": "x" * (2 * 1024 * 1024)}
+    response = await client.post("/api/auth/login", json=huge)
+    assert response.status_code == 413
+    assert "grande demais" in response.json()["detail"]
+
+    async def chunks():  # envio em partes, sem Content-Length
+        for _ in range(3):
+            yield b"x" * (600 * 1024)
+
+    streamed = await client.post("/api/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
+    assert streamed.status_code == 413
+
+    async def small_chunks():
+        yield b'{"email": "nao@example.com", '
+        yield b'"password": "Senha-qualquer-1"}'
+
+    normal = await client.post("/api/auth/login", content=small_chunks(), headers={"Content-Type": "application/json"})
+    assert normal.status_code == 401  # o corpo em partes chegou inteiro e foi validado normalmente
+
+
+@pytest.mark.anyio
+async def test_validation_error_does_not_echo_input(client):
+    secret = "senhasomenteletras"  # fora da política (sem números)
+    response = await client.post("/api/auth/register", json={
+        "name": "Eco", "email": "eco@example.com", "password": secret, "terms_accepted": True,
+    })
+    assert response.status_code == 422
+    assert secret not in response.text
+    error = response.json()["detail"][0]
+    assert set(error) == {"loc", "msg", "type"}
+    assert error["loc"] == ["body", "password"]
+    assert error["msg"] == "A senha deve conter letras e números."  # sem o prefixo "Value error, "
+
+
+@pytest.mark.anyio
+async def test_security_headers(client):
+    response = await client.get("/api/health/live")
+    headers = response.headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["x-frame-options"] == "DENY"
+    assert "default-src 'none'" in headers["content-security-policy"]
+    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["cache-control"] == "no-store"
+    assert "strict-transport-security" not in headers  # HSTS só em produção (HTTPS)
+
+    # Rota que define o próprio Cache-Control não é sobrescrita; /docs fica sem a CSP (usa CDN).
+    assert "content-security-policy" not in (await client.get("/docs")).headers
+
+    # Erros também levam os cabeçalhos.
+    assert (await client.get("/api/patients")).headers["x-frame-options"] == "DENY"
+
+    from fastapi import FastAPI
+    from http_security import SecurityHeadersMiddleware
+
+    production_app = FastAPI()
+    production_app.add_middleware(SecurityHeadersMiddleware, hsts=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=production_app), base_url="https://test") as prod:
+        assert "max-age=63072000" in (await prod.get("/x")).headers["strict-transport-security"]

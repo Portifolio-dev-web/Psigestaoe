@@ -30,7 +30,9 @@ services:
     # e sobe UM processo com recarga automática ao salvar arquivos.
     # A imagem, por padrão, sobe em modo de PRODUÇÃO (start.sh: migração +
     # gunicorn com vários workers); este comando substitui isso só aqui.
-    command: sh -c "python prestart.py && uvicorn server:app --host 0.0.0.0 --port 5000 --reload"
+    # Segurança (varredura, item 12): --no-server-header tira o cabeçalho
+    # "server: uvicorn" das respostas (em produção: gunicorn.conf.py).
+    command: sh -c "python prestart.py && uvicorn server:app --host 0.0.0.0 --port 5000 --reload --no-server-header"
     env_file:
       - .env
       - ./backend/.env

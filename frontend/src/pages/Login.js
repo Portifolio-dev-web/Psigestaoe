@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
+import { LIMITS } from "@/lib/validation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -122,8 +123,9 @@ export default function Login() {
               <Label htmlFor="email" className="text-slate-700">E-mail</Label>
               <div className="relative mt-1.5">
                 <Mail className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
                 <Input
-                  id="email" type="email" required value={email}
+                  id="email" type="email" required maxLength={LIMITS.email} value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="voce@clinica.com" className="pl-9"
                   data-testid="login-email-input"
@@ -135,7 +137,7 @@ export default function Login() {
               <div className="relative mt-1.5">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
                 <Input
-                  id="password" type="password" required value={password}
+                  id="password" type="password" required maxLength={LIMITS.loginPassword} value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••" className="pl-9"
                   data-testid="login-password-input"

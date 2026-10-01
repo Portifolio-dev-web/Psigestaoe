@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
+import { LIMITS } from "@/lib/validation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -92,12 +93,13 @@ export default function Register() {
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>
               <Label htmlFor="name" className="text-slate-700">Nome completo</Label>
-              <Input id="name" required value={form.name} onChange={upd("name")}
+              {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
+              <Input id="name" required maxLength={LIMITS.professionalName} value={form.name} onChange={upd("name")}
                 className="mt-1.5" placeholder="Dra. Maria Silva" data-testid="register-name-input" />
             </div>
             <div>
               <Label htmlFor="email" className="text-slate-700">E-mail</Label>
-              <Input id="email" type="email" required value={form.email} onChange={upd("email")}
+              <Input id="email" type="email" required maxLength={LIMITS.email} value={form.email} onChange={upd("email")}
                 className="mt-1.5" placeholder="voce@clinica.com" data-testid="register-email-input" />
             </div>
             <div>

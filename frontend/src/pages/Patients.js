@@ -11,6 +11,7 @@ import {
 
 // API & Utils
 import api, { formatApiErrorDetail } from "@/lib/api";
+import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
 
 // UI Components
 import { Card } from "@/components/ui/card";
@@ -180,9 +181,12 @@ export default function Patients() {
     }
   };
 
+  // Segurança (varredura, item 2): CPF e telefone ganham máscara enquanto a
+  // pessoa digita (ver lib/validation.js).
+  const MASKS = { cpf: maskCPF, phone: maskPhone };
   const upd = (k) => (e) => setForm({
     ...form,
-    [k]: k === "consent_terms" ? e.target.value === "true" : e.target.value,
+    [k]: k === "consent_terms" ? e.target.value === "true" : (MASKS[k] ? MASKS[k](e.target.value) : e.target.value),
   });
 
   // ========================================================================
@@ -190,6 +194,13 @@ export default function Patients() {
   // ========================================================================
   const save = async (e) => {
     e.preventDefault();
+    // Segurança (varredura, item 2): avisa antes de enviar. O servidor confere
+    // de novo (e é ele quem decide), mas assim a pessoa corrige sem esperar.
+    const problem = cpfProblem(form.cpf) || phoneProblem(form.phone);
+    if (problem) {
+      toast.error(problem);
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -478,6 +489,7 @@ function PatientSearch({ query, onQueryChange }) {
     <div className="relative max-w-sm">
       <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
       <Input
+        maxLength={LIMITS.search} // varredura, item 2: o servidor aceita até 120 caracteres
         placeholder="Buscar por nome (mín. 2 letras)..."
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
@@ -612,6 +624,11 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
   const consentDate = editing?.consent_terms && editing.consent_given_at
     ? new Date(editing.consent_given_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
     : "";
+  // Segurança (varredura, item 2): limites iguais aos do servidor e aviso de
+  // CPF/telefone inválido já no campo. Um paciente vindo do Google Forms pode
+  // ter CPF digitado errado pelo próprio paciente: o aviso aparece ao editar.
+  const cpfError = cpfProblem(form.cpf);
+  const phoneError = phoneProblem(form.phone);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
@@ -625,6 +642,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             <Label>Nome completo *</Label>
             <Input
               required
+              maxLength={LIMITS.patientName}
               value={form.full_name}
               onChange={onFormChange("full_name")}
               className="mt-1.5"
@@ -633,19 +651,26 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>CPF</Label>
+            <Label htmlFor="patient-cpf">CPF</Label>
             <Input
+              id="patient-cpf"
+              inputMode="numeric"
+              maxLength={LIMITS.cpf}
               value={form.cpf}
               onChange={onFormChange("cpf")}
               className="mt-1.5"
+              aria-invalid={Boolean(cpfError)}
+              aria-describedby={cpfError ? "patient-cpf-error" : undefined}
               data-testid="patient-cpf-input"
               placeholder="000.000.000-00"
             />
+            {cpfError && <p id="patient-cpf-error" className="mt-1 text-xs text-red-600">{cpfError}</p>}
           </div>
 
           <div>
             <Label>RG</Label>
             <Input
+              maxLength={LIMITS.rg}
               value={form.rg}
               onChange={onFormChange("rg")}
               className="mt-1.5"
@@ -657,6 +682,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             <Label>Data de nascimento</Label>
             <Input
               type="date"
+              min="1900-01-01"
+              max={todayISO()}
               value={form.birth_date}
               onChange={onFormChange("birth_date")}
               className="mt-1.5"
@@ -668,6 +695,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             <Label>Idade</Label>
             <Input
               type="number"
+              min={0}
+              max={130}
               value={form.age}
               onChange={onFormChange("age")}
               className="mt-1.5"
@@ -713,6 +742,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div>
             <Label>Profissão</Label>
             <Input
+              maxLength={LIMITS.profession}
               value={form.profession}
               onChange={onFormChange("profession")}
               className="mt-1.5"
@@ -721,20 +751,28 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Telefone</Label>
+            <Label htmlFor="patient-phone">Telefone</Label>
             <Input
+              id="patient-phone"
+              type="tel"
+              inputMode="tel"
+              maxLength={LIMITS.phone}
               value={form.phone}
               onChange={onFormChange("phone")}
               className="mt-1.5"
+              aria-invalid={Boolean(phoneError)}
+              aria-describedby={phoneError ? "patient-phone-error" : undefined}
               data-testid="patient-phone-input"
-              placeholder="(XX) XXXX-XXXX"
+              placeholder="(11) 91234-5678"
             />
+            {phoneError && <p id="patient-phone-error" className="mt-1 text-xs text-red-600">{phoneError}</p>}
           </div>
 
           <div>
             <Label>Email</Label>
             <Input
               type="email"
+              maxLength={LIMITS.email}
               value={form.email}
               onChange={onFormChange("email")}
               className="mt-1.5"
@@ -745,6 +783,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div>
             <Label>Endereço</Label>
             <Input
+              maxLength={LIMITS.address}
               value={form.address}
               onChange={onFormChange("address")}
               className="mt-1.5"
@@ -755,6 +794,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div>
             <Label>Contato de emergência</Label>
             <Input
+              maxLength={LIMITS.emergencyContact}
               value={form.emergency_contact}
               onChange={onFormChange("emergency_contact")}
               className="mt-1.5"
@@ -765,6 +805,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <div>
             <Label>Notas iniciais</Label>
             <Textarea
+              maxLength={LIMITS.patientNotes}
               value={form.initial_notes}
               onChange={onFormChange("initial_notes")}
               className="mt-1.5"

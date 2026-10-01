@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { LIMITS } from "@/lib/validation";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -183,14 +184,25 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
             <div>
               <Label htmlFor="record-diagnosis">Diagnóstico / hipótese (opcional)</Label>
               <Input id="record-diagnosis" value={fields.diagnosis} onChange={set("diagnosis")}
+                maxLength={LIMITS.recordDiagnosis}
                 className="mt-1.5" placeholder="CID / hipótese diagnóstica" data-testid="record-diagnosis-input" />
             </div>
           </div>
           <div>
             <Label htmlFor="record-content">Anotação clínica</Label>
+            {/* Segurança (varredura, item 2): mesmo limite do servidor (50 mil
+                caracteres, ~10 páginas). Perto do limite aparece um contador,
+                para a anotação não ser cortada sem a pessoa perceber. */}
             <Textarea id="record-content" value={fields.content} onChange={set("content")}
+              maxLength={LIMITS.recordContent}
+              aria-describedby={fields.content.length > LIMITS.recordContent * 0.9 ? "record-content-count" : undefined}
               rows={12} className="mt-1.5 psi-scroll font-normal leading-relaxed"
               placeholder="Descreva a evolução da sessão..." data-testid="record-content-input" />
+            {fields.content.length > LIMITS.recordContent * 0.9 && (
+              <p id="record-content-count" className="mt-1 text-right text-xs text-amber-700" role="status">
+                {fields.content.length.toLocaleString("pt-BR")} de {LIMITS.recordContent.toLocaleString("pt-BR")} caracteres
+              </p>
+            )}
           </div>
         </div>
 

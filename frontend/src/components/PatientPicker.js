@@ -4,6 +4,7 @@ import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { LIMITS } from "@/lib/validation";
 
 // ESCALA: seletor de paciente com busca NO SERVIDOR.
 //
@@ -58,7 +59,8 @@ export default function PatientPicker({ value, valueLabel, onChange }) {
       </PopoverTrigger>
       <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
         <Command shouldFilter={false}>
-          <CommandInput placeholder="Buscar paciente pelo nome..." value={query} onValueChange={setQuery} />
+          {/* Segurança (varredura, item 2): o servidor aceita buscas de até 120 caracteres. */}
+          <CommandInput placeholder="Buscar paciente pelo nome..." value={query} onValueChange={setQuery} maxLength={LIMITS.search} />
           <CommandList>
             <CommandGroup>
               <CommandItem value="__sem_paciente__" onSelect={() => choose(null)}>
