@@ -51,7 +51,7 @@ function toForm(initial) {
 
 const durationMinutes = (form) => (new Date(form.end) - new Date(form.start)) / 60000;
 
-export default function SessionDialog({ open, initial, saving, onOpenChange, onSubmit, onDelete }) {
+export default function SessionDialog({ open, initial, saving, deleting, onOpenChange, onSubmit, onDelete }) {
   const [form, setForm] = useState(() => toForm(initial));
 
   useEffect(() => {
@@ -156,10 +156,11 @@ export default function SessionDialog({ open, initial, saving, onOpenChange, onS
           </div>
         </div>
         <DialogFooter className="flex-row justify-between sm:justify-between">
+          {/* Varredura, item 9: "Remover" fica travado enquanto a exclusão está em andamento. */}
           {form.id ? (
-            <Button variant="ghost" onClick={() => onDelete(form.id)} className="gap-2 text-red-500 hover:bg-red-50 hover:text-red-600"
-              data-testid="delete-session-btn">
-              <Trash2 className="h-4 w-4" /> Remover
+            <Button variant="ghost" onClick={() => onDelete(form.id)} disabled={deleting || saving}
+              className="gap-2 text-red-500 hover:bg-red-50 hover:text-red-600" data-testid="delete-session-btn">
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Remover
             </Button>
           ) : <span />}
           <Button onClick={submit} disabled={saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="save-session-btn">

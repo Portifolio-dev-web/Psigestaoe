@@ -49,11 +49,15 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
   const [fields, setFields] = useState(baseline);
   const [restored, setRestored] = useState(null); // { savedAt, baseVersion } do rascunho recuperado
   const [saving, setSaving] = useState(false);
+  // Segurança (varredura, item 9): outra edição desta anotação foi salva
+  // enquanto esta estava aberta (o servidor respondeu 409). { currentVersion }
+  const [conflict, setConflict] = useState(null);
 
   useEffect(() => {
     if (!open) return undefined;
     setFields(baseline);
     setRestored(null);
+    setConflict(null);
     if (userId) prepareDraftKey(userId); // chave em memória ANTES de qualquer imprevisto
     let cancelled = false;
     if (slot && draftsSupported()) {
@@ -101,7 +105,10 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     onOpenChange(next);
   };
 
-  const save = async () => {
+  // `expectedVersion`: a versão que foi aberta para editar. Só muda em
+  // "Salvar mesmo assim", que confirma sobrescrever a versão mais nova.
+  const save = async (expectedVersion = record?.version) => {
+    if (saving) return; // varredura, item 9: um envio por vez
     if (!fields.content.trim()) {
       toast.warning("A anotação clínica não pode estar vazia.");
       return;
@@ -115,18 +122,26 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     try {
       const body = { session_datetime: sessionDatetime, content: fields.content, diagnosis: fields.diagnosis };
       if (record) {
-        await api.put(`/records/${record.id}`, body);
+        // Segurança (varredura, item 9): controle otimista de versão. O
+        // servidor recusa (409) se outra edição chegou antes desta.
+        await api.put(`/records/${record.id}`, { ...body, expected_version: expectedVersion });
         toast.success("Prontuário atualizado (nova versão registrada em auditoria).");
       } else {
         await api.post(`/patients/${patientId}/records`, body);
         toast.success("Prontuário registrado.");
       }
       draft.discard(); // salvo no servidor: o rascunho deixa de existir
+      setConflict(null);
       onOpenChange(false);
       onSaved();
     } catch (err) {
       const status = err.response?.status;
-      if (status === 401) {
+      const detail = err.response?.data?.detail;
+      if (status === 409 && detail?.code === "record_conflict") {
+        // Nada foi salvo: o texto continua no editor e vai para o rascunho.
+        draft.flush();
+        setConflict({ currentVersion: detail.current_version });
+      } else if (status === 401) {
         draft.flush();
         toast.error("Sua sessão expirou. O texto está guardado como rascunho neste dispositivo: entre novamente e salve.", { duration: 10000 });
       } else if (status === 423) {
@@ -138,6 +153,14 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     } finally {
       setSaving(false);
     }
+  };
+
+  const reviewCurrentVersion = () => {
+    draft.flush();
+    setConflict(null);
+    onOpenChange(false);
+    onSaved(); // recarrega a lista com a versão mais nova
+    toast.info("Seu texto ficou guardado no rascunho. Abra a anotação de novo para continuar de onde parou.");
   };
 
   const outdatedDraft = record && restored && restored.baseVersion != null && restored.baseVersion !== record.version;
@@ -206,11 +229,36 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
           </div>
         </div>
 
+        {conflict && (
+          <div role="alert" className="space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+            data-testid="record-conflict">
+            <p className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                Esta anotação foi alterada em outro lugar enquanto você editava (agora está na v{conflict.currentVersion}).
+                Nada foi salvo, e o seu texto continua aqui. Se salvar mesmo assim, ele vira a versão atual e a outra
+                edição fica guardada no histórico.
+              </span>
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <Button type="button" variant="outline" size="sm" onClick={reviewCurrentVersion} disabled={saving}>
+                Ver a versão atual
+              </Button>
+              <Button type="button" size="sm" onClick={() => save(conflict.currentVersion)} disabled={saving}
+                className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="record-conflict-save">
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar mesmo assim"}
+              </Button>
+            </div>
+          </div>
+        )}
+
         <DialogFooter className="flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <DraftStatus status={draft.status} savedAt={draft.savedAt} dirty={dirty} />
           <div className="flex gap-2 sm:justify-end">
             <Button variant="outline" onClick={() => handleOpenChange(false)}>Cancelar</Button>
-            <Button onClick={save} disabled={saving} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="save-record-btn">
+            {/* Com um conflito aberto, a decisão é no aviso acima (o Salvar normal levaria outro 409). */}
+            <Button onClick={() => save()} disabled={saving || Boolean(conflict)} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]"
+              data-testid="save-record-btn">
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               Salvar
             </Button>

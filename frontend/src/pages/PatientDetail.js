@@ -6,6 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
 import { formatDateTime } from "@/lib/datetime";
 import RecordEditorDialog from "@/components/RecordEditorDialog";
+import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -109,8 +110,14 @@ export default function PatientDetail() {
     if (!open) setDraftsVersion((v) => v + 1);
   };
 
+  // Segurança (varredura, item 9): reativar e exportar não travavam durante o
+  // envio. Um clique repetido em "Exportar" gerava outra exportação completa
+  // (PDF pesado no servidor) e outro registro de auditoria.
+  const inFlight = useSingleFlight();
+  const exporting = inFlight.isBusy("export");
+
   // Item 12: reativar um paciente arquivado (arquivar fica na lista de pacientes).
-  const unarchive = async () => {
+  const unarchive = () => inFlight.run("unarchive", async () => {
     try {
       await api.post(`/patients/${id}/unarchive`);
       toast.success("Paciente reativado.");
@@ -118,9 +125,9 @@ export default function PatientDetail() {
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }
-  };
+  });
 
-  const exportFile = async (format) => {
+  const exportFile = (format) => inFlight.run("export", async () => {
     try {
       const res = await fetch(`${API}/patients/${id}/export?format=${format}`, { credentials: "include" });
       if (!res.ok) throw new Error("Falha na exportação");
@@ -135,7 +142,7 @@ export default function PatientDetail() {
     } catch (e) {
       toast.error("Não foi possível exportar.");
     }
-  };
+  });
 
   if (!patient) {
     return <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-[#1E3A8A]" /></div>;
@@ -197,8 +204,10 @@ export default function PatientDetail() {
             )}
             <div className="mt-5 flex flex-col gap-2">
               {patient.archived && (
-                <Button onClick={unarchive} variant="outline" className="w-full gap-2 border-slate-300" data-testid="unarchive-btn">
-                  <Archive className="h-4 w-4" /> Reativar paciente
+                <Button onClick={unarchive} disabled={inFlight.isBusy("unarchive")} variant="outline"
+                  className="w-full gap-2 border-slate-300" data-testid="unarchive-btn">
+                  {inFlight.isBusy("unarchive") ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                  Reativar paciente
                 </Button>
               )}
               <Button onClick={openNew} className="w-full gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-record-btn">
@@ -206,8 +215,9 @@ export default function PatientDetail() {
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="w-full gap-2 border-slate-300" data-testid="export-btn">
-                    <Download className="h-4 w-4" /> Exportar prontuário
+                  <Button variant="outline" disabled={exporting} className="w-full gap-2 border-slate-300" data-testid="export-btn">
+                    {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    {exporting ? "Exportando…" : "Exportar prontuário"}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent className="w-56">

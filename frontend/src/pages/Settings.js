@@ -4,6 +4,7 @@ import { GoogleLogin } from "@react-oauth/google";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { clearUserDrafts, forgetDraftKey } from "@/lib/drafts";
+import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -184,6 +185,8 @@ const LOCK_OPTIONS = [5, 10, 15, 30];
 function SessionSecurity() {
   const { user, setUser } = useAuth();
   const [saving, setSaving] = useState(false);
+  // Segurança (varredura, item 9): o botão não travava durante o envio.
+  const inFlight = useSingleFlight();
 
   const changeLockMinutes = async (value) => {
     setSaving(true);
@@ -198,7 +201,7 @@ function SessionSecurity() {
     }
   };
 
-  const invalidateDrafts = async () => {
+  const invalidateDrafts = () => inFlight.run("drafts", async () => {
     const confirmed = window.confirm(
       "Isto apaga a chave dos rascunhos: anotações não salvas em QUALQUER aparelho (inclusive este) deixam de poder ser recuperadas. Continuar?",
     );
@@ -211,7 +214,7 @@ function SessionSecurity() {
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail));
     }
-  };
+  });
 
   return (
     <Card className="border-slate-200 p-6 shadow-sm">
@@ -243,7 +246,7 @@ function SessionSecurity() {
             Enquanto você escreve, a anotação é guardada criptografada neste aparelho, para não se perder se a
             sessão expirar ou a internet cair. Rascunhos somem ao salvar e vencem em 7 dias.
           </p>
-          <Button variant="outline" size="sm" onClick={invalidateDrafts}
+          <Button variant="outline" size="sm" onClick={invalidateDrafts} disabled={inFlight.isBusy("drafts")}
             className="mt-3 border-red-200 text-red-600 hover:bg-red-50" data-testid="invalidate-drafts-btn">
             Invalidar rascunhos em todos os aparelhos
           </Button>

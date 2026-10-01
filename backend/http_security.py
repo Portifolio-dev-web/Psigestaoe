@@ -3,16 +3,21 @@
 # Proteções HTTP da API (SEGURANÇA, varredura itens 3 e 12):
 #   1. limite de tamanho do corpo da requisição;
 #   2. cabeçalhos de segurança em todas as respostas;
-#   3. erro 422 sem repetir o que foi enviado.
-# Os três são registrados em server.py.
+#   3. erro 422 sem repetir o que foi enviado;
+#   4. conflito de gravação simultânea (IntegrityError) como 409 (item 9).
+# Todos são registrados em server.py.
 # ---------------------------------------------------------------------------
 import json
+import logging
 import os
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import MutableHeaders
+
+logger = logging.getLogger("psigestao.http")
 
 # ---------------------------------------------------------------------------
 # 1. Limite de tamanho do corpo
@@ -190,3 +195,21 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
             "type": error.get("type", "value_error"),
         })
     return JSONResponse(status_code=422, content={"detail": errors})
+
+
+# ---------------------------------------------------------------------------
+# 4. Conflito de gravação simultânea (IntegrityError) -> 409, nunca 500
+# ---------------------------------------------------------------------------
+# SEGURANÇA (varredura, item 9): quando duas requisições simultâneas tentam
+# gravar algo que o banco exige que seja único (e-mail, vínculo com o Google,
+# token), a segunda recebia um erro 500. Pior: a mensagem do banco traz o
+# valor repetido (ex.: "Key (email)=(fulano@...) already exists"), que ia
+# parar no log. Rotas com tratamento próprio (como o cadastro) continuam com
+# a mensagem delas; este é o tratamento padrão para todas as outras.
+async def integrity_error_handler(_request: Request, exc: IntegrityError) -> JSONResponse:
+    # Só o TIPO do erro vai para o log, nunca a mensagem (que contém os valores).
+    logger.warning("Conflito de gravação simultânea no banco (%s).", type(exc.orig).__name__)
+    return JSONResponse(status_code=409, content={"detail": {
+        "code": "concurrent_write",
+        "msg": "Esta informação foi alterada ao mesmo tempo em outra tela ou aparelho. Tente novamente.",
+    }})

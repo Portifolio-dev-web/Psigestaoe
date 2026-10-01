@@ -12,6 +12,7 @@ import {
 // API & Utils
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
+import { useSingleFlight } from "@/hooks/useSingleFlight";
 
 // UI Components
 import { Card } from "@/components/ui/card";
@@ -75,6 +76,10 @@ export default function Patients() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(null); // {type, patient}
+  // Segurança (varredura, item 9): arquivar, anonimizar e excluir não travavam
+  // durante o envio; um clique repetido mandava a ação de novo. Agora cada
+  // paciente aceita uma ação por vez (chave `patient:<id>`).
+  const inFlight = useSingleFlight();
   // Item 12: pacientes arquivados ficam fora da lista ativa, em um filtro próprio.
   const [showArchived, setShowArchived] = useState(false);
   // Termo atual do profissional (para novos consentimentos).
@@ -223,7 +228,7 @@ export default function Patients() {
   // HANDLERS - DELETE / ANONYMIZE
   // ========================================================================
   // Item 12: arquivar é reversível e não apaga nada, então não pede confirmação.
-  const setArchived = async (p, archived) => {
+  const setArchived = (p, archived) => inFlight.run(`patient:${p.id}`, async () => {
     try {
       await api.post(`/patients/${p.id}/${archived ? "archive" : "unarchive"}`);
       toast.success(archived ? "Paciente arquivado. Os prontuários continuam guardados." : "Paciente reativado.");
@@ -231,12 +236,13 @@ export default function Patients() {
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }
-  };
+  });
 
   const doAction = async () => {
     if (!confirm) return;
     const { type, patient } = confirm;
     setConfirm(null);
+    await inFlight.run(`patient:${patient.id}`, async () => {
     try {
       if (type === "delete") {
         await api.delete(`/patients/${patient.id}`);
@@ -256,6 +262,7 @@ export default function Patients() {
         toast.error(message);
       }
     }
+    });
   };
 
   // ========================================================================
@@ -438,7 +445,7 @@ function onFormSubmit(e) {
       <PatientContent patients={patients} filtered={filtered} navigate={navigate} showArchived={showArchived}
         searching={debouncedQuery.trim().length >= 2}
         onEdit={openEdit} onDelete={(p) => setConfirm({ type: "delete", patient: p })}
-        onAnon={(p) => setConfirm({ type: "anon", patient: p })} onArchive={setArchived} />
+        onAnon={(p) => setConfirm({ type: "anon", patient: p })} onArchive={setArchived} isBusy={inFlight.isBusy} />
       {nextCursor && (
         <div className="flex justify-center">
           <Button variant="outline" onClick={loadMore} disabled={loadingMore} className="gap-2 border-slate-300"
@@ -516,7 +523,7 @@ function ArchiveFilter({ showArchived, onChange }) {
   );
 }
 
-function PatientContent({ patients, filtered, navigate, showArchived, searching, onEdit, onDelete, onAnon, onArchive }) {
+function PatientContent({ patients, filtered, navigate, showArchived, searching, onEdit, onDelete, onAnon, onArchive, isBusy }) {
   if (patients === null) {
     return (
       <div className="flex justify-center py-16">
@@ -547,15 +554,15 @@ function PatientContent({ patients, filtered, navigate, showArchived, searching,
 
   return (
     <>
-      <PatientTable filtered={filtered} navigate={navigate} onEdit={onEdit}
+      <PatientTable filtered={filtered} navigate={navigate} onEdit={onEdit} isBusy={isBusy}
         onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
-      <PatientMobileCards filtered={filtered} navigate={navigate} onEdit={onEdit}
+      <PatientMobileCards filtered={filtered} navigate={navigate} onEdit={onEdit} isBusy={isBusy}
         onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
     </>
   );
 }
 
-function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive }) {
+function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive, isBusy }) {
   return (
     <Card className="hidden border-slate-200 shadow-sm md:block" data-testid="patients-table">
       <Table>
@@ -582,7 +589,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive 
               <TableCell className="text-slate-600">{fmtDate(p.birth_date)}</TableCell>
               <TableCell className="text-slate-600">{fmtDate(p.last_consultation_date)}</TableCell>
               <TableCell onClick={(e) => e.stopPropagation()}>
-                <RowMenu p={p} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
+                <RowMenu p={p} busy={isBusy?.(`patient:${p.id}`)} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
                   onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
               </TableCell>
             </TableRow>
@@ -593,7 +600,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive 
   );
 }
 
-function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onArchive }) {
+function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onArchive, isBusy }) {
   return (
     <div className="space-y-3 md:hidden">
       {filtered.map((p) => (
@@ -608,7 +615,7 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
                 <p className="text-xs text-slate-500">Nasc. {fmtDate(p.birth_date)}</p>
               </div>
             </button>
-            <RowMenu p={p} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
+            <RowMenu p={p} busy={isBusy?.(`patient:${p.id}`)} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
               onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
           </div>
           <p className="mt-2 text-xs text-slate-500">Última consulta: {fmtDate(p.last_consultation_date)}</p>
@@ -986,12 +993,15 @@ function IntegrationDialog({ open, onOpenChange, integration, newToken, tokenBus
   );
 }
 
-function RowMenu({ p, onEdit, onOpen, onDelete, onAnon, onArchive }) {
+function RowMenu({ p, busy, onEdit, onOpen, onDelete, onAnon, onArchive }) {
+  // Varredura, item 9: enquanto uma ação deste paciente está em andamento, o
+  // menu mostra "carregando" e as ações que gravam ficam desabilitadas.
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-8 w-8" data-testid={`patient-menu-${p.id}`}>
-          <MoreVertical className="h-4 w-4 text-slate-500" />
+        <Button variant="ghost" size="icon" className="h-8 w-8" data-testid={`patient-menu-${p.id}`}
+          aria-busy={busy || undefined}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin text-slate-500" /> : <MoreVertical className="h-4 w-4 text-slate-500" />}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -999,12 +1009,12 @@ function RowMenu({ p, onEdit, onOpen, onDelete, onAnon, onArchive }) {
         <DropdownMenuItem onClick={() => onEdit(p)}><Pencil className="mr-2 h-4 w-4" /> Editar</DropdownMenuItem>
         {/* Item 12: arquivar é a alternativa à exclusão durante a guarda do CFP. */}
         {p.archived ? (
-          <DropdownMenuItem onClick={() => onArchive(p, false)}><ArchiveRestore className="mr-2 h-4 w-4" /> Reativar</DropdownMenuItem>
+          <DropdownMenuItem disabled={busy} onClick={() => onArchive(p, false)}><ArchiveRestore className="mr-2 h-4 w-4" /> Reativar</DropdownMenuItem>
         ) : (
-          <DropdownMenuItem onClick={() => onArchive(p, true)}><Archive className="mr-2 h-4 w-4" /> Arquivar</DropdownMenuItem>
+          <DropdownMenuItem disabled={busy} onClick={() => onArchive(p, true)}><Archive className="mr-2 h-4 w-4" /> Arquivar</DropdownMenuItem>
         )}
-        <DropdownMenuItem onClick={() => onAnon(p)}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onDelete(p)} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
+        <DropdownMenuItem disabled={busy} onClick={() => onAnon(p)}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
+        <DropdownMenuItem disabled={busy} onClick={() => onDelete(p)} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

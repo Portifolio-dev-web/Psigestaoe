@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import hmac
 import io
 import json
@@ -35,7 +36,8 @@ from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
-from sqlalchemy import delete, desc, func, select, text, tuple_
+from sqlalchemy import delete, desc, func, select, text, tuple_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 from starlette.concurrency import run_in_threadpool
@@ -49,7 +51,9 @@ from crypto import (
 from rate_limit import client_ip, enforce, rate_limit, warn_if_not_shared
 from database import get_db, engine, Base
 from environment import get_environment
-from http_security import BodySizeLimitMiddleware, SecurityHeadersMiddleware, validation_error_handler
+from http_security import (
+    BodySizeLimitMiddleware, SecurityHeadersMiddleware, integrity_error_handler, validation_error_handler,
+)
 from models import (
     AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
 )
@@ -269,6 +273,9 @@ app.add_middleware(observability.RequestContextMiddleware)
 # SEGURANÇA (varredura, itens 3 e 12): o erro 422 diz qual campo está errado e
 # por quê, sem devolver o valor enviado (senha, CPF, prontuário). Ver http_security.py.
 app.add_exception_handler(RequestValidationError, validation_error_handler)
+# SEGURANÇA (varredura, item 9): gravações simultâneas que batem numa regra de
+# unicidade do banco viram 409 com mensagem clara, em vez de erro 500.
+app.add_exception_handler(IntegrityError, integrity_error_handler)
 
 # Monitoramento: Sentry (só com SENTRY_DSN) e alerta de rate limit não
 # compartilhado entre workers (ver rate_limit.py).
@@ -765,6 +772,13 @@ class RecordInput(BaseModel):
         return _require_timezone(value)
 
 
+class RecordUpdateInput(RecordInput):
+    # Segurança (varredura, item 9): versão que o profissional ABRIU para
+    # editar. Obrigatória: sem ela o servidor não teria como saber se outra
+    # edição chegou antes (ver update_record).
+    expected_version: int = Field(ge=1)
+
+
 # PRODUTO (visões da agenda): regras que o servidor passa a garantir.
 SESSION_STATUSES = ("agendada", "realizada", "cancelada")
 # Duração padrão de uma sessão de psicoterapia, usada quando não há horário de
@@ -1188,7 +1202,15 @@ async def register_user(data: RegisterInput, response: Response, db: AsyncSessio
     )
 
     db.add(new_user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # SEGURANÇA (varredura, item 9): dois cadastros SIMULTÂNEOS com o mesmo
+        # e-mail passavam juntos pela checagem acima; o segundo batia na regra
+        # de e-mail único do banco e virava erro 500. Agora recebe a mesma
+        # resposta de um e-mail já cadastrado.
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
     await db.refresh(new_user) # Atualiza o objeto com os dados gerados pelo banco (ex: user_id)
 
     set_auth_cookie(response, await open_login_session(db, new_user))
@@ -1506,6 +1528,41 @@ async def unlock_session(data: UnlockInput, request: Request, response: Response
     """
     sess = await _authenticated_session(request, db)
     user = sess.user
+    this_session = UserSession.token_hash == sess.token_hash
+
+    def session_ended() -> dict:
+        is_prod = ENVIRONMENT == "production"
+        response.delete_cookie("access_token", path="/", httponly=True,
+                               samesite="strict" if is_prod else "lax", secure=is_prod)
+        # Lançar a exceção descartaria o delete_cookie acima; por isso a
+        # resposta de erro é montada aqui, já com o cookie removido.
+        response.status_code = 401
+        return {"detail": {"code": "session_ended",
+                           "msg": "Muitas tentativas. Por segurança, a sessão foi encerrada. Entre novamente."}}
+
+    # SEGURANÇA (varredura, item 9): contador ATÔMICO, e a tentativa é
+    # RESERVADA antes de conferir a senha.
+    # Antes o contador era lido e somado em Python (ler -> +1 -> gravar) e só
+    # depois de errar. Requisições em paralelo liam o mesmo valor e todas
+    # conferiam a senha antes de qualquer erro ser gravado: 50 tentativas
+    # simultâneas testavam 50 senhas, apesar do limite de 5.
+    # Agora o próprio banco soma 1 (UPDATE ... SET n = n + 1 RETURNING n) e cada
+    # requisição recebe um número único ANTES do bcrypt. Por mais paralelas
+    # que sejam, no máximo MAX_UNLOCK_FAILURES senhas chegam a ser conferidas.
+    attempt = (await db.execute(
+        update(UserSession)
+        .where(this_session)
+        .values(unlock_failures=func.coalesce(UserSession.unlock_failures, 0) + 1)
+        .returning(UserSession.unlock_failures)
+        .execution_options(synchronize_session=False)
+    )).scalar_one_or_none()
+    await db.commit()
+    if attempt is None:  # a sessão foi encerrada por outra requisição neste meio-tempo
+        return session_ended()
+    if attempt > MAX_UNLOCK_FAILURES:  # excedente de uma rajada: nem confere a senha
+        await db.execute(delete(UserSession).where(this_session))
+        await db.commit()
+        return session_ended()
 
     if data.password and user.password_hash:
         verified = await verify_password_async(data.password, user.password_hash)
@@ -1518,34 +1575,32 @@ async def unlock_session(data: UnlockInput, request: Request, response: Response
         verified = False
 
     if not verified:
-        sess.unlock_failures = (sess.unlock_failures or 0) + 1
-        if sess.unlock_failures >= MAX_UNLOCK_FAILURES:
-            await db.delete(sess)
+        if attempt >= MAX_UNLOCK_FAILURES:
+            await db.execute(delete(UserSession).where(this_session))
             await db.commit()
             await log_audit(db, user.user_id, user.email, "encerrar", "sessao", user.user_id,
                             "Sessão encerrada: limite de tentativas de desbloqueio")
-            is_prod = ENVIRONMENT == "production"
-            response.delete_cookie("access_token", path="/", httponly=True,
-                                   samesite="strict" if is_prod else "lax", secure=is_prod)
-            # Lançar a exceção descartaria o delete_cookie acima; por isso a
-            # resposta de erro é montada aqui, já com o cookie removido.
-            response.status_code = 401
-            return {"detail": {"code": "session_ended",
-                               "msg": "Muitas tentativas. Por segurança, a sessão foi encerrada. Entre novamente."}}
-        await db.commit()
+            return session_ended()
         await log_audit(db, user.user_id, user.email, "desbloquear_falha", "sessao", user.user_id,
-                        f"Tentativa de desbloqueio inválida ({sess.unlock_failures}/{MAX_UNLOCK_FAILURES})")
-        remaining = MAX_UNLOCK_FAILURES - sess.unlock_failures
+                        f"Tentativa de desbloqueio inválida ({attempt}/{MAX_UNLOCK_FAILURES})")
+        remaining = MAX_UNLOCK_FAILURES - attempt
         raise HTTPException(status_code=403, detail={
             "code": "unlock_failed",
             "msg": f"Senha incorreta. Restam {remaining} tentativa(s) antes de a sessão ser encerrada.",
             "remaining": remaining,
         })
 
-    sess.locked_at = None
-    sess.unlock_failures = 0
-    sess.last_activity_at = now_utc()
+    # Desbloqueio também atômico: se a sessão foi encerrada enquanto a senha
+    # era conferida (rajada acima), nenhuma linha é atualizada.
+    unlocked = await db.execute(
+        update(UserSession)
+        .where(this_session)
+        .values(locked_at=None, unlock_failures=0, last_activity_at=now_utc())
+        .execution_options(synchronize_session=False)
+    )
     await db.commit()
+    if unlocked.rowcount != 1:
+        return session_ended()
     await log_audit(db, user.user_id, user.email, "desbloquear", "sessao", user.user_id, "Sessão desbloqueada")
     return {"user": {**public_user(user), "locked": False}}
 
@@ -1984,14 +2039,43 @@ async def update_patient(pid: str, data: PatientInput, user: User = Depends(get_
         await log_audit(db, user.user_id, user.email, consent_action, "paciente", p.id, detail)
     return patient_public(p, user)
 
+def _record_conflict(current_version: int) -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "code": "record_conflict",
+        "msg": (f"Esta anotação foi alterada em outro lugar enquanto você editava (agora está na versão "
+                f"{current_version}). Nada foi salvo."),
+        "current_version": current_version,
+    })
+
+
 @api_router.put("/records/{rid}")
-async def update_record(rid: str, data: RecordInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def update_record(rid: str, data: RecordUpdateInput, user: User = Depends(get_active_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Edita uma evolução, arquivando a versão anterior.
+
+    SEGURANÇA (varredura, item 9): CONTROLE OTIMISTA DE VERSÃO.
+    Antes: a rota lia a versão, arquivava e gravava sem trava nenhuma. Se a
+    mesma anotação fosse salva ao mesmo tempo em duas abas ou dois aparelhos,
+    as duas liam a versão N; uma sobrescrevia a outra, e o texto perdido NEM
+    entrava no histórico (as duas arquivavam a mesma versão N).
+    Agora:
+      1. o frontend informa a versão que abriu para editar (expected_version);
+      2. se o registro já está em outra versão, a resposta é 409 e nada muda;
+      3. a gravação é um UPDATE condicional ("... WHERE version = N"): se outra
+         edição passar na frente entre a leitura e a gravação, o banco não
+         atualiza nenhuma linha, tudo é desfeito (inclusive a versão arquivada)
+         e a resposta também é 409.
+    No 409 o frontend oferece "Salvar mesmo assim": a edição que chegou antes
+    vira versão do histórico, e nenhum texto se perde.
+    """
     stmt = select(Record).where(Record.id == rid, Record.owner_id == user.user_id)
     result = await db.execute(stmt)
     r = result.scalar_one_or_none()
 
     if not r:
         raise HTTPException(status_code=404, detail="Prontuário não encontrado")
+    if r.version != data.expected_version:
+        raise _record_conflict(r.version)
 
     # Immutability: arquivando a versão atual na tabela record_versions
     versao_antiga = RecordVersion(
@@ -2005,12 +2089,23 @@ async def update_record(rid: str, data: RecordInput, user: User = Depends(get_ac
     )
     db.add(versao_antiga)
 
-    # Atualizando o registro principal
-    r.session_datetime = data.session_datetime
-    r.content = encrypt_field(data.content)
-    r.diagnosis = encrypt_field(data.diagnosis)
-    r.version += 1
-    r.updated_at = now_utc()
+    # Atualizando o registro principal, SÓ se ele ainda estiver na versão lida.
+    updated = await db.execute(
+        update(Record)
+        .where(Record.id == r.id, Record.version == data.expected_version)
+        .values(
+            session_datetime=data.session_datetime,
+            content=encrypt_field(data.content),
+            diagnosis=encrypt_field(data.diagnosis),
+            version=Record.version + 1,
+            updated_at=now_utc(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if updated.rowcount != 1:
+        await db.rollback()  # desfaz também a versão arquivada acima
+        current = await db.scalar(select(Record.version).where(Record.id == rid))
+        raise _record_conflict(current or data.expected_version)
 
     await db.commit()
     await db.refresh(r)
@@ -2447,6 +2542,31 @@ def _session_end(start: datetime, end: Optional[datetime]) -> datetime:
     return _as_utc(end) if end else _as_utc(start) + timedelta(minutes=DEFAULT_SESSION_MINUTES)
 
 
+async def _lock_owner_schedule(db: AsyncSession, owner_id: str) -> None:
+    """Trava a agenda DESTE profissional até o fim da transação atual.
+
+    SEGURANÇA (varredura, item 9): a checagem de conflito (abaixo) consultava o
+    banco e só depois gravava. Dois agendamentos enviados ao mesmo tempo para
+    o mesmo horário (duas abas, dois aparelhos, um duplo clique) passavam os
+    dois pela checagem antes de qualquer um gravar, e o horário ficava duplicado.
+
+    Por que não uma restrição de exclusão no Postgres: ela recusaria TODA
+    sobreposição, e a agenda permite, de propósito, "salvar mesmo assim" um
+    encaixe confirmado pelo profissional (allow_conflict). A trava resolve a
+    corrida sem tirar essa escolha: criar/remarcar sessões do MESMO
+    profissional passa a acontecer uma de cada vez (checar -> gravar), e
+    profissionais diferentes não esperam uns pelos outros.
+
+    pg_advisory_xact_lock é liberada sozinha no commit/rollback. No SQLite
+    (testes e fallback de desenvolvimento) não existe; lá a função não faz nada.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    # A trava é identificada por um número de 64 bits derivado do profissional.
+    key = int.from_bytes(hashlib.sha256(f"agenda:{owner_id}".encode()).digest()[:8], "big", signed=True)
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
 async def _check_conflicts(db: AsyncSession, user: User, data: SessionInput, exclude_id: Optional[str] = None) -> None:
     """PRODUTO: detecção de conflito de horário (antes era possível marcar
     dois pacientes no mesmo horário sem nenhum aviso).
@@ -2514,6 +2634,9 @@ async def list_sessions(
 
 @api_router.post("/sessions")
 async def create_session(data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    # Varredura, item 9: trava ANTES de checar; liberada no commit abaixo
+    # (não pode haver commit entre a checagem e a gravação).
+    await _lock_owner_schedule(db, user.user_id)
     await _check_conflicts(db, user, data)
     nova_sessao = Session(owner_id=user.user_id)
     await _apply_session_input(db, user, nova_sessao, data)
@@ -2527,6 +2650,8 @@ async def create_session(data: SessionInput, user: User = Depends(get_active_use
 
 @api_router.put("/sessions/{sid}")
 async def update_session(sid: str, data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    # Varredura, item 9: mesma trava da criação (remarcar também ocupa horário).
+    await _lock_owner_schedule(db, user.user_id)
     stmt = select(Session).where(Session.id == sid, Session.owner_id == user.user_id)
     result = await db.execute(stmt)
     s = result.scalar_one_or_none()

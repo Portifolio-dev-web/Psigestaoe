@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import sys
@@ -35,7 +36,7 @@ import server
 import legal
 import observability
 from crypto import legacy_key_from_secret
-from models import AuditLog, Patient, PatientSearchToken, Record, Session, User, UserSession
+from models import AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession
 from server import app
 
 
@@ -175,11 +176,13 @@ async def test_all_backend_routes(client):
     updated_record = await client.put(
         f"/api/records/{record_id}",
         headers=headers,
-        json={**record_payload, "content": "Relato atualizado"},
+        # Varredura, item 9: a edição informa a versão que foi aberta.
+        json={**record_payload, "content": "Relato atualizado", "expected_version": 1},
     )
     assert updated_record.status_code == 200
     assert updated_record.json()["version"] == 2
-    assert (await client.put("/api/records/inexistente", headers=headers, json=record_payload)).status_code == 404
+    assert (await client.put("/api/records/inexistente", headers=headers,
+                             json={**record_payload, "expected_version": 1})).status_code == 404
 
     stats = await client.get("/api/dashboard/stats", headers=headers)
     assert stats.status_code == 200
@@ -1554,3 +1557,103 @@ async def test_security_headers(client):
     production_app.add_middleware(SecurityHeadersMiddleware, hsts=True)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=production_app), base_url="https://test") as prod:
         assert "max-age=63072000" in (await prod.get("/x")).headers["strict-transport-security"]
+
+
+# ---------------------------------------------------------------------------
+# Segurança (varredura, Fase 5): concorrência e envio duplicado (item 9)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_record_update_uses_optimistic_version_control(client):
+    patient_id = await _create_patient(client, "versao.otimista@example.com")
+    record_id = (await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-15T10:00:00Z", "content": "Versão 1"})).json()["id"]
+    body = {"session_datetime": "2026-09-15T10:00:00Z", "content": "Edição da aba A"}
+
+    # Sem informar a versão aberta: recusado (o servidor não teria como detectar conflito).
+    assert (await client.put(f"/api/records/{record_id}", json=body)).status_code == 422
+
+    assert (await client.put(f"/api/records/{record_id}", json={**body, "expected_version": 1})).json()["version"] == 2
+
+    # A aba B ainda estava com a versão 1 aberta: recusada, e NADA muda.
+    stale = await client.put(f"/api/records/{record_id}",
+                             json={**body, "content": "Edição da aba B", "expected_version": 1})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "record_conflict"
+    assert stale.json()["detail"]["current_version"] == 2
+    current = (await client.get(f"/api/patients/{patient_id}/records")).json()["items"][0]
+    assert current["content"] == "Edição da aba A" and current["version"] == 2
+
+    # "Salvar mesmo assim": reenvia com a versão atual; a da aba A vai para o histórico.
+    forced = await client.put(f"/api/records/{record_id}",
+                              json={**body, "content": "Edição da aba B", "expected_version": 2})
+    assert forced.json()["version"] == 3
+    async with client.session_factory() as db:
+        archived = (await db.execute(select(RecordVersion.version).where(RecordVersion.record_id == record_id)
+                                     .order_by(RecordVersion.version))).scalars().all()
+        texts = [server.decrypt_field(c) for c in (await db.execute(
+            select(RecordVersion.content).where(RecordVersion.record_id == record_id)
+            .order_by(RecordVersion.version))).scalars().all()]
+    assert archived == [1, 2]  # cada versão arquivada UMA vez, nenhuma perdida
+    assert texts == ["Versão 1", "Edição da aba A"]
+
+
+@pytest.mark.anyio
+async def test_unlock_attempt_is_reserved_before_checking_the_password(client, monkeypatch):
+    # Antes: requisições paralelas liam o mesmo contador e todas conferiam a
+    # senha. Agora cada uma reserva a tentativa no banco ANTES do bcrypt.
+    # Simula uma rajada que já reservou as 5 tentativas: a próxima requisição
+    # é recusada sem conferir nada, MESMO com a senha certa.
+    # (A concorrência real é provada contra o Postgres; o SQLite dos testes
+    # usa uma conexão só e não executa requisições de fato em paralelo.)
+    await _register(client, "rajada@example.com")
+    await client.post("/api/auth/lock", json={"reason": "manual"})
+    async with client.session_factory() as db:
+        await db.execute(update(UserSession).values(unlock_failures=server.MAX_UNLOCK_FAILURES))
+        await db.commit()
+
+    checked = []
+    real_verify = server.verify_password_async
+
+    async def counting_verify(password, password_hash):
+        checked.append(password)
+        return await real_verify(password, password_hash)
+
+    monkeypatch.setattr(server, "verify_password_async", counting_verify)
+    response = await client.post("/api/auth/unlock", json={"password": "Senha-segura-123"})
+
+    assert response.status_code == 401 and response.json()["detail"]["code"] == "session_ended"
+    assert checked == []  # nenhuma senha conferida além do limite
+    assert (await client.get("/api/auth/me")).status_code == 401
+
+
+@pytest.mark.anyio
+async def test_simultaneous_registration_with_same_email_is_not_a_500(client, monkeypatch):
+    # Simula a corrida: outra requisição grava o mesmo e-mail DEPOIS da checagem
+    # de duplicidade desta e ANTES de ela gravar.
+    real_hash = server.hash_password_async
+
+    async def hash_while_other_tab_registers(password):
+        async with client.session_factory() as other:
+            other.add(User(email="corrida@example.com", name="Outra aba", password_hash="x", terms_accepted=True))
+            await other.commit()
+        return await real_hash(password)
+
+    monkeypatch.setattr(server, "hash_password_async", hash_while_other_tab_registers)
+    response = await client.post("/api/auth/register", json={
+        "name": "Corrida", "email": "corrida@example.com", "password": "Senha-segura-123", "terms_accepted": True,
+    })
+    assert response.status_code == 400
+    assert response.json()["detail"] == "E-mail já cadastrado."
+
+
+@pytest.mark.anyio
+async def test_integrity_error_handler_hides_values():
+    from sqlalchemy.exc import IntegrityError
+    from http_security import integrity_error_handler
+
+    error = IntegrityError("INSERT ...", {}, Exception('Key (email)=(fulano@example.com) already exists'))
+    response = await integrity_error_handler(None, error)
+    assert response.status_code == 409
+    assert b"fulano" not in response.body
+    assert json.loads(response.body)["detail"]["code"] == "concurrent_write"

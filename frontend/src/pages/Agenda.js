@@ -16,6 +16,7 @@ import SessionDialog from "@/components/agenda/SessionDialog";
 import MonthView from "@/components/agenda/MonthView";
 import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
+import { useSingleFlight } from "@/hooks/useSingleFlight";
 import {
   STATUS, VIEWS, VIEW_IDS, daysBetween, defaultNewSessionStart, formatDateParam, formatTimeRange,
   parseDateParam, sessionInterval, shiftDate, viewRange, viewTitle,
@@ -68,6 +69,9 @@ export default function Agenda() {
   const [upcoming, setUpcoming] = useState([]);
   const [dialog, setDialog] = useState({ open: false, initial: null });
   const [saving, setSaving] = useState(false);
+  // Segurança (varredura, item 9): "Remover" não travava durante o envio; um
+  // duplo clique mandava a exclusão duas vezes (e a segunda virava "Erro ao remover").
+  const inFlight = useSingleFlight();
   const [conflict, setConflict] = useState(null); // { conflicts, resolve }
   const requestSeq = useRef(0);
 
@@ -149,7 +153,7 @@ export default function Agenda() {
     if (saved) setDialog({ open: false, initial: null });
   };
 
-  const deleteSession = async (id) => {
+  const deleteSession = (id) => inFlight.run(`delete:${id}`, async () => {
     const session = sessions.find((s) => s.id === id) || dialog.initial;
     try {
       await api.delete(`/sessions/${id}`);
@@ -169,7 +173,7 @@ export default function Agenda() {
     } catch (err) {
       if (![401, 423].includes(err.response?.status)) toast.error("Erro ao remover.");
     }
-  };
+  });
 
   // Arrastar-e-soltar: remarca mantendo a duração, com "Desfazer".
   const moveSession = (session, newStart) => {
@@ -260,7 +264,8 @@ export default function Agenda() {
       )}
 
       <SessionDialog open={dialog.open} initial={dialog.initial} saving={saving}
-        onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submitDialog} onDelete={deleteSession} />
+        onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submitDialog} onDelete={deleteSession}
+        deleting={inFlight.isBusy(`delete:${dialog.initial?.id}`)} />
 
       {/* Conflito de horário: decisão da pessoa, com o que já está marcado. */}
       <AlertDialog open={Boolean(conflict)} onOpenChange={(open) => { if (!open) conflict?.resolve(false); }}>
