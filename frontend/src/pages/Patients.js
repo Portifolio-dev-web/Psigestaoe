@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 // API & Utils
-import api, { formatApiErrorDetail } from "@/lib/api";
+import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 
@@ -55,6 +55,17 @@ const EMPTY_FORM = {
 
 // ESCALA: tamanho da página da lista de pacientes (o servidor aceita até 100).
 const PAGE_SIZE = 50;
+
+// SEGURANÇA (varredura, item 12): endereço do webhook no script do Google Forms.
+// Antes vinha de WEBHOOK_URL, embutida no JavaScript publicado em QUALQUER
+// build: a URL do túnel ngrok do desenvolvimento ia parar no código de produção.
+// Agora:
+//   - produção: o webhook é a própria API pública (REACT_APP_BACKEND_URL) + a rota;
+//   - desenvolvimento: vale WEBHOOK_URL (o túnel), porque o Google não alcança
+//     o localhost. No build de produção NODE_ENV vira "production", a condição
+//     é sempre falsa e o minificador apaga o trecho junto com a URL.
+const WEBHOOK_URL = (process.env.NODE_ENV === "development" && process.env.WEBHOOK_URL)
+  || `${API}/webhook/google-forms`;
 
 export default function Patients() {
   // ========================================================================
@@ -331,7 +342,7 @@ export default function Patients() {
   const filtered = patients || [];
 
   const generatedScript = `
-const WEBHOOK_URL = "${process.env.WEBHOOK_URL}";
+const WEBHOOK_URL = "${WEBHOOK_URL}";
 const SECURITY_TOKEN = "${newToken}";
 
 function formatCPF(cpf) {

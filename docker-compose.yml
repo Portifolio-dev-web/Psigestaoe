@@ -64,6 +64,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Segurança (varredura, Fase 7): o Dockerfile do frontend tem estágios.
+      # Aqui usamos o de desenvolvimento (yarn start, recarga automática); o
+      # de produção ("production") é o nginx com os arquivos estáticos.
+      target: dev
     ports:
       # SEGURANÇA (varredura, item 16): o servidor de desenvolvimento do React
       # fica acessível só nesta máquina, como a API e o banco.

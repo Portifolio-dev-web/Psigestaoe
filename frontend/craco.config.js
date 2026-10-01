@@ -3,6 +3,24 @@ const path = require("path");
 const webpack = require("webpack");
 require("dotenv").config();
 
+// ---------------------------------------------------------------------------
+// SEGURANÇA (varredura, itens 12 e 16): build de PRODUÇÃO.
+// O `craco build` define NODE_ENV=production antes de ler este arquivo, e o
+// webpack do react-scripts lê as variáveis abaixo ao ser carregado, depois.
+// Valem para QUALQUER build de produção (Docker, Vercel, `yarn build` na mão),
+// não só para a imagem: por isso ficam aqui, e não apenas no Dockerfile.
+// ---------------------------------------------------------------------------
+const isProductionBuild = process.env.NODE_ENV === "production";
+if (isProductionBuild) {
+  // Sem source maps: antes o build publicava os arquivos .map, e qualquer
+  // visitante lia o código-fonte original (comentários incluídos) no navegador.
+  process.env.GENERATE_SOURCEMAP = "false";
+  // O react-scripts embute um pequeno script direto no index.html. Um script
+  // embutido exigiria liberar 'unsafe-inline' na CSP do nginx (frontend/nginx.conf),
+  // o que anularia a principal proteção dela contra XSS. Fica num arquivo próprio.
+  process.env.INLINE_RUNTIME_CHUNK = "false";
+}
+
 
 // Environment variable overrides
 const config = {
@@ -81,9 +99,19 @@ let webpackConfig = {
     alias: {
       '@': path.resolve(__dirname, 'src'),
     },
-    configure: (webpackConfig) => {
-
-    webpackConfig.plugins.push(new webpack.EnvironmentPlugin(["WEBHOOK_URL"]));
+    configure: (webpackConfig, { env }) => {
+      // SEGURANÇA (varredura, item 12): antes este plugin rodava em TODO build e
+      // embutia no JavaScript publicado a URL do túnel ngrok do desenvolvimento
+      // (WEBHOOK_URL do frontend/.env), revelando um endereço que expõe a API da
+      // máquina de desenvolvimento na internet. Agora só no desenvolvimento,
+      // onde o túnel é necessário (o Google não alcança o localhost). Em
+      // produção o endereço do webhook é a própria API (ver pages/Patients.js).
+      if (env !== "production") {
+        webpackConfig.plugins.push(new webpack.EnvironmentPlugin({ WEBHOOK_URL: "" }));
+      } else {
+        // Garantia extra além do GENERATE_SOURCEMAP=false acima.
+        webpackConfig.devtool = false;
+      }
 
       // Add ignored patterns to reduce watched directories
         webpackConfig.watchOptions = {

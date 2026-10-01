@@ -78,3 +78,27 @@ Monitoramento:
 - `GET /api/health/ready`: o banco responde (use no load balancer);
 - `GET /api/metrics`: Prometheus, com `Authorization: Bearer <METRICS_TOKEN>`;
 - logs em JSON com `request_id`, também devolvido no cabeçalho `X-Request-ID`.
+
+## Produção (frontend)
+
+O `frontend/Dockerfile` tem estágios: o `dev` (usado pelo `docker compose`) e o
+`production`, um nginx sem root que serve só os arquivos do `yarn build`
+(`frontend/nginx.conf`). Rode na pasta `frontend/`:
+
+```
+docker build --target production \
+  --build-arg REACT_APP_BACKEND_URL=https://api.seudominio.com.br \
+  --build-arg REACT_APP_GOOGLE_CLIENT_ID=SEU_ID.apps.googleusercontent.com \
+  -t psigestao-web .
+```
+
+A imagem escuta na porta `8080` (healthcheck em `/healthz`). O build:
+
+- não gera source maps (o código-fonte não fica legível no navegador);
+- não embute a URL do túnel de desenvolvimento: o webhook do Google Forms é
+  `REACT_APP_BACKEND_URL` + `/api/webhook/google-forms`;
+- envia cabeçalhos de segurança, inclusive uma CSP que só libera a API e o login
+  do Google. Ao incluir um serviço externo novo (outro script, fonte ou API),
+  acrescente o domínio dele na CSP do `nginx.conf`, senão o navegador o bloqueia.
+
+A API precisa listar o endereço do frontend em `CORS_ORIGINS`.
