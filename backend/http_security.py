@@ -4,7 +4,8 @@
 #   1. limite de tamanho do corpo da requisição;
 #   2. cabeçalhos de segurança em todas as respostas;
 #   3. erro 422 sem repetir o que foi enviado;
-#   4. conflito de gravação simultânea (IntegrityError) como 409 (item 9).
+#   4. conflito de gravação simultânea (IntegrityError) como 409 (item 9);
+#   5. proteção contra CSRF: origem permitida + cabeçalho próprio (item 10).
 # Todos são registrados em server.py.
 # ---------------------------------------------------------------------------
 import json
@@ -30,7 +31,7 @@ logger = logging.getLogger("psigestao.http")
 MAX_REQUEST_BODY_BYTES = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(1024 * 1024)))
 
 
-async def _send_json(send, status: int, detail: str) -> None:
+async def _send_json(send, status: int, detail) -> None:
     body = json.dumps({"detail": detail}, ensure_ascii=False).encode("utf-8")
     await send({"type": "http.response.start", "status": status,
                 "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
@@ -213,3 +214,56 @@ async def integrity_error_handler(_request: Request, exc: IntegrityError) -> JSO
         "code": "concurrent_write",
         "msg": "Esta informação foi alterada ao mesmo tempo em outra tela ou aparelho. Tente novamente.",
     }})
+
+
+# ---------------------------------------------------------------------------
+# 5. Proteção contra CSRF (falsificação de requisição entre sites)
+# ---------------------------------------------------------------------------
+# SEGURANÇA (varredura, item 10): a sessão fica num cookie, que o navegador
+# anexa sozinho a qualquer requisição para a API, inclusive as disparadas por
+# OUTRO site que a vítima esteja visitando. As rotas com corpo JSON já estavam
+# protegidas (outro site não consegue enviar JSON sem passar pelo CORS), mas
+# as rotas POST sem corpo (logout, gerar token do Google Forms, arquivar,
+# desarquivar e ANONIMIZAR, que é irreversível) dependiam só do SameSite do
+# cookie, que não protege contra outros subdomínios do mesmo domínio.
+#
+# Agora toda requisição que altera dados (POST, PUT, PATCH, DELETE) precisa:
+#   1. vir de uma origem permitida, quando o navegador informa a origem
+#      (cabeçalho Origin, que a página não consegue falsificar);
+#   2. trazer o cabeçalho X-Requested-With: psigestao. Uma página de outro
+#      site não consegue enviar um cabeçalho próprio sem antes pedir licença
+#      ao servidor (preflight do CORS), e a licença só é dada às origens da
+#      lista. Um formulário HTML comum nem consegue enviar cabeçalhos.
+# O frontend envia o cabeçalho em todas as escritas (frontend/src/lib/api.js).
+CSRF_HEADER = b"x-requested-with"
+CSRF_HEADER_VALUE = b"psigestao"
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# O webhook do Google Forms é chamado pelos servidores do Google, sem cookie
+# e sem Origin: a autenticação dele é o token no cabeçalho X-Webhook-Token.
+CSRF_EXEMPT_PREFIXES = ("/api/webhook/",)
+
+
+class CSRFMiddleware:
+    def __init__(self, app, allowed_origins: list[str]) -> None:
+        self.app = app
+        self.allowed_origins = {o.encode() for o in allowed_origins}
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if (scope["type"] != "http" or scope["method"] not in UNSAFE_METHODS
+                or not path.startswith("/api/") or path.startswith(CSRF_EXEMPT_PREFIXES)):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope["headers"])
+        origin = headers.get(b"origin")
+        if origin is not None and origin not in self.allowed_origins:
+            logger.warning("Escrita recusada: origem não permitida.")
+            await _send_json(send, 403, {"code": "csrf_rejected",
+                                         "msg": "Requisição recusada: origem não permitida."})
+            return
+        if headers.get(CSRF_HEADER) != CSRF_HEADER_VALUE:
+            await _send_json(send, 403, {"code": "csrf_rejected",
+                                         "msg": "Requisição recusada: cabeçalho de segurança ausente."})
+            return
+        await self.app(scope, receive, send)

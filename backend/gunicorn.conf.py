@@ -16,8 +16,13 @@
 # ---------------------------------------------------------------------------
 import multiprocessing
 import os
+import sys
 
 from uvicorn.workers import UvicornWorker
+
+# A pasta deste arquivo (a do app) no caminho de importação, para achar proxy_config.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from proxy_config import forwarded_allow_ips_from_env  # noqa: E402
 
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
 
@@ -52,9 +57,8 @@ max_requests = int(os.environ.get("MAX_REQUESTS", "2000"))
 max_requests_jitter = 200
 
 # IP real do usuário atrás do proxy (rate limit e auditoria dependem disso).
-# Liste aqui SÓ o IP do seu proxy/load balancer; "*" permitiria a qualquer um
-# forjar o IP pelo cabeçalho X-Forwarded-For.
-forwarded_allow_ips = os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1")
+# Regras e validação em proxy_config.py (varredura, item 8): obrigatório em produção.
+forwarded_allow_ips = forwarded_allow_ips_from_env()
 
 # Log de acesso do gunicorn desligado: ele gravaria a URL com query string.
 # O acesso é registrado pelo middleware (observability.py), só com o modelo da rota.

@@ -15,6 +15,15 @@ async function doFetch(url, opts, timeoutMs) {
 
 async function request(method, path, body) {
   const opts = { method, credentials: "include", headers: {} };
+  // SEGURANÇA (varredura, item 10): proteção contra CSRF. O servidor recusa
+  // escritas (POST/PUT/DELETE) sem este cabeçalho. Outro site não consegue
+  // enviá-lo com o cookie do usuário: cabeçalho próprio exige licença do
+  // servidor (preflight do CORS), dada só às origens permitidas.
+  // Leituras (GET) não levam o cabeçalho: não alteram nada e, sem ele,
+  // dispensam o preflight (uma ida e volta a menos em cada tela).
+  if (method !== "GET") {
+    opts.headers["X-Requested-With"] = "psigestao";
+  }
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);

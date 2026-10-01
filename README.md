@@ -68,8 +68,8 @@ A imagem do `backend/` sobe pelo `start.sh`:
 2. `gunicorn` inicia vários workers (`gunicorn.conf.py`).
 
 Variáveis obrigatórias: `ENVIRONMENT=production`, `DATABASE_URL`, `JWT_SECRET`,
-`FERNET_KEY`, `SEARCH_INDEX_KEY`, `CORS_ORIGINS`, `PRIVACY_*`. Recomendadas: `REDIS_URL`
-(obrigatória na prática com mais de um worker), `FORWARDED_ALLOW_IPS`, `METRICS_TOKEN`,
+`FERNET_KEY`, `SEARCH_INDEX_KEY`, `CORS_ORIGINS` (só `https://`), `PRIVACY_*`, `REDIS_URL` e
+`FORWARDED_ALLOW_IPS`; sem as duas últimas o servidor não sobe. Recomendadas: `METRICS_TOKEN`,
 `LOG_FORMAT=json`. Todas estão descritas em `backend/.env.example`.
 
 Monitoramento:

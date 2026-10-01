@@ -124,6 +124,9 @@ export default function Patients() {
       if (seq !== requestSeq.current) return;
       setPatients([]);
       setNextCursor(null);
+      // Varredura, item 15: a busca agora tem limite por minuto. Sem este
+      // aviso a pessoa veria só "Nenhum paciente encontrado".
+      if (err.response?.status === 429) toast.warning(formatApiErrorDetail(err.response.data?.detail));
       console.error("Erro ao carregar dados:", err);
     }
   };

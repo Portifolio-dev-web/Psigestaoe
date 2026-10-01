@@ -12,10 +12,12 @@
 #   - Memória (padrão, desenvolvimento): janela deslizante dentro de UM
 #     processo. Com vários workers/instâncias, cada processo conta separado
 #     e o limite real vira limite × número de processos.
-#   - Redis (produção com mais de um worker): defina REDIS_URL. Todos os
-#     processos e instâncias passam a dividir o mesmo contador.
-#   Em produção com WEB_CONCURRENCY > 1 e sem REDIS_URL, o servidor registra
-#   um alerta na inicialização (warn_if_not_shared).
+#   - Redis (produção): defina REDIS_URL. Todos os processos e instâncias
+#     passam a dividir o mesmo contador.
+#   SEGURANÇA (varredura, itens 8 e 15): em produção o Redis passou a ser
+#   OBRIGATÓRIO (require_shared_rate_limit). Antes só havia um alerta no log,
+#   fácil de passar despercebido, e o limite real ficava multiplicado pelo
+#   número de processos (4 workers = 4x mais tentativas de senha).
 #
 # IP do cliente atrás de proxy:
 #   Em produção o app fica atrás de um proxy (Nginx, load balancer). Sem
@@ -25,6 +27,7 @@
 # ---------------------------------------------------------------------------
 import logging
 import os
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -100,13 +103,46 @@ limiter = SlidingWindowLimiter()  # contador em memória (também usado pelos te
 _redis_limiter = RedisFixedWindowLimiter(REDIS_URL) if REDIS_URL else None
 
 
-def warn_if_not_shared(environment: str) -> None:
+def require_shared_rate_limit(environment: str) -> None:
+    """SEGURANÇA (varredura, itens 8 e 15): em produção o limite de tentativas
+    precisa estar LIGADO e COMPARTILHADO (Redis); senão o servidor não sobe.
+
+    - RATE_LIMIT_ENABLED=false desligaria a proteção contra força bruta de
+      senha, cadastro em massa e flood do webhook: proibido em produção.
+    - Sem REDIS_URL, cada worker (e cada instância) conta separado. Única
+      exceção, por escolha EXPLÍCITA: RATE_LIMIT_ALLOW_MEMORY=true numa
+      implantação com um único processo (WEB_CONCURRENCY=1, uma instância).
+    """
+    if environment != "production":
+        return
+    if not RATE_LIMIT_ENABLED:
+        logger.critical("SECURITY ALERT: RATE_LIMIT_ENABLED=false não é permitido em produção. Abortando.")
+        sys.exit(1)
+    if _redis_limiter is not None:
+        return
     workers = int(os.environ.get("WEB_CONCURRENCY", "1") or "1")
-    if environment == "production" and workers > 1 and _redis_limiter is None:
-        logger.critical(
-            "Rate limit em memória com %s workers: cada processo conta separado e o limite real "
-            "fica %sx maior. Defina REDIS_URL para compartilhar o contador.", workers, workers,
-        )
+    if os.environ.get("RATE_LIMIT_ALLOW_MEMORY", "").strip().lower() == "true" and workers == 1:
+        logger.warning("Rate limit em memória por escolha explícita (RATE_LIMIT_ALLOW_MEMORY): "
+                       "vale só com um único processo e uma única instância.")
+        return
+    logger.critical(
+        "SECURITY ALERT: REDIS_URL é obrigatório em produção (rate limit compartilhado entre workers e "
+        "instâncias). Com um único processo, defina RATE_LIMIT_ALLOW_MEMORY=true e WEB_CONCURRENCY=1. Abortando.")
+    sys.exit(1)
+
+
+async def check_redis() -> None:
+    """Confere a conexão com o Redis ao iniciar. Um REDIS_URL errado não
+    derruba o servidor (o limitador libera as requisições quando o Redis falha,
+    ver RedisFixedWindowLimiter), mas deixaria o sistema SEM limite em silêncio;
+    por isso o problema aparece no log logo na inicialização."""
+    if _redis_limiter is None:
+        return
+    try:
+        await _redis_limiter._client.ping()
+    except Exception:
+        logger.critical("SECURITY ALERT: Redis do rate limit inacessível (REDIS_URL). "
+                        "Até a conexão voltar, as tentativas NÃO estão sendo limitadas.")
 
 
 def client_ip(request: Request) -> str:

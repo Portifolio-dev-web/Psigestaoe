@@ -48,11 +48,13 @@ import observability
 from crypto import (
     hash_token, is_fernet_token, load_fernet, load_search_key, name_search_tokens, query_search_tokens,
 )
-from rate_limit import client_ip, enforce, rate_limit, warn_if_not_shared
+import rate_limit as rate_limiting
+from rate_limit import client_ip, enforce, rate_limit, require_shared_rate_limit
 from database import get_db, engine, Base
 from environment import get_environment
 from http_security import (
-    BodySizeLimitMiddleware, SecurityHeadersMiddleware, integrity_error_handler, validation_error_handler,
+    BodySizeLimitMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, integrity_error_handler,
+    validation_error_handler,
 )
 from models import (
     AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
@@ -122,6 +124,35 @@ _fernet = load_fernet(ENVIRONMENT)
 _search_key = load_search_key(ENVIRONMENT)
 
 
+def auth_cookie_name() -> str:
+    """Nome do cookie de sessão.
+
+    SEGURANÇA (varredura, item 18): em produção o nome leva o prefixo
+    `__Host-`. O navegador SÓ aceita um cookie com esse prefixo se ele vier com
+    Secure, Path=/ e SEM Domain. Na prática: o cookie fica preso a este
+    endereço exato e nenhum outro subdomínio do mesmo domínio (um blog, um
+    subdomínio esquecido apontando para outro serviço) consegue gravar um
+    cookie com este nome por cima do nosso ("cookie tossing", usado para
+    forçar a vítima a usar uma sessão do atacante).
+    No desenvolvimento (http://localhost, sem HTTPS) o nome fica sem prefixo.
+    Lido a cada chamada, e não fixado na importação, para os testes de produção
+    (que trocam ENVIRONMENT) valerem também aqui.
+    """
+    return "__Host-access_token" if ENVIRONMENT == "production" else "access_token"
+
+
+def clear_auth_cookie(response: Response) -> None:
+    """Remove o cookie de sessão do navegador (logout e sessão encerrada).
+
+    Os atributos precisam bater com os do set_cookie, senão alguns navegadores
+    não removem o cookie `secure` em produção. Antes este bloco era repetido em
+    cada rota; agora o nome com prefixo (acima) fica num lugar só.
+    """
+    is_prod = ENVIRONMENT == "production"
+    response.delete_cookie(auth_cookie_name(), path="/", httponly=True,
+                           samesite="strict" if is_prod else "lax", secure=is_prod)
+
+
 def set_auth_cookie(response: Response, token: str) -> None:
     """
     Configura o cookie de autenticação com restrições baseadas no ambiente.
@@ -137,7 +168,7 @@ def set_auth_cookie(response: Response, token: str) -> None:
     is_prod = ENVIRONMENT == "production"
 
     response.set_cookie(
-        key="access_token",
+        key=auth_cookie_name(),  # varredura, item 18: "__Host-access_token" em produção
         value=token,
         httponly=True,
         # Em produção, SameSite="strict" mitiga ataques CSRF de forma agressiva.
@@ -183,6 +214,8 @@ async def lifespan(_app: FastAPI):
         # Isso instrui o SQLAlchemy a criar todas as tabelas que ainda não existem
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+    # Varredura, itens 8 e 15: um REDIS_URL errado apareceria só como "sem limite".
+    await rate_limiting.check_redis()
     yield
 
 
@@ -213,6 +246,12 @@ def _load_cors_origins() -> list[str]:
             logging.critical("SECURITY ALERT: defina CORS_ORIGINS com os domínios reais do frontend (sem '*').")
             sys.exit(1)
         return DEV_CORS_ORIGINS
+    # SEGURANÇA (varredura, item 19): em produção só origens HTTPS. Uma origem
+    # http:// liberada aceitaria, com o cookie de sessão, uma página que pode
+    # ser adulterada no caminho (Wi-Fi público) e então agir em nome do usuário.
+    if ENVIRONMENT == "production" and any(not o.startswith("https://") for o in parsed):
+        logging.critical("SECURITY ALERT: em produção CORS_ORIGINS só aceita origens https://.")
+        sys.exit(1)
     return parsed
 
 
@@ -224,15 +263,26 @@ origins = _load_cors_origins()
 # a mensagem em vez de ver um erro de rede genérico.
 app.add_middleware(BodySizeLimitMiddleware)
 
+# SEGURANÇA (varredura, item 10): proteção contra CSRF (origem permitida +
+# cabeçalho X-Requested-With nas escritas; detalhes em http_security.py).
+# Fica por dentro do CORS, para a recusa (403) chegar legível ao frontend.
+app.add_middleware(CSRFMiddleware, allowed_origins=origins)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # SEGURANÇA (varredura, item 19): antes "*" (qualquer método e qualquer
+    # cabeçalho). Agora só o que o frontend usa: um site permitido por engano
+    # na lista, ou um script injetado nele, tem menos o que explorar.
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-Requested-With", "X-Request-ID"],
     # Monitoramento: o navegador só deixa o frontend ler o ID da requisição
     # (para mostrar ao usuário ao reportar um erro) se ele for exposto aqui.
     expose_headers=["X-Request-ID"],
+    # O navegador guarda a licença do preflight por 10 min, em vez de
+    # perguntar de novo antes de cada escrita.
+    max_age=600,
 )
 
 # CORREÇÃO DE CONFORMIDADE (item 14 da auditoria): origem de cada ação.
@@ -277,10 +327,11 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 # unicidade do banco viram 409 com mensagem clara, em vez de erro 500.
 app.add_exception_handler(IntegrityError, integrity_error_handler)
 
-# Monitoramento: Sentry (só com SENTRY_DSN) e alerta de rate limit não
+# Monitoramento: Sentry (só com SENTRY_DSN) e exigência de rate limit
 # compartilhado entre workers (ver rate_limit.py).
 observability.init_sentry(ENVIRONMENT)
-warn_if_not_shared(ENVIRONMENT)
+# Varredura, itens 8 e 15: em produção o servidor não sobe sem rate limit compartilhado (Redis).
+require_shared_rate_limit(ENVIRONMENT)
 
 # Aviso de conformidade: dados do controlador/encarregado em branco na política.
 legal.warn_if_incomplete(ENVIRONMENT)
@@ -1064,7 +1115,7 @@ async def _authenticated_session(request: Request, db: AsyncSession) -> UserSess
       unificado: toda sessão, seja de senha ou Google, é uma linha em
       `user_sessions` referenciada pelo JWT.
     """
-    token = request.cookies.get("access_token")
+    token = request.cookies.get(auth_cookie_name())  # varredura, item 18: nome com __Host- em produção
     sess = await _session_from_token(token, db) if token else None
     if sess and sess.user:  # usuário já carregado junto com a sessão (joinedload)
         return sess
@@ -1489,17 +1540,13 @@ async def update_profile(data: ProfileInput, user: User = Depends(get_active_use
 async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     # Item 8: apaga a sessão no banco, o que invalida o JWT imediatamente,
     # mesmo que alguém tenha copiado o token antes.
-    token = request.cookies.get("access_token")
+    token = request.cookies.get(auth_cookie_name())  # varredura, item 18: nome com __Host- em produção
     sess = await _session_from_token(token, db) if token else None
     if sess:
         await db.delete(sess)
         await db.commit()
 
-    # Os atributos precisam bater com os do set_cookie, senão alguns
-    # navegadores não removem o cookie `secure` em produção.
-    is_prod = ENVIRONMENT == "production"
-    response.delete_cookie("access_token", path="/", httponly=True,
-                           samesite="strict" if is_prod else "lax", secure=is_prod)
+    clear_auth_cookie(response)
     return {"ok": True}
 
 # ---------------------------------------------------------------------------
@@ -1531,9 +1578,7 @@ async def unlock_session(data: UnlockInput, request: Request, response: Response
     this_session = UserSession.token_hash == sess.token_hash
 
     def session_ended() -> dict:
-        is_prod = ENVIRONMENT == "production"
-        response.delete_cookie("access_token", path="/", httponly=True,
-                               samesite="strict" if is_prod else "lax", secure=is_prod)
+        clear_auth_cookie(response)
         # Lançar a exceção descartaria o delete_cookie acima; por isso a
         # resposta de erro é montada aqui, já com o cookie removido.
         response.status_code = 401
@@ -1975,7 +2020,19 @@ async def list_patients(
     # por linha a cada abertura da tela); o acesso à ficha e ao prontuário sim.
     return await _patients_page(db, user, archived=archived, query="", cursor=cursor, limit=limit)
 
-@api_router.post("/patients/search")
+# SEGURANÇA (varredura, item 15): limites de busca e exportação.
+# Antes nenhuma das duas tinha limite. Com uma sessão roubada (ou um script),
+# dava para varrer a lista de pacientes por busca e exportar o prontuário
+# COMPLETO de todos em segundos; e cada PDF pesa na CPU do servidor.
+# Os limites contam por IP (dependência) e por CONTA (dentro da rota), para
+# um cookie roubado usado de vários IPs não multiplicar a cota.
+# A busca já espera 300 ms sem digitação antes de consultar: 90 por minuto
+# sobra para o uso real.
+SEARCH_LIMIT_PER_MINUTE = 90
+EXPORT_LIMIT, EXPORT_WINDOW_SECONDS = 10, 300  # 10 exportações a cada 5 minutos
+
+
+@api_router.post("/patients/search", dependencies=[Depends(rate_limit("search", 2 * SEARCH_LIMIT_PER_MINUTE, 60))])
 async def search_patients(data: PatientSearchInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     """Busca por nome, no servidor, pelo índice cego (ESCALA).
 
@@ -1984,6 +2041,7 @@ async def search_patients(data: PatientSearchInput, user: User = Depends(get_act
     proxy, de load balancer, de CDN e no histórico do navegador. No corpo
     de um POST ele não é registrado por nenhuma dessas camadas.
     """
+    await enforce(f"search-user:{user.user_id}", SEARCH_LIMIT_PER_MINUTE, 60)  # varredura, item 15
     return await _patients_page(db, user, archived=data.archived, query=data.q,
                                 cursor=data.cursor, limit=data.limit)
 
@@ -2311,12 +2369,15 @@ def _render_patient_pdf(pat: dict, recs: list, professional_name: str, professio
     return buf
 
 
-@api_router.get("/patients/{pid}/export")
+@api_router.get("/patients/{pid}/export",
+                dependencies=[Depends(rate_limit("export", 2 * EXPORT_LIMIT, EXPORT_WINDOW_SECONDS))])
 async def export_patient(pid: str,
                          # Segurança (varredura, item 3): antes qualquer texto era aceito, ia
                          # para a auditoria e caía no PDF. Agora só os dois formatos existentes.
                          format: Literal["json", "pdf"] = Query("json"),
                          user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    # Varredura, item 15: limite por conta (ver SEARCH_LIMIT_PER_MINUTE acima).
+    await enforce(f"export-user:{user.user_id}", EXPORT_LIMIT, EXPORT_WINDOW_SECONDS)
     p = await _get_owned_patient(db, pid, user)
 
     stmt_r = select(Record).where(Record.patient_id == pid, Record.owner_id == user.user_id).order_by(desc(Record.session_datetime))

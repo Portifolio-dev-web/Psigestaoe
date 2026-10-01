@@ -40,6 +40,9 @@ from models import AuditLog, Patient, PatientSearchToken, Record, RecordVersion,
 from server import app
 
 
+CSRF_HEADERS = {"X-Requested-With": "psigestao"}
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
@@ -69,7 +72,9 @@ async def client():
     # Item 9: o limitador é global ao processo; zera entre testes para um não afetar o outro.
     rate_limit.limiter.reset()
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="https://test") as test_client:
+    # Varredura, item 10: como o frontend (lib/api.js), o cliente dos testes
+    # envia o cabeçalho anti-CSRF; sem ele as escritas são recusadas (403).
+    async with httpx.AsyncClient(transport=transport, base_url="https://test", headers=CSRF_HEADERS) as test_client:
         test_client.session_factory = session_factory
         yield test_client
 
@@ -321,6 +326,11 @@ async def test_auth_cookie_is_secure_in_production(client, monkeypatch):
     cookie = response.headers["set-cookie"].lower()
     assert "secure" in cookie
     assert "samesite=strict" in cookie
+    # Varredura, item 18: prefixo __Host- (exige Secure, Path=/ e nenhum Domain).
+    assert cookie.startswith("__host-access_token=")
+    assert "path=/" in cookie and "domain=" not in cookie
+    # E a sessão funciona com o nome novo.
+    assert (await client.get("/api/auth/me")).status_code == 200
 
 
 @pytest.mark.anyio
@@ -1263,7 +1273,7 @@ async def test_first_version_hides_professional_name_and_crp(client, monkeypatch
 
 def _second_client():
     """Outro navegador/aparelho: o mesmo app, com cookies separados."""
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test", headers=CSRF_HEADERS)
 
 
 def _google(email, sub, name="Pessoa"):
@@ -1657,3 +1667,119 @@ async def test_integrity_error_handler_hides_values():
     assert response.status_code == 409
     assert b"fulano" not in response.body
     assert json.loads(response.body)["detail"]["code"] == "concurrent_write"
+
+
+# ---------------------------------------------------------------------------
+# Segurança (varredura, Fase 6): defesas de borda (itens 8, 10, 15, 18 e 19)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_writes_require_csrf_header_and_allowed_origin(client):
+    await _register(client, "csrf@example.com")
+    patient_id = (await client.post("/api/patients", json={"full_name": "Paciente CSRF"})).json()["id"]
+    cookie = {"Cookie": f"access_token={client.cookies['access_token']}"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as browser:
+        # Como um formulário de OUTRO site: o cookie vai junto, mas sem o cabeçalho próprio.
+        forged = await browser.post(f"/api/patients/{patient_id}/anonymize", headers=cookie)
+        assert forged.status_code == 403 and forged.json()["detail"]["code"] == "csrf_rejected"
+
+        # Com o cabeçalho, mas vindo de uma origem fora da lista: também recusado.
+        foreign = await browser.post(f"/api/patients/{patient_id}/archive", headers={
+            **cookie, **CSRF_HEADERS, "Origin": "https://site-malicioso.example"})
+        assert foreign.status_code == 403
+
+        # Leituras não exigem o cabeçalho.
+        assert (await browser.get("/api/auth/me", headers=cookie)).status_code == 200
+
+        # O webhook do Google Forms (sem cookie, sem Origin) continua funcionando.
+        token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
+        hook = await browser.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
+                                  json={"patient_data": {"full_name": "Paciente do Forms"}})
+        assert hook.status_code == 200
+
+    # Origem permitida + cabeçalho: aceito. O paciente não foi anonimizado acima.
+    allowed = await client.post(f"/api/patients/{patient_id}/archive", headers={"Origin": "http://localhost:3000"})
+    assert allowed.status_code == 200
+    assert (await client.get(f"/api/patients/{patient_id}")).json()["full_name"] == "Paciente CSRF"
+
+
+@pytest.mark.anyio
+async def test_cors_allows_only_used_methods_and_headers(client):
+    def preflight(method, headers="content-type"):
+        return client.options("/api/patients", headers={
+            "Origin": "http://localhost:3000", "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": headers})
+
+    ok = await preflight("POST", "content-type,x-requested-with")
+    assert ok.status_code == 200 and ok.headers["access-control-max-age"] == "600"
+    assert (await preflight("PATCH")).status_code == 400
+    assert (await preflight("POST", "x-cabecalho-qualquer")).status_code == 400
+    unknown = await client.options("/api/patients", headers={
+        "Origin": "https://site-malicioso.example", "Access-Control-Request-Method": "POST"})
+    assert unknown.status_code == 400
+
+
+def test_production_cors_requires_https(monkeypatch):
+    monkeypatch.setattr(server, "ENVIRONMENT", "production")
+    monkeypatch.setenv("CORS_ORIGINS", "https://app.exemplo.com.br,http://app.exemplo.com.br")
+    with pytest.raises(SystemExit):
+        server._load_cors_origins()
+    monkeypatch.setenv("CORS_ORIGINS", "https://app.exemplo.com.br")
+    assert server._load_cors_origins() == ["https://app.exemplo.com.br"]
+
+
+def test_production_requires_shared_rate_limit(monkeypatch):
+    monkeypatch.setattr(rate_limit, "_redis_limiter", None)
+    monkeypatch.delenv("RATE_LIMIT_ALLOW_MEMORY", raising=False)
+    rate_limit.require_shared_rate_limit("development")  # desenvolvimento: memória é aceita
+    with pytest.raises(SystemExit):
+        rate_limit.require_shared_rate_limit("production")
+
+    # Exceção explícita, só com um único processo.
+    monkeypatch.setenv("RATE_LIMIT_ALLOW_MEMORY", "true")
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+    rate_limit.require_shared_rate_limit("production")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    with pytest.raises(SystemExit):
+        rate_limit.require_shared_rate_limit("production")
+
+    monkeypatch.setattr(rate_limit, "_redis_limiter", rate_limit.RedisFixedWindowLimiter(client=_FakeRedis()))
+    rate_limit.require_shared_rate_limit("production")  # com Redis: ok
+    monkeypatch.setattr(rate_limit, "RATE_LIMIT_ENABLED", False)
+    with pytest.raises(SystemExit):  # desligar o limite em produção: nunca
+        rate_limit.require_shared_rate_limit("production")
+
+
+@pytest.mark.anyio
+async def test_search_and_export_are_rate_limited_per_account(client, monkeypatch):
+    patient_id = await _create_patient(client, "limites.borda@example.com")
+    monkeypatch.setattr(server, "SEARCH_LIMIT_PER_MINUTE", 3)
+    monkeypatch.setattr(server, "EXPORT_LIMIT", 2)
+
+    searches = [(await client.post("/api/patients/search", json={"q": "Paciente"})).status_code for _ in range(4)]
+    assert searches == [200, 200, 200, 429]
+
+    exports = [(await client.get(f"/api/patients/{patient_id}/export")).status_code for _ in range(3)]
+    assert exports == [200, 200, 429]
+
+
+def test_forwarded_allow_ips_is_validated(monkeypatch):
+    # Varredura, item 8: regra lida pelo gunicorn.conf.py (proxy_config.py).
+    from proxy_config import forwarded_allow_ips_from_env
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    assert forwarded_allow_ips_from_env() == "127.0.0.1"  # desenvolvimento, sem a variável
+
+    monkeypatch.delenv("ENVIRONMENT")
+    with pytest.raises(SystemExit):  # produção sem a variável: não sobe
+        forwarded_allow_ips_from_env()
+
+    for value, expected in (("127.0.0.1", "127.0.0.1"), ("*", "*"), (" 10.0.0.5 , 10.0.0.6 ", "10.0.0.5,10.0.0.6")):
+        monkeypatch.setenv("FORWARDED_ALLOW_IPS", value)
+        assert forwarded_allow_ips_from_env() == expected
+    for invalid in ("*,10.0.0.5", "10.0.0.0/8", "proxy.interno", "none"):
+        monkeypatch.setenv("FORWARDED_ALLOW_IPS", invalid)
+        with pytest.raises(SystemExit):
+            forwarded_allow_ips_from_env()

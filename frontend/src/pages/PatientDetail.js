@@ -130,7 +130,12 @@ export default function PatientDetail() {
   const exportFile = (format) => inFlight.run("export", async () => {
     try {
       const res = await fetch(`${API}/patients/${id}/export?format=${format}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Falha na exportação");
+      if (!res.ok) {
+        // Varredura, item 15: a exportação agora tem limite (10 a cada 5 min).
+        // Mostra a mensagem do servidor em vez de um erro genérico.
+        const detail = (await res.json().catch(() => null))?.detail;
+        throw new Error(res.status === 429 && detail ? formatApiErrorDetail(detail) : "Falha na exportação");
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -140,7 +145,7 @@ export default function PatientDetail() {
       URL.revokeObjectURL(url);
       toast.success(`Exportado em ${format.toUpperCase()}.`);
     } catch (e) {
-      toast.error("Não foi possível exportar.");
+      toast.error(e.message === "Falha na exportação" ? "Não foi possível exportar." : e.message);
     }
   });
 
