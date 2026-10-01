@@ -1,0 +1,16 @@
+# requirements-dev.in
+# ---------------------------------------------------------------------------
+# Ferramentas de TESTE (tests/test_backend_routes.py). Ficam fora da imagem
+# de produção (SEGURANÇA, varredura item 13): antes o pytest e outras
+# ferramentas eram instalados junto com a API no servidor.
+#
+# As versões dos pacotes da API são as MESMAS do requirements.txt (restrição
+# -c abaixo): os testes rodam exatamente com o que vai para produção.
+# Instalação na sua máquina: pip install -r backend/requirements-dev.txt
+# ---------------------------------------------------------------------------
+-r requirements.in
+-c requirements.txt
+
+pytest                      # executor dos testes
+pytest-xdist                # testes em paralelo (pytest.ini: -n 2)
+httpx                       # cliente HTTP dos testes (ASGITransport, sem subir servidor)

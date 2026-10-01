@@ -1,0 +1,53 @@
+# requirements.in
+# ---------------------------------------------------------------------------
+# Dependências DIRETAS da API: só o que o código importa ou executa.
+#
+# SEGURANÇA (varredura, item 13): o requirements.txt antigo era um `pip freeze`
+# herdado do template, com 135 pacotes. Mais da metade não era usada (openai,
+# google-generativeai, boto3, stripe, pymongo, pandas, numpy, tiktoken,
+# python-jose, passlib, aiohttp...), e cada um aumentava a imagem e a
+# superfície de ataque: o python-jose, por exemplo, trazia o `ecdsa`, com uma
+# vulnerabilidade ALTA sem correção. Ferramentas de desenvolvimento (pytest,
+# black, mypy, flake8) iam para a imagem de produção, e SQLAlchemy, Alembic e
+# asyncpg nem tinham versão fixa.
+#
+# Agora:
+#   - este arquivo lista o que a API usa, com o motivo de cada pacote;
+#   - o requirements.txt é GERADO a partir dele, com TODAS as versões travadas
+#     e o hash de cada arquivo (o pip recusa um pacote adulterado no caminho);
+#   - ferramentas de teste ficam em requirements-dev.in, fora da imagem.
+#
+# Para adicionar ou atualizar um pacote: edite este arquivo e gere de novo os
+# dois .txt com o comando do topo do requirements.txt (README, "Dependências").
+# ---------------------------------------------------------------------------
+
+# --- API e servidor ---
+fastapi>=0.120              # framework da API; traz o Starlette
+starlette>=1.3.1            # mínimo seguro: versões abaixo têm 14 avisos (DoS em formulários, SSRF no Windows)
+pydantic                    # validação dos dados de entrada
+email-validator             # usado pelo EmailStr do pydantic (cadastro e login)
+uvicorn                     # servidor ASGI (dev: --reload; produção: workers do gunicorn)
+watchfiles                  # recarga automática do uvicorn no desenvolvimento
+gunicorn                    # produção: vários processos (start.sh, gunicorn.conf.py)
+
+# --- Banco de dados ---
+sqlalchemy[asyncio]         # ORM; o extra asyncio traz o greenlet (sem ele, erro ao conectar)
+asyncpg                     # driver do PostgreSQL
+aiosqlite                   # SQLite: fallback do desenvolvimento e banco dos testes
+alembic                     # migrações (prestart.py)
+
+# --- Autenticação e criptografia ---
+PyJWT>=2.15.1               # token de login; 2.13.0 tinha 13 avisos (1 crítico, 5 altos)
+bcrypt<5                    # hash de senhas; a 5.x lança erro com senhas > 72 bytes (o login aceita até 256)
+cryptography                # Fernet: criptografia dos dados dos pacientes
+google-auth                 # verificação do ID token do login com Google
+requests                    # transporte HTTP usado pelo google-auth (certificados do Google)
+urllib3>=2.8.0              # vem pelo requests; mínimo seguro: a 2.7.0 tinha 2 avisos altos
+
+# --- Recursos da aplicação ---
+reportlab                   # exportação do prontuário em PDF
+
+# --- Operação (escala e monitoramento) ---
+prometheus-client           # /api/metrics
+sentry-sdk[fastapi]         # rastreamento de erros (só liga com SENTRY_DSN)
+redis                       # rate limit compartilhado entre workers (só com REDIS_URL)

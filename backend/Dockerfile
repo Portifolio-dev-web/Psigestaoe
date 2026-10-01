@@ -7,7 +7,13 @@ WORKDIR /app
 
 # Copia os arquivos de dependência primeiro (otimiza o cache do Docker)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# DEPENDÊNCIAS (varredura, item 13): o requirements.txt agora é gerado a partir
+# do requirements.in, com todas as versões travadas e o hash SHA-256 de cada
+# arquivo. --require-hashes faz o pip recusar qualquer pacote cujo conteúdo
+# não bata (pacote adulterado no repositório ou no caminho) e qualquer pacote
+# que não esteja na lista. Ferramentas de teste NÃO entram na imagem
+# (ficam em requirements-dev.txt).
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY . .
 

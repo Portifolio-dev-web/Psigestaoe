@@ -10,6 +10,7 @@ import secrets
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -150,9 +151,6 @@ def api_docs_urls(environment: str) -> dict:
     return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
 
-# 1. Inicializa o app UMA ÚNICA VEZ
-app = FastAPI(title="PsiGestão API", **api_docs_urls(ENVIRONMENT))
-
 # ESCALA (workers): quem cria/migra o banco.
 # Antes, TODO processo rodava create_all() ao iniciar. Com vários workers,
 # todos fariam isso ao mesmo tempo (corrida em DDL) e o banco ainda seria
@@ -165,13 +163,24 @@ AUTO_CREATE_TABLES = os.environ.get(
 ).lower() == "true"
 
 
-@app.on_event("startup")
-async def init_tables():
-    if not AUTO_CREATE_TABLES:
-        return
-    # Isso instrui o SQLAlchemy a criar todas as tabelas que ainda não existem
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """O que roda ao iniciar o processo (antes do `yield`) e ao encerrar (depois).
+
+    DEPENDÊNCIAS (varredura, item 13): antes era `@app.on_event("startup")`.
+    Na atualização do FastAPI (0.110 -> 0.142) e do Starlette (0.37 -> 1.7),
+    o on_event passou a ser obsoleto e vai deixar de existir; `lifespan` é o
+    substituto oficial. O comportamento é o mesmo.
+    """
+    if AUTO_CREATE_TABLES:
+        # Isso instrui o SQLAlchemy a criar todas as tabelas que ainda não existem
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    yield
+
+
+# 1. Inicializa o app UMA ÚNICA VEZ
+app = FastAPI(title="PsiGestão API", lifespan=lifespan, **api_docs_urls(ENVIRONMENT))
 
 # 2. Configura o CORS logo em seguida
 # CORREÇÃO DE SEGURANÇA (item 11 da auditoria):

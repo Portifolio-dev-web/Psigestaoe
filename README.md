@@ -30,6 +30,36 @@ docker compose exec db psql -U admin -d psigestao -c "\password admin"
 docker compose up -d --force-recreate
 ```
 
+Testes do backend (na sua máquina):
+
+```
+pip install -r backend/requirements-dev.txt
+cd backend && python -m pytest ../tests
+```
+
+## Dependências
+
+**Backend.** `backend/requirements.in` lista só o que a API usa, com o motivo de cada
+pacote. O `requirements.txt` é **gerado** a partir dele, com todas as versões travadas
+e o hash de cada arquivo (o Dockerfile instala com `--require-hashes`). As ferramentas
+de teste ficam em `requirements-dev.in` e não entram na imagem. Para adicionar ou
+atualizar um pacote, edite o `.in` e gere os dois `.txt` (rode na pasta `backend/`):
+
+```
+docker run --rm -v "$PWD":/work -w /work python:3.11-slim sh -c "pip install -q uv && \
+  uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt && \
+  uv pip compile requirements-dev.in --universal --python-version 3.11 --generate-hashes -o requirements-dev.txt"
+```
+
+Para subir um pacote específico, acrescente `--upgrade-package <nome>` ao primeiro comando.
+
+**Frontend.** Pacotes com versão exata no `package.json`. Ao adicionar um, confira que
+ele é realmente importado em `src/`: pacotes sem uso foram removidos na varredura de
+segurança (item 13) e não devem voltar.
+
+Antes de cada deploy, confira as vulnerabilidades conhecidas (por exemplo, em
+[osv.dev](https://osv.dev) ou com `pip-audit` e `yarn audit`).
+
 ## Produção (API)
 
 A imagem do `backend/` sobe pelo `start.sh`:
