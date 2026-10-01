@@ -56,7 +56,19 @@ export default function Login() {
         credential: credentialResponse.credential
       });
       setUser(data.user);
-      toast.success("Autenticação com Google efetuada com sucesso!");
+      if (data.password_discarded) {
+        // SEGURANÇA (varredura, item 5): esta conta tinha uma senha criada sem
+        // confirmar o e-mail (pode ter sido outra pessoa). O Google acabou de
+        // comprovar quem é o dono, então o servidor desativou a senha antiga e
+        // encerrou as outras sessões. Explicamos, para não parecer um defeito.
+        toast.warning(
+          "Por segurança, a senha antiga desta conta foi desativada: ela tinha sido criada sem confirmar que o e-mail era seu. "
+          + "Continue entrando com o Google ou defina uma nova senha em Privacidade & LGPD.",
+          { duration: 12000 },
+        );
+      } else {
+        toast.success("Autenticação com Google efetuada com sucesso!");
+      }
       navigate(afterLogin, { replace: true });
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || "Erro na autenticação do Google");

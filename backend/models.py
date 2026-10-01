@@ -91,6 +91,20 @@ class User(Base):
     # inutiliza os rascunhos de TODOS os aparelhos, ex.: notebook perdido.
     draft_key = Column(Text, nullable=True)  # [CRIPTOGRAFADO]
 
+    # SEGURANÇA (varredura, item 5): vínculo seguro com o Google.
+    # Antes, o login com Google entrava em QUALQUER conta com o mesmo e-mail,
+    # inclusive numa conta com senha criada por outra pessoa (o cadastro não
+    # confirma o e-mail). Ver google_auth em server.py.
+    # - google_sub: identificador FIXO da conta Google (claim "sub" do token).
+    #   O e-mail de uma conta Google pode mudar ou ser reaproveitado (ex.: um
+    #   e-mail corporativo passado a outro funcionário); o sub nunca muda.
+    # - email_verified_at: quando a posse do e-mail foi comprovada. Hoje só o
+    #   Google comprova. Conta com senha e sem esta data = ninguém provou que
+    #   é dono do e-mail.
+    # Migração: alembic/versions/20261001_account_security.py
+    google_sub = Column(String, unique=True, index=True, nullable=True)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     # Relacionamentos
@@ -101,7 +115,13 @@ class User(Base):
 class UserSession(Base):
     __tablename__ = "user_sessions"
 
-    session_token = Column(String, primary_key=True)
+    # SEGURANÇA (varredura, itens 7 e 14): o banco guarda só o HASH SHA-256 do
+    # ID da sessão (antes: coluna `session_token`, com o ID em texto puro).
+    # O ID verdadeiro existe apenas dentro do JWT, no cookie do navegador.
+    # Assim, quem ler o banco (um backup, uma consulta indevida) não consegue
+    # montar um token válido para as sessões abertas, mesmo conhecendo o
+    # JWT_SECRET. Mesmo padrão do token do webhook (webhook_token_hash).
+    token_hash = Column(String, primary_key=True)
     # Índice: limpeza das sessões vencidas no login e cascata ao excluir usuário.
     user_id = Column(String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)

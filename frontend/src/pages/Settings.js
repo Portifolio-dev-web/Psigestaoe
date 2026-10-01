@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { GoogleLogin } from "@react-oauth/google";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { clearUserDrafts, forgetDraftKey } from "@/lib/drafts";
@@ -14,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
-  FileSignature, Archive, TimerReset,
+  FileSignature, Archive, TimerReset, LogOut,
 } from "lucide-react";
 
 // Rótulos das ações gravadas pelo backend em log_audit(). Ações novas da etapa
@@ -28,6 +29,8 @@ const ACTION_LABEL = {
   aceitar: "Aceite", gerar_token: "Novo token",
   // Produto: bloqueio por inatividade.
   bloquear: "Bloqueio", desbloquear: "Desbloqueio", desbloquear_falha: "Senha incorreta", encerrar: "Encerramento",
+  // Segurança (varredura, Fase 2): vínculo com o Google e troca de senha.
+  vincular: "Vínculo Google", alterar_senha: "Troca de senha", alterar_senha_falha: "Senha incorreta",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
@@ -250,6 +253,162 @@ function SessionSecurity() {
   );
 }
 
+// SEGURANÇA (varredura, item 5): senha e sessões em outros aparelhos.
+// Antes não havia como trocar a senha nem encerrar uma sessão esquecida em
+// outro computador: se a senha vazasse, o profissional não tinha o que fazer.
+// - Trocar a senha encerra as sessões de TODOS os outros aparelhos (este continua).
+// - Quem só entra pelo Google define a primeira senha confirmando com o Google:
+//   assim, quem encontrar o computador logado não consegue tomar a conta.
+// - "Sair dos outros dispositivos": para um computador esquecido logado ou
+//   suspeita de acesso indevido.
+
+// Mesmas regras do servidor (validate_password_strength em server.py). Aqui
+// servem só para avisar antes de enviar; quem decide é o servidor.
+function passwordProblem(password) {
+  if (password.length < 8) return "A senha deve ter pelo menos 8 caracteres.";
+  if (new TextEncoder().encode(password).length > 72) return "A senha é longa demais (máximo de 72 caracteres).";
+  if (!/\p{L}/u.test(password) || !/\d/.test(password)) return "A senha deve conter letras e números.";
+  return "";
+}
+
+const EMPTY_PASSWORD_FORM = { current: "", next: "", confirm: "" };
+
+function AccountSecurity() {
+  const { user, setUser } = useAuth();
+  const hasPassword = Boolean(user?.has_password);
+  const [form, setForm] = useState(EMPTY_PASSWORD_FORM);
+  const [saving, setSaving] = useState(false);
+  const [otherSessions, setOtherSessions] = useState(null);
+  const [ending, setEnding] = useState(false);
+
+  useEffect(() => {
+    api.get("/auth/sessions")
+      .then(({ data }) => setOtherSessions(data.other_sessions))
+      .catch(() => setOtherSessions(null));
+  }, []);
+
+  const problem = form.next ? passwordProblem(form.next) : "";
+  const mismatch = form.confirm && form.confirm !== form.next ? "As senhas não conferem." : "";
+  const ready = Boolean(form.next) && !problem && form.confirm === form.next && (!hasPassword || Boolean(form.current));
+
+  // `proof`: a senha atual (quem tem senha) ou o token do Google (quem não tem).
+  const submit = async (proof) => {
+    setSaving(true);
+    try {
+      const { data } = await api.post("/auth/password", { ...proof, new_password: form.next });
+      setUser((current) => ({ ...current, ...data.user }));
+      setForm(EMPTY_PASSWORD_FORM);
+      setOtherSessions(0);
+      const ended = data.ended_sessions
+        ? ` ${data.ended_sessions} sessão(ões) em outros aparelhos foram encerradas.`
+        : "";
+      toast.success(`${hasPassword ? "Senha alterada" : "Senha definida"}.${ended}`);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const endOtherSessions = async () => {
+    if (!window.confirm("Encerrar a sessão em todos os outros aparelhos e navegadores? Este continua conectado.")) return;
+    setEnding(true);
+    try {
+      // Corpo JSON obrigatório: o servidor recusa a rota sem ele (proteção contra CSRF).
+      const { data } = await api.post("/auth/sessions/end-others", { confirm: true });
+      setOtherSessions(0);
+      toast.success(data.ended_sessions
+        ? `${data.ended_sessions} sessão(ões) encerrada(s) em outros aparelhos.`
+        : "Não havia outras sessões abertas.");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setEnding(false);
+    }
+  };
+
+  const setField = (field) => (e) => setForm((current) => ({ ...current, [field]: e.target.value }));
+  const hint = mismatch || problem;
+
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex items-center gap-2">
+        <KeyRound className="h-4 w-4 text-[#1E3A8A]" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Senha e acesso</h2>
+      </div>
+      <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-2">
+        <form className="space-y-3" data-testid="password-form"
+          onSubmit={(e) => { e.preventDefault(); if (ready && hasPassword) submit({ current_password: form.current }); }}>
+          {/* Campo oculto: ajuda o gerenciador de senhas a saber de qual conta é a senha nova. */}
+          <input type="text" name="username" autoComplete="username" value={user?.email || ""} readOnly
+            className="sr-only" tabIndex={-1} aria-hidden="true" />
+          {hasPassword ? (
+            <div>
+              <Label htmlFor="current-password" className="text-slate-700">Senha atual</Label>
+              <Input id="current-password" type="password" autoComplete="current-password" className="mt-1.5"
+                value={form.current} onChange={setField("current")} data-testid="current-password-input" />
+            </div>
+          ) : (
+            <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">
+              Você entra com o Google. Defina uma senha para também entrar com e-mail e senha; para confirmar que
+              é você, o Google será usado.
+            </p>
+          )}
+          <div>
+            <Label htmlFor="new-password" className="text-slate-700">{hasPassword ? "Nova senha" : "Senha"}</Label>
+            <Input id="new-password" type="password" autoComplete="new-password" maxLength={72} className="mt-1.5"
+              value={form.next} onChange={setField("next")} aria-invalid={Boolean(problem)}
+              aria-describedby="password-rules" data-testid="new-password-input" />
+          </div>
+          <div>
+            <Label htmlFor="confirm-password" className="text-slate-700">Repita a senha</Label>
+            <Input id="confirm-password" type="password" autoComplete="new-password" maxLength={72} className="mt-1.5"
+              value={form.confirm} onChange={setField("confirm")} aria-invalid={Boolean(mismatch)}
+              aria-describedby="password-rules" data-testid="confirm-password-input" />
+          </div>
+          <p id="password-rules" role={hint ? "alert" : undefined}
+            className={`text-xs ${hint ? "text-red-600" : "text-slate-500"}`}>
+            {hint || "Mínimo de 8 caracteres, com letras e números. Os outros aparelhos serão desconectados."}
+          </p>
+          {hasPassword ? (
+            <Button type="submit" disabled={!ready || saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]"
+              data-testid="change-password-btn">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Alterar senha"}
+            </Button>
+          ) : ready && !saving ? (
+            <GoogleLogin
+              onSuccess={(response) => submit({ credential: response.credential })}
+              onError={() => toast.error("Não foi possível confirmar com o Google. Tente novamente.")}
+              shape="rectangular" text="continue_with"
+            />
+          ) : saving ? (
+            <Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" />
+          ) : null}
+        </form>
+
+        <div>
+          <p className="text-sm font-medium text-slate-700">Outros aparelhos</p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500" data-testid="other-sessions-count">
+            {otherSessions === null
+              ? "Verificando sessões abertas…"
+              : otherSessions === 0
+                ? "Nenhuma outra sessão aberta: só este navegador está conectado."
+                : `${otherSessions} outra(s) sessão(ões) aberta(s) em outros aparelhos ou navegadores.`}
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-500">
+            Use se esqueceu a conta aberta em outro computador ou se suspeita de acesso indevido.
+          </p>
+          <Button variant="outline" size="sm" onClick={endOtherSessions} disabled={ending || !otherSessions}
+            className="mt-3 gap-2 border-red-200 text-red-600 hover:bg-red-50" data-testid="end-other-sessions-btn">
+            {ending ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
+            Sair dos outros dispositivos
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const [logs, setLogs] = useState(null);
@@ -320,6 +479,7 @@ export default function Settings() {
       {user?.features?.professional_identification && <ProfessionalProfile />}
       <ConsentTermEditor />
       <SessionSecurity />
+      <AccountSecurity />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {items.map((it) => (

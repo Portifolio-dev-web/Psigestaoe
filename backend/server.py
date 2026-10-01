@@ -80,6 +80,28 @@ if not JWT_SECRET:
         logging.warning("Usando JWT_SECRET inseguro para desenvolvimento.")
         JWT_SECRET = "dev-secret"
 
+# SEGURANÇA (varredura, item 14): segredo curto demais é adivinhável por força
+# bruta OFFLINE: quem tiver UM token (ex.: copiado de um computador) testa
+# bilhões de segredos por segundo até achar o que reproduz a assinatura, e
+# depois assina tokens à vontade. A RFC 7518 pede ao menos 32 bytes para HS256.
+JWT_SECRET_MIN_LENGTH = 32
+if ENVIRONMENT == "production" and len(JWT_SECRET) < JWT_SECRET_MIN_LENGTH:
+    logging.critical("SECURITY ALERT: JWT_SECRET precisa ter pelo menos %d caracteres aleatórios. Abortando.",
+                     JWT_SECRET_MIN_LENGTH)
+    sys.exit(1)
+
+# SEGURANÇA (varredura, item 14): claims OBRIGATÓRIAS no token de login.
+# Antes o jwt.decode aceitava qualquer token assinado com o segredo, mesmo sem
+# validade (`exp`) ou sem a sessão (`sid`). Agora o token precisa dizer:
+#   - quem emitiu (`iss`) e para quem (`aud`): um token emitido por outro
+#     sistema que, por descuido, use o mesmo segredo não é aceito aqui;
+#   - quando foi emitido (`iat`) e quando vence (`exp`);
+#   - de quem é (`sub`) e qual sessão representa (`sid`).
+# Falta qualquer uma = token recusado (o usuário entra de novo).
+JWT_ISSUER = "psigestao-api"
+JWT_AUDIENCE = "psigestao-web"
+JWT_REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub", "sid"]
+
 # CORREÇÃO DE SEGURANÇA (item 2 da auditoria):
 # A chave de criptografia agora vem SOMENTE de FERNET_KEY (+ FERNET_OLD_KEYS
 # durante uma rotação), é validada na inicialização e é independente do
@@ -293,18 +315,42 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
         UserSession.user_id == user.user_id, UserSession.expires_at < now_utc(),
     ))
 
-    expires_at = now_utc() + timedelta(hours=JWT_EXPIRE_HOURS)
+    issued_at = now_utc()
+    expires_at = issued_at + timedelta(hours=JWT_EXPIRE_HOURS)
     session_id = secrets.token_urlsafe(32)
-    db.add(UserSession(session_token=session_id, user_id=user.user_id, expires_at=expires_at,
-                       last_activity_at=now_utc()))  # produto: ponto de partida da inatividade
+    # SEGURANÇA (varredura, itens 7 e 14): o ID da sessão vai SÓ no JWT (cookie);
+    # o banco guarda o hash dele. Ver UserSession.token_hash em models.py.
+    db.add(UserSession(token_hash=hash_token(session_id), user_id=user.user_id, expires_at=expires_at,
+                       last_activity_at=issued_at))  # produto: ponto de partida da inatividade
     await db.commit()
 
     payload = {
         "sub": user.user_id,
         "sid": session_id,
         "exp": expires_at,
+        # Segurança (varredura, item 14): claims agora obrigatórias na leitura.
+        "iat": issued_at,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+async def end_login_sessions(db: AsyncSession, user: User, keep: Optional[UserSession] = None) -> int:
+    """Encerra as sessões do usuário (todas, ou todas menos `keep`) e devolve
+    quantas foram encerradas. Os tokens dessas sessões morrem na hora, em
+    qualquer aparelho: a próxima requisição deles recebe 401.
+
+    Segurança (varredura, item 5): usada na troca de senha, em "Sair dos
+    outros dispositivos" e quando o login com Google descarta uma senha
+    criada por quem não comprovou ser dono do e-mail.
+    """
+    stmt = delete(UserSession).where(UserSession.user_id == user.user_id)
+    if keep is not None:
+        stmt = stmt.where(UserSession.token_hash != keep.token_hash)
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount or 0
 
 
 # CORREÇÃO DE SEGURANÇA (item 1 da auditoria):
@@ -630,6 +676,32 @@ class UnlockInput(BaseModel):
     credential: Optional[str] = Field(default=None, max_length=8192)
 
 
+class PasswordChangeInput(BaseModel):
+    """Segurança (varredura, item 5): troca de senha.
+
+    Quem tem senha confirma com a senha ATUAL. Quem só entra pelo Google (ou
+    teve a senha descartada no vínculo com o Google) define a primeira senha
+    confirmando com o Google. Assim, alguém que encontre um computador logado
+    não consegue trocar a senha e tomar a conta.
+    """
+    current_password: Optional[str] = Field(default=None, max_length=256)
+    credential: Optional[str] = Field(default=None, max_length=8192)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        return validate_password_strength(value)  # mesma política do cadastro
+
+
+class EndSessionsInput(BaseModel):
+    # Segurança (varredura, item 10): corpo JSON obrigatório, mesmo sem dado
+    # útil. Rotas POST sem corpo dependem só do SameSite do cookie contra
+    # CSRF; exigindo JSON, outro site não consegue montar a requisição sem
+    # passar pela checagem do CORS.
+    confirm: Literal[True]
+
+
 class LockSettingsInput(BaseModel):
     minutes: int
 
@@ -782,21 +854,29 @@ async def log_audit(db: AsyncSession, owner_id: str, user_email: str, action: st
 async def _session_from_token(token: str, db: AsyncSession) -> Optional[UserSession]:
     """Valida a assinatura/expiração do JWT e busca a sessão correspondente no banco."""
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # SEGURANÇA (varredura, item 14): além da assinatura e da validade,
+        # exige todas as claims de JWT_REQUIRED_CLAIMS e confere emissor e
+        # destinatário. Antes, um token sem `exp` (válido para sempre) ou sem
+        # `sid` passava por esta etapa.
+        payload = jwt.decode(
+            token, JWT_SECRET, algorithms=[JWT_ALGORITHM],
+            issuer=JWT_ISSUER, audience=JWT_AUDIENCE,
+            options={"require": JWT_REQUIRED_CLAIMS},
+        )
     except jwt.PyJWTError:
         return None
 
-    session_id = payload.get("sid")
-    if not session_id:
-        # Tokens emitidos antes da correção do item 8 não têm "sid" e não podem
-        # ser revogados; por isso deixam de ser aceitos (o usuário faz login de novo).
+    session_id = payload["sid"]
+    if not isinstance(session_id, str) or not session_id:
         return None
 
     # ESCALA: esta função roda em TODA requisição autenticada. Antes eram duas
     # idas ao banco (sessão, depois usuário); o joinedload traz os dois juntos.
+    # Segurança (varredura, item 7): a busca é pelo HASH do ID (o banco não
+    # guarda o ID verdadeiro).
     stmt = select(UserSession).options(joinedload(UserSession.user)).where(
-        UserSession.session_token == session_id,
-        UserSession.user_id == payload.get("sub"),
+        UserSession.token_hash == hash_token(session_id),
+        UserSession.user_id == payload["sub"],
     )
     sess = (await db.execute(stmt)).scalar_one_or_none()
     if not sess:
@@ -878,16 +958,24 @@ async def _touch_activity(db: AsyncSession, sess: UserSession) -> None:
         await db.commit()
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    """Usuário autenticado com a sessão DESBLOQUEADA (todas as rotas de dados).
+async def get_current_session(request: Request, db: AsyncSession = Depends(get_db)) -> UserSession:
+    """Sessão autenticada e DESBLOQUEADA.
 
     Sessão bloqueada responde 423 com code "session_locked": o frontend
     mostra a tela de bloqueio sem perder o que estava aberto (ex.: rascunho).
+    Segurança (varredura, item 5): separada de get_current_user porque a
+    troca de senha e "Sair dos outros dispositivos" precisam saber QUAL é a
+    sessão atual, para encerrar as outras e manter esta.
     """
     sess = await _authenticated_session(request, db)
     if await _is_locked(db, sess):
         raise HTTPException(status_code=423, detail=SESSION_LOCKED_DETAIL)
     await _touch_activity(db, sess)
+    return sess
+
+
+async def get_current_user(sess: UserSession = Depends(get_current_session)) -> User:
+    """Usuário autenticado com a sessão DESBLOQUEADA (todas as rotas de dados)."""
     return sess.user
 
 
@@ -1061,20 +1149,76 @@ async def verify_google_credential(credential: str) -> dict:
     # 2. Validação de conta verificada
     if not id_info.get("email_verified", False):
         raise HTTPException(status_code=403, detail="Acesso negado: E-mail não verificado pelo Google.")
+    # Segurança (varredura, item 5): o `sub` (identificador fixo da conta
+    # Google) passou a ser a identidade usada no vínculo. Todo ID token
+    # legítimo do Google o tem; sem ele, o token é recusado.
+    if not id_info.get("sub"):
+        raise HTTPException(status_code=401, detail="Token de autenticação inválido ou expirado.")
     return id_info
+
+
+def google_identity_matches(id_info: dict, user: User) -> bool:
+    """A conta Google do token é a MESMA do usuário? (desbloqueio e troca de senha)
+
+    Segurança (varredura, item 5): antes só o e-mail era comparado. Com o
+    `sub` guardado, também exige a mesma conta Google: um e-mail reaproveitado
+    por outra pessoa não passa.
+    """
+    same_email = id_info.get("email", "").lower().strip() == user.email
+    return same_email and (not user.google_sub or id_info.get("sub") == user.google_sub)
 
 
 @api_router.post("/auth/google", dependencies=[Depends(rate_limit("google", 10, 60))])
 async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSession = Depends(get_db)):
     id_info = await verify_google_credential(data.credential)  # passos 1 e 2 (ver acima)
     email = id_info["email"].lower().strip()
+    google_sub = id_info["sub"]
     name = id_info.get("name", "")
     picture = id_info.get("picture", "")
 
-    # 3. Lógica de Persistência no Banco (Segura)
-    stmt = select(User).where(User.email == email)
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
+    # 3. Qual conta é esta?
+    # SEGURANÇA (varredura, item 5): sequestro de conta pelo login com Google.
+    # Antes a conta era achada SÓ pelo e-mail, e o login com Google entrava em
+    # qualquer conta com aquele e-mail. Como o cadastro com senha não confirma
+    # o e-mail, o ataque era:
+    #   1. o atacante cadastra o e-mail (público) de um(a) psicólogo(a) com uma
+    #      senha que só ele conhece;
+    #   2. a vítima vê "E-mail já cadastrado" e entra pelo Google;
+    #   3. cai na conta do atacante e cadastra os pacientes;
+    #   4. o atacante entra com a senha e lê tudo.
+    # Agora:
+    #   - a conta é achada primeiro pelo `sub` do Google (identidade fixa);
+    #   - um e-mail já vinculado a OUTRA conta Google é recusado;
+    #   - se a conta tem senha e ninguém nunca comprovou ser dono do e-mail,
+    #     o Google acaba de comprovar que o dono é QUEM ESTÁ ENTRANDO: a senha
+    #     (que pode ter sido criada por outra pessoa) é descartada e TODAS as
+    #     sessões abertas na conta são encerradas. O dono pode definir uma
+    #     senha nova em Configurações, confirmando com o Google.
+    user = (await db.execute(select(User).where(User.google_sub == google_sub))).scalar_one_or_none()
+    password_discarded = False
+    newly_linked = False
+    if user is None:
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if user is not None:
+            if user.google_sub and user.google_sub != google_sub:
+                raise HTTPException(status_code=409, detail=(
+                    "Este e-mail já está vinculado a outra conta Google. Entre com a conta Google original."
+                ))
+            if user.password_hash and user.email_verified_at is None:
+                user.password_hash = None
+                # O aceite da Política de Privacidade e o nome também vieram de
+                # quem criou a conta, que pode não ser o dono: o aceite não serve
+                # de evidência (LGPD) e o nome pode ser falso. O dono aceita a
+                # política ele mesmo, e o nome passa a ser o da conta Google.
+                user.terms_accepted = False
+                user.terms_version = None
+                user.terms_accepted_at = None
+                user.name = name or user.name
+                password_discarded = True
+                await end_login_sessions(db, user)
+            user.google_sub = google_sub
+            user.email_verified_at = user.email_verified_at or now_utc()
+            newly_linked = True
 
     if user:
         # Item 6: o nome agora pode ser editado em Configurações (vai no termo de
@@ -1095,16 +1239,27 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
             picture=picture,
             auth_provider="google",
             terms_accepted=False,
+            # Segurança (varredura, item 5): identidade fixa + e-mail comprovado pelo Google.
+            google_sub=google_sub,
+            email_verified_at=now_utc(),
         )
         db.add(user)
 
     await db.commit()
     await db.refresh(user)
 
+    if newly_linked:
+        detail = "Login com Google vinculado à conta (e-mail comprovado pelo Google)"
+        if password_discarded:
+            detail += "; senha sem e-mail comprovado descartada e sessões anteriores encerradas"
+        await log_audit(db, user.user_id, user.email, "vincular", "usuario", user.user_id, detail)
+
     # 4. Geração da NOSSA sessão. Nunca dependemos da sessão do Google a longo prazo.
     set_auth_cookie(response, await open_login_session(db, user))
 
-    return {"user": public_user(user)}
+    # `password_discarded` permite ao frontend explicar por que a senha antiga
+    # desta conta deixou de funcionar.
+    return {"user": public_user(user), "password_discarded": password_discarded}
 
 @api_router.get("/auth/me")
 async def me(request: Request, db: AsyncSession = Depends(get_db)):
@@ -1205,8 +1360,9 @@ async def unlock_session(data: UnlockInput, request: Request, response: Response
         verified = await verify_password_async(data.password, user.password_hash)
     elif data.credential:
         id_info = await verify_google_credential(data.credential)
-        # A conta do Google precisa ser A MESMA da sessão bloqueada.
-        verified = id_info.get("email", "").lower().strip() == user.email
+        # A conta do Google precisa ser A MESMA da sessão bloqueada (e-mail e,
+        # desde a varredura, item 5, também o `sub` quando já vinculado).
+        verified = google_identity_matches(id_info, user)
     else:
         verified = False
 
@@ -1259,6 +1415,70 @@ async def update_lock_settings(data: LockSettingsInput, user: User = Depends(get
     await log_audit(db, user.user_id, user.email, "editar", "usuario", user.user_id,
                     f"Bloqueio por inatividade: {data.minutes} min")
     return public_user(user)
+
+
+# ---------------------------------------------------------------------------
+# SEGURANÇA (varredura, item 5): troca de senha e "Sair dos outros dispositivos"
+# ---------------------------------------------------------------------------
+# Antes não havia como trocar a senha nem encerrar sessões em outros
+# aparelhos: se uma senha vazasse, ou se um computador ficasse logado em
+# outro lugar, o profissional não tinha o que fazer.
+
+@api_router.post("/auth/password", dependencies=[Depends(rate_limit("password", 5, 900))])
+async def change_password(data: PasswordChangeInput, sess: UserSession = Depends(get_current_session),
+                          db: AsyncSession = Depends(get_db)):
+    user = sess.user
+    # Além do limite por IP (acima), limite por CONTA: um cookie roubado usado
+    # de vários IPs não ganha mais tentativas de adivinhar a senha atual.
+    await enforce(f"password-user:{user.user_id}", 5, 900)
+
+    had_password = bool(user.password_hash)
+    if had_password:
+        if not data.current_password or not await verify_password_async(data.current_password, user.password_hash):
+            await log_audit(db, user.user_id, user.email, "alterar_senha_falha", "usuario", user.user_id,
+                            "Troca de senha recusada: senha atual incorreta")
+            raise HTTPException(status_code=403, detail={"code": "invalid_current_password",
+                                                         "msg": "A senha atual está incorreta."})
+        if await verify_password_async(data.new_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="A nova senha precisa ser diferente da atual.")
+    else:
+        if not data.credential:
+            raise HTTPException(status_code=400, detail="Confirme sua identidade com o Google para definir a senha.")
+        if not google_identity_matches(await verify_google_credential(data.credential), user):
+            raise HTTPException(status_code=403, detail="Esta conta Google não é a da sessão atual.")
+
+    user.password_hash = await hash_password_async(data.new_password)  # escala: fora do event loop
+    await db.commit()
+
+    # Quem soubesse a senha antiga (ou tivesse uma sessão aberta em outro
+    # aparelho) perde o acesso na hora. Esta sessão continua aberta.
+    ended = await end_login_sessions(db, user, keep=sess)
+    await log_audit(db, user.user_id, user.email, "alterar_senha", "usuario", user.user_id,
+                    f"Senha {'alterada' if had_password else 'definida'}; {ended} outra(s) sessão(ões) encerrada(s)")
+    await db.refresh(user)
+    return {"user": public_user(user), "ended_sessions": ended}
+
+
+@api_router.get("/auth/sessions")
+async def count_other_sessions(sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
+    """Quantas OUTRAS sessões desta conta estão abertas (outros aparelhos ou navegadores)."""
+    stmt = select(func.count()).select_from(UserSession).where(
+        UserSession.user_id == sess.user_id,
+        UserSession.token_hash != sess.token_hash,
+        UserSession.expires_at > now_utc(),
+    )
+    return {"other_sessions": (await db.execute(stmt)).scalar_one()}
+
+
+@api_router.post("/auth/sessions/end-others")
+async def end_other_sessions(data: EndSessionsInput, sess: UserSession = Depends(get_current_session),
+                             db: AsyncSession = Depends(get_db)):
+    """"Sair dos outros dispositivos": encerra todas as sessões menos esta."""
+    user = sess.user
+    ended = await end_login_sessions(db, user, keep=sess)
+    await log_audit(db, user.user_id, user.email, "encerrar", "sessao", user.user_id,
+                    f"Sair dos outros dispositivos: {ended} sessão(ões) encerrada(s)")
+    return {"ended_sessions": ended}
 
 
 # ---------------------------------------------------------------------------

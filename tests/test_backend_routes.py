@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 # (atribuição direta, não setdefault: um ENVIRONMENT=production exportado no
 # terminal não pode mudar o resultado). Testes de produção usam monkeypatch.
 os.environ["ENVIRONMENT"] = "development"
-os.environ.setdefault("JWT_SECRET", "route-test-secret")
+# Segurança (varredura, item 14): segredo com 32+ caracteres, como a produção exige.
+os.environ.setdefault("JWT_SECRET", "route-test-secret-com-pelo-menos-32-caracteres")
 # Precisa ser uma chave Fernet válida: o servidor agora valida a chave na inicialização.
 TEST_FERNET_KEY = Fernet.generate_key().decode()
 os.environ.setdefault("FERNET_KEY", TEST_FERNET_KEY)
@@ -258,6 +259,7 @@ async def test_google_auth_route_creates_user_and_session(client, monkeypatch):
     id_info = {
         "email": "Google.Test@example.com",
         "email_verified": True,
+        "sub": "google-sub-test",  # todo ID token real do Google tem o `sub`
         "name": "Google Test",
         "picture": "https://example.com/avatar.png",
     }
@@ -589,7 +591,7 @@ async def test_webhook_token_is_hashed_shown_once_and_rotatable(client):
 async def test_google_signup_requires_explicit_policy_acceptance(client, monkeypatch):
     # Item 16: conta Google não nasce mais com aceite automático.
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
-    id_info = {"email": "novo.google@example.com", "email_verified": True, "name": "Novo"}
+    id_info = {"email": "novo.google@example.com", "email_verified": True, "name": "Novo", "sub": "google-sub-novo"}
     with patch("server.id_token.verify_oauth2_token", return_value=id_info):
         user = (await client.post("/api/auth/google", json={"credential": "token"})).json()["user"]
 
@@ -921,14 +923,14 @@ async def test_login_purges_expired_sessions(client):
     await _register(client, "sessoes@example.com")
     async with client.session_factory() as db:
         user = (await db.execute(select(User).where(User.email == "sessoes@example.com"))).scalar_one()
-        db.add(UserSession(session_token="vencida", user_id=user.user_id,
+        db.add(UserSession(token_hash="vencida", user_id=user.user_id,
                            expires_at=datetime.now(timezone.utc) - timedelta(days=1)))
         await db.commit()
 
     await client.post("/api/auth/login", json={"email": "sessoes@example.com", "password": "Senha-segura-123"})
 
     async with client.session_factory() as db:
-        tokens = (await db.execute(select(UserSession.session_token))).scalars().all()
+        tokens = (await db.execute(select(UserSession.token_hash))).scalars().all()
     assert "vencida" not in tokens and len(tokens) == 2  # as do cadastro e do login
 
 
@@ -1121,14 +1123,14 @@ async def test_activity_heartbeat_and_lock_settings(client):
 @pytest.mark.anyio
 async def test_google_account_unlocks_with_google_only_if_same_email(client, monkeypatch):
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
-    same = {"email": "google.lock@example.com", "email_verified": True, "name": "G"}
+    same = {"email": "google.lock@example.com", "email_verified": True, "name": "G", "sub": "google-sub-lock"}
     with patch("server.id_token.verify_oauth2_token", return_value=same):
         await client.post("/api/auth/google", json={"credential": "t"})
     await client.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
     await client.post("/api/auth/lock", json={"reason": "manual"})
     assert (await client.get("/api/auth/me")).json()["has_password"] is False
 
-    other = {"email": "outra.pessoa@example.com", "email_verified": True}
+    other = {"email": "outra.pessoa@example.com", "email_verified": True, "sub": "google-sub-outra"}
     with patch("server.id_token.verify_oauth2_token", return_value=other):
         assert (await client.post("/api/auth/unlock", json={"credential": "t"})).status_code == 403
     with patch("server.id_token.verify_oauth2_token", return_value=same):
@@ -1248,3 +1250,168 @@ async def test_first_version_hides_professional_name_and_crp(client, monkeypatch
     pdf = (await client.get(f"/api/patients/{patient_id}/export", params={"format": "pdf"})).content
     assert b"Exportado por: versao1@example.com" in pdf
     assert b"Dra. Escondida" not in pdf
+
+
+# ---------------------------------------------------------------------------
+# Segurança (varredura, Fase 2): contas e tokens (itens 5, 7 e 14)
+# ---------------------------------------------------------------------------
+
+def _second_client():
+    """Outro navegador/aparelho: o mesmo app, com cookies separados."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test")
+
+
+def _google(email, sub, name="Pessoa"):
+    return patch("server.id_token.verify_oauth2_token",
+                 return_value={"email": email, "email_verified": True, "sub": sub, "name": name})
+
+
+@pytest.mark.anyio
+async def test_google_login_cannot_hijack_account_precreated_with_password(client, monkeypatch):
+    # Item 5: o atacante cadastra o e-mail da vítima com uma senha só dele...
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    async with _second_client() as attacker:
+        await _register(attacker, "vitima@example.com")
+        assert (await attacker.get("/api/auth/me")).status_code == 200
+
+        # ...e a vítima entra pelo Google com o e-mail que é dela de verdade.
+        with _google("vitima@example.com", "sub-da-vitima"):
+            response = await client.post("/api/auth/google", json={"credential": "t"})
+        assert response.status_code == 200
+        assert response.json()["password_discarded"] is True
+        assert response.json()["user"]["has_password"] is False
+
+        # A sessão aberta do atacante morreu e a senha dele não abre mais a conta.
+        assert (await attacker.get("/api/auth/me")).status_code == 401
+        login = await attacker.post("/api/auth/login", json={"email": "vitima@example.com", "password": "Senha-segura-123"})
+        assert login.status_code == 401
+    me = (await client.get("/api/auth/me")).json()
+    # O aceite da política tinha sido feito pelo atacante: não vale para o dono,
+    # que precisa aceitar ele mesmo antes de ver qualquer dado.
+    assert me["terms_accepted"] is False
+    assert (await client.get("/api/patients")).status_code == 403
+
+
+@pytest.mark.anyio
+async def test_google_login_keeps_password_once_email_is_proven(client, monkeypatch):
+    # Depois que o Google comprovou o e-mail, uma senha definida pelo dono não é mais descartada.
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    with _google("dono@example.com", "sub-dono"):
+        await client.post("/api/auth/google", json={"credential": "t"})
+        defined = await client.post("/api/auth/password", json={"credential": "t", "new_password": "Nova-senha-123"})
+        assert defined.status_code == 200 and defined.json()["user"]["has_password"] is True
+        again = await client.post("/api/auth/google", json={"credential": "t"})
+    assert again.json()["password_discarded"] is False
+    login = await client.post("/api/auth/login", json={"email": "dono@example.com", "password": "Nova-senha-123"})
+    assert login.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_google_login_uses_the_fixed_google_identity(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    with _google("antigo@example.com", "sub-fixo"):
+        first = (await client.post("/api/auth/google", json={"credential": "t"})).json()["user"]
+    # Mesmo e-mail, OUTRA conta Google (ex.: e-mail corporativo reaproveitado): recusado.
+    with _google("antigo@example.com", "sub-de-outra-pessoa"):
+        assert (await client.post("/api/auth/google", json={"credential": "t"})).status_code == 409
+    # A mesma conta Google, mesmo com outro e-mail, continua entrando na MESMA conta.
+    with _google("email-novo@example.com", "sub-fixo"):
+        second = (await client.post("/api/auth/google", json={"credential": "t"})).json()["user"]
+    assert second["user_id"] == first["user_id"]
+    # Token sem `sub` é recusado.
+    with patch("server.id_token.verify_oauth2_token", return_value={"email": "x@example.com", "email_verified": True}):
+        assert (await client.post("/api/auth/google", json={"credential": "t"})).status_code == 401
+
+
+@pytest.mark.anyio
+async def test_session_id_is_stored_only_as_hash(client):
+    # Itens 7 e 14: o banco não guarda o ID que está dentro do cookie.
+    import jwt
+    from crypto import hash_token
+
+    await _register(client, "hash@example.com")
+    sid = jwt.decode(client.cookies["access_token"], options={"verify_signature": False})["sid"]
+    async with client.session_factory() as db:
+        stored = (await db.execute(select(UserSession.token_hash))).scalars().all()
+    assert stored == [hash_token(sid)]
+    assert sid not in stored
+
+
+@pytest.mark.anyio
+async def test_jwt_without_required_claims_is_rejected(client):
+    # Item 14: assinatura certa não basta; as claims obrigatórias precisam estar lá.
+    import jwt
+
+    await _register(client, "claims@example.com")
+    claims = jwt.decode(client.cookies["access_token"], options={"verify_signature": False})
+    assert {"exp", "iat", "iss", "aud", "sub", "sid"} <= claims.keys()
+
+    async def me_status(payload):
+        forged = jwt.encode(payload, server.JWT_SECRET, algorithm="HS256")
+        async with _second_client() as browser:
+            return (await browser.get("/api/auth/me", headers={"Cookie": f"access_token={forged}"})).status_code
+
+    assert await me_status(claims) == 200  # o mesmo conteúdo, reassinado: válido
+    for missing in ("exp", "iat", "iss", "aud", "sub", "sid"):
+        assert await me_status({k: v for k, v in claims.items() if k != missing}) == 401, missing
+    assert await me_status({**claims, "aud": "outro-sistema"}) == 401
+    assert await me_status({**claims, "iss": "outro-emissor"}) == 401
+
+
+@pytest.mark.anyio
+async def test_change_password_requires_current_and_ends_other_sessions(client):
+    await _register(client, "troca@example.com")
+    async with _second_client() as other_device:
+        await other_device.post("/api/auth/login", json={"email": "troca@example.com", "password": "Senha-segura-123"})
+        assert (await other_device.get("/api/auth/me")).status_code == 200
+
+        def change(current, new):
+            return client.post("/api/auth/password", json={"current_password": current, "new_password": new})
+
+        assert (await change("senha-errada-1", "Outra-senha-456")).status_code == 403
+        assert (await change("Senha-segura-123", "fraca")).status_code == 422  # mesma política do cadastro
+        assert (await change("Senha-segura-123", "Senha-segura-123")).status_code == 400
+        ok = await change("Senha-segura-123", "Outra-senha-456")
+        assert ok.status_code == 200 and ok.json()["ended_sessions"] == 1
+        assert (await other_device.get("/api/auth/me")).status_code == 401  # o outro aparelho caiu
+    assert (await client.get("/api/auth/me")).status_code == 200  # este continua
+
+    def login(password):
+        return client.post("/api/auth/login", json={"email": "troca@example.com", "password": password})
+
+    assert (await login("Senha-segura-123")).status_code == 401
+    assert (await login("Outra-senha-456")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_google_only_account_defines_password_confirming_with_google(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    with _google("so.google@example.com", "sub-so-google"):
+        await client.post("/api/auth/google", json={"credential": "t"})
+
+    body = {"new_password": "Primeira-senha-1"}
+    assert (await client.post("/api/auth/password", json=body)).status_code == 400  # sem confirmar identidade
+    with _google("intruso@example.com", "sub-intruso"):
+        assert (await client.post("/api/auth/password", json={**body, "credential": "t"})).status_code == 403
+    with _google("so.google@example.com", "sub-so-google"):
+        assert (await client.post("/api/auth/password", json={**body, "credential": "t"})).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_sign_out_of_other_devices(client):
+    await _register(client, "aparelhos@example.com")
+    async with _second_client() as phone, _second_client() as laptop:
+        for device in (phone, laptop):
+            await device.post("/api/auth/login", json={"email": "aparelhos@example.com", "password": "Senha-segura-123"})
+        assert (await client.get("/api/auth/sessions")).json() == {"other_sessions": 2}
+
+        # Sem corpo JSON (como um formulário montado por outro site): recusado.
+        assert (await client.post("/api/auth/sessions/end-others")).status_code == 422
+        ended = await client.post("/api/auth/sessions/end-others", json={"confirm": True})
+        assert ended.json() == {"ended_sessions": 2}
+        assert (await phone.get("/api/auth/me")).status_code == 401
+        assert (await laptop.get("/api/auth/me")).status_code == 401
+    assert (await client.get("/api/auth/sessions")).json() == {"other_sessions": 0}
+
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["action"] == "encerrar" and "outros dispositivos" in log["detail"] for log in logs)
