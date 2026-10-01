@@ -1,11 +1,35 @@
 # database.py
+import logging
 import os
+import sys
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
-# A variável de ambiente que configuramos no docker-compose
-DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite+aiosqlite:///./psigestao_dev.db"
+from environment import PRODUCTION, get_environment
+
+DEV_SQLITE_URL = "sqlite+aiosqlite:///./psigestao_dev.db"
+
+
+def resolve_database_url() -> str:
+    """URL do banco, vinda da variável de ambiente (o docker-compose a define).
+
+    SEGURANÇA (varredura, item 5): sem DATABASE_URL o sistema caía calado num
+    arquivo SQLite local, INCLUSIVE em produção. Os prontuários iriam para um
+    arquivo dentro do container, sem backup, e seriam apagados no próximo
+    deploy. Agora o SQLite só é aceito no desenvolvimento; em produção (o
+    padrão, ver environment.py) a falta da variável impede o servidor de subir.
+    """
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        return url
+    if get_environment() == PRODUCTION:
+        logging.critical("SECURITY ALERT: DATABASE_URL ausente em produção. Abortando inicialização.")
+        sys.exit(1)
+    return DEV_SQLITE_URL
+
+
+DATABASE_URL = resolve_database_url()
 
 
 def _pool_options(url: str) -> dict:

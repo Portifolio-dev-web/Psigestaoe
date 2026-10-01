@@ -3,10 +3,19 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpassword
+      # SEGURANÇA (varredura, itens 1 e 16): a senha ficava escrita aqui, e
+      # portanto no git ("adminpassword"). Agora vem do .env da raiz, que fica
+      # fora do git, e o compose se recusa a subir se ela não estiver definida.
+      # Atenção: o Postgres só lê esta variável ao criar o volume pela primeira
+      # vez. Para trocar a senha de um banco que já existe, veja o README.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env da raiz (veja .env.example)}
       POSTGRES_DB: psigestao
     ports:
-      - "5432:5432"
+      # SEGURANÇA (varredura, item 16): "5432:5432" publicava o banco em
+      # 0.0.0.0, isto é, para qualquer aparelho da mesma rede (Wi-Fi, rede
+      # local). Com 127.0.0.1 só esta máquina acessa; ferramentas como
+      # DBeaver ou pgAdmin continuam funcionando em localhost:5432.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -26,14 +35,21 @@ services:
       - .env
       - ./backend/.env
     ports:
-      - "5000:5000"
+      # SEGURANÇA (varredura, item 16): a API de desenvolvimento (com /docs
+      # aberto) fica acessível só nesta máquina. O ngrok continua funcionando,
+      # porque roda aqui e encaminha para localhost:5000.
+      - "127.0.0.1:5000:5000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://admin:adminpassword@db:5432/psigestao
+      # Mesma senha do serviço db, vinda do .env da raiz (nada fixo aqui).
+      DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD}@db:5432/psigestao
       JWT_SECRET: ${JWT_SECRET}
       # Chave dos campos criptografados (CPF, RG, endereço, prontuários).
       # Precisa ser uma chave Fernet válida e NÃO pode ser perdida: sem ela os prontuários ficam ilegíveis.
       FERNET_KEY: ${FERNET_KEY}
       FERNET_OLD_KEYS: ${FERNET_OLD_KEYS:-}
+      # SEGURANÇA (varredura, item 5): sem ENVIRONMENT, o servidor agora assume
+      # PRODUÇÃO (backend/environment.py). Este arquivo é só de
+      # desenvolvimento, então declara "development" explicitamente.
       ENVIRONMENT: ${ENVIRONMENT:-development}
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
@@ -47,7 +63,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      # SEGURANÇA (varredura, item 16): o servidor de desenvolvimento do React
+      # fica acessível só nesta máquina, como a API e o banco.
+      - "127.0.0.1:3000:3000"
     env_file:
       - ./frontend/.env
     volumes:

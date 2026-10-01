@@ -8,12 +8,27 @@ Gestão clínica e prontuários de psicologia.
 
 ## Desenvolvimento
 
+1. Copie `.env.example` para `.env` e `backend/.env.example` para `backend/.env`,
+   e preencha. O `docker compose` se recusa a subir sem `POSTGRES_PASSWORD`.
+2. Rode:
+
 ```
 docker compose up
 ```
 
 A API sobe com recarga automática. As migrações e o índice de busca são aplicados
-sozinhos pelo `backend/prestart.py`.
+sozinhos pelo `backend/prestart.py`. Banco, API e frontend ficam acessíveis só
+nesta máquina (`127.0.0.1`), nunca pela rede.
+
+Trocar a senha do banco: o Postgres só lê `POSTGRES_PASSWORD` ao criar o volume.
+Num banco que já existe, troque a senha dentro dele (o comando pede a senha nova,
+sem deixá-la no histórico do terminal), atualize `POSTGRES_PASSWORD` no `.env` e
+recrie os containers:
+
+```
+docker compose exec db psql -U admin -d psigestao -c "\password admin"
+docker compose up -d --force-recreate
+```
 
 ## Produção (API)
 

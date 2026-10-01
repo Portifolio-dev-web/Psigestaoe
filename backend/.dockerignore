@@ -7,8 +7,18 @@
 .env.*
 !.env.example
 
+# SEGURANÇA (varredura, item 16): existia um repositório git dentro de
+# backend/ (backend/.git) com os .env antigos no histórico, e ele ia inteiro
+# para a imagem (/app/.git): quem tivesse a imagem recuperava os segredos com
+# um `git log -p`. O repositório foi removido, e esta regra impede que uma
+# pasta .git volte a entrar na imagem.
+.git
+.gitignore
+
 # Artefatos locais que não pertencem à imagem.
 __pycache__/
 *.pyc
 .pytest_cache/
 *.db
+.venv/
+venv/

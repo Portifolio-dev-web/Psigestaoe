@@ -1,0 +1,25 @@
+# frontend/.dockerignore
+# SEGURANÇA (varredura, item 16): este arquivo não existia, e o Dockerfile faz
+# `COPY . .`. Por isso a imagem levava junto:
+#   - o frontend/.env (endereços e IDs do ambiente local, inclusive a URL do
+#     túnel ngrok, que expõe a API de desenvolvimento na internet);
+#   - uma eventual pasta .git, com o histórico;
+#   - a node_modules desta máquina (centenas de MB, com binários compilados
+#     para o Windows, que sobrescreviam os instalados pelo `yarn install`).
+#
+# O desenvolvimento não muda: o docker-compose.yml monta a pasta do projeto
+# dentro do container e injeta as variáveis do frontend/.env (env_file).
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+
+node_modules/
+build/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store

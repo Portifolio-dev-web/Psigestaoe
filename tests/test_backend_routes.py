@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -16,6 +17,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
+# Segurança (varredura, item 5): sem ENVIRONMENT o servidor agora assume
+# PRODUÇÃO e exige todos os segredos. Os testes rodam como desenvolvimento
+# (atribuição direta, não setdefault: um ENVIRONMENT=production exportado no
+# terminal não pode mudar o resultado). Testes de produção usam monkeypatch.
+os.environ["ENVIRONMENT"] = "development"
 os.environ.setdefault("JWT_SECRET", "route-test-secret")
 # Precisa ser uma chave Fernet válida: o servidor agora valida a chave na inicialização.
 TEST_FERNET_KEY = Fernet.generate_key().decode()
@@ -615,6 +621,74 @@ async def test_privacy_policy_is_public(client):
     assert response.json()["version"] == legal.PRIVACY_POLICY_VERSION
     titles = [section["title"] for section in response.json()["sections"]]
     assert any("Direitos" in t for t in titles) and any("Encarregado" in t for t in titles)
+
+
+@pytest.mark.anyio
+async def test_privacy_policy_has_no_personal_data_in_code(client, monkeypatch):
+    # Segurança (varredura, item 12): nome e CPF reais chegaram a ser escritos
+    # no legal.py, que vai para o git e é servido sem login. Sem as variáveis
+    # PRIVACY_*, o texto público só pode ter o marcador neutro, e nenhum CPF.
+    for var in ("PRIVACY_CONTROLLER_NAME", "PRIVACY_CONTROLLER_DOCUMENT", "PRIVACY_DPO_NAME", "PRIVACY_DPO_EMAIL"):
+        monkeypatch.delenv(var, raising=False)
+    policy = (await client.get("/api/legal/privacy-policy")).json()
+
+    assert set(policy["controller"].values()) == {"[A PREENCHER]"}
+    full_text = " ".join(p for section in policy["sections"] for p in section["paragraphs"])
+    assert not re.search(r"\d{3}\.\d{3}\.\d{3}[-.]\d{2}", full_text)
+
+    # Com as variáveis definidas (fora do git), os dados reais aparecem.
+    monkeypatch.setenv("PRIVACY_CONTROLLER_NAME", "Clínica Exemplo Ltda")
+    monkeypatch.setenv("PRIVACY_CONTROLLER_DOCUMENT", "00.000.000/0001-00")
+    policy = (await client.get("/api/legal/privacy-policy")).json()
+    assert "Clínica Exemplo Ltda (CNPJ/CPF 00.000.000/0001-00)" in policy["sections"][0]["paragraphs"][0]
+
+
+def test_environment_defaults_to_production(monkeypatch):
+    # Segurança (varredura, item 5): só um "development" explícito liga o modo
+    # de desenvolvimento. Ausente, vazio ou com erro de digitação = produção.
+    import environment
+
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    assert environment.get_environment() == "production"
+    for value, expected in (("", "production"), ("prod", "production"), ("dev", "production"),
+                            ("production", "production"), ("development", "development"),
+                            (" Development ", "development")):
+        monkeypatch.setenv("ENVIRONMENT", value)
+        assert environment.get_environment() == expected, value
+
+
+def test_database_url_is_required_in_production(monkeypatch):
+    # Segurança (varredura, item 5): sem DATABASE_URL o sistema caía num SQLite
+    # local até em produção. Agora só o desenvolvimento aceita esse fallback.
+    import database
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    assert database.resolve_database_url() == database.DEV_SQLITE_URL
+
+    monkeypatch.delenv("ENVIRONMENT")
+    with pytest.raises(SystemExit):
+        database.resolve_database_url()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db/x")
+    assert database.resolve_database_url() == "postgresql+asyncpg://u:p@db/x"
+
+
+@pytest.mark.anyio
+async def test_api_docs_only_outside_production(client):
+    # Segurança (varredura, item 12): /docs, /redoc e /openapi.json mostravam o
+    # mapa completo da API a qualquer visitante. No desenvolvimento continuam;
+    # em produção as três rotas somem (404).
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert (await client.get(path)).status_code == 200, path
+
+    from fastapi import FastAPI
+
+    production_app = FastAPI(**server.api_docs_urls("production"))
+    transport = httpx.ASGITransport(app=production_app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as prod_client:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert (await prod_client.get(path)).status_code == 404, path
 
 
 @pytest.mark.anyio

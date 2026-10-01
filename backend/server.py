@@ -45,6 +45,7 @@ from crypto import (
 )
 from rate_limit import client_ip, enforce, rate_limit, warn_if_not_shared
 from database import get_db, engine, Base
+from environment import get_environment
 from models import (
     AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
 )
@@ -60,8 +61,12 @@ observability.configure_logging()
 # -----------------------------------------------------------
 # Configurações Iniciais e Validação de Segurança
 # -----------------------------------------------------------
-# Define o ambiente. Em produção, a variável de ambiente DEVE ser configurada como "production".
-ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+# SEGURANÇA (varredura, item 5): o padrão agora é PRODUÇÃO. Antes, esquecer
+# ENVIRONMENT no deploy fazia o servidor subir calado com os valores
+# inseguros de desenvolvimento (segredos de exemplo, cookie sem Secure,
+# /docs aberto). Agora só um ENVIRONMENT=development explícito (docker-compose.yml)
+# liga o modo de desenvolvimento. Detalhes em environment.py.
+ENVIRONMENT = get_environment()
 
 JWT_SECRET = os.environ.get("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
@@ -95,8 +100,9 @@ def set_auth_cookie(response: Response, token: str) -> None:
     uma cópia mais abaixo no arquivo que fixava secure=False e samesite="lax".
     A cópia foi removida, então esta é a versão que vale de fato.
 
-    ATENÇÃO: com ENVIRONMENT=production o cookie passa a ser `secure`, ou seja,
-    o navegador só o envia por HTTPS. Em produção o app PRECISA estar atrás de HTTPS.
+    ATENÇÃO: em produção (o padrão quando ENVIRONMENT não é "development"; ver
+    environment.py) o cookie é `secure`, ou seja, o navegador só o envia por
+    HTTPS. Em produção o app PRECISA estar atrás de HTTPS.
     """
     is_prod = ENVIRONMENT == "production"
 
@@ -111,8 +117,19 @@ def set_auth_cookie(response: Response, token: str) -> None:
         secure=is_prod
     )
 
+def api_docs_urls(environment: str) -> dict:
+    """SEGURANÇA (varredura, item 12): a documentação automática do FastAPI
+    (/docs, /redoc e /openapi.json) entregava a qualquer visitante o mapa
+    completo da API: todas as rotas, campos e formatos aceitos. Ela continua
+    disponível no desenvolvimento e é desligada em produção (as três rotas
+    passam a responder 404)."""
+    if environment == "production":
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 # 1. Inicializa o app UMA ÚNICA VEZ
-app = FastAPI(title="PsiGestão API")
+app = FastAPI(title="PsiGestão API", **api_docs_urls(ENVIRONMENT))
 
 # ESCALA (workers): quem cria/migra o banco.
 # Antes, TODO processo rodava create_all() ao iniciar. Com vários workers,

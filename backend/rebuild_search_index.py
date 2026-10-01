@@ -18,19 +18,21 @@
 # ---------------------------------------------------------------------------
 import argparse
 import asyncio
-import os
 
 from sqlalchemy import delete, exists, select
 
 from crypto import is_fernet_token, load_fernet, load_search_key, name_search_tokens
 from database import AsyncSessionLocal
+from environment import get_environment
 from models import Patient, PatientSearchToken
 
 BATCH_SIZE = 500
 
 
 async def rebuild(full: bool = False, session_factory=None) -> int:
-    environment = os.environ.get("ENVIRONMENT", "development")
+    # SEGURANÇA (varredura, item 5): mesma regra do servidor. Sem ENVIRONMENT,
+    # vale produção, e as chaves passam a ser obrigatórias. Ver environment.py.
+    environment = get_environment()
     fernet = load_fernet(environment)
     search_key = load_search_key(environment)
     factory = session_factory or AsyncSessionLocal
