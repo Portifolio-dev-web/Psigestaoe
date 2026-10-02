@@ -5,16 +5,35 @@ import { ptBR } from "date-fns/locale";
 
 // ---------------------------------------------------------------------------
 // PRODUTO (visões da agenda): regras de data compartilhadas pelas visões
-// Mês, Semana, Dia e Lista. Tudo em hora LOCAL; a API recebe ISO com fuso.
+// Mês, Semana, 3 dias, Dia e Lista. Tudo em hora LOCAL; a API recebe ISO com fuso.
 // ---------------------------------------------------------------------------
 
+// Celular (UX): "Semana" espremia 7 colunas numa tela de celular (só domingo a
+// terça apareciam, e as sessões de hoje ficavam escondidas numa rolagem
+// lateral). No celular, o lugar dela fica com "3 dias", a partir da data
+// escolhida ("Hoje" mostra hoje, amanhã e depois). `screen`: em qual tela a
+// opção aparece no seletor ("wide" = computador/tablet, "narrow" = celular).
 export const VIEWS = [
   { id: "mes", label: "Mês" },
-  { id: "semana", label: "Semana" },
+  { id: "semana", label: "Semana", screen: "wide" },
+  { id: "3dias", label: "3 dias", screen: "narrow" },
   { id: "dia", label: "Dia" },
   { id: "lista", label: "Lista" },
 ];
 export const VIEW_IDS = VIEWS.map((v) => v.id);
+export const THREE_DAYS = 3;
+
+/**
+ * Visão de fato mostrada nesta tela. Um link com ?visao=semana aberto no
+ * celular mostra 3 dias, e ?visao=3dias aberto no computador mostra a semana.
+ */
+export function viewForScreen(view, wide) {
+  if (!wide && view === "semana") return "3dias";
+  if (wide && view === "3dias") return "semana";
+  return view;
+}
+
+export const viewsForScreen = (wide) => VIEWS.filter((v) => !v.screen || v.screen === (wide ? "wide" : "narrow"));
 
 // Mesma duração padrão do servidor (DEFAULT_SESSION_MINUTES em server.py):
 // sessão sem horário de término ocupa 50 min na grade e na detecção de conflito.
@@ -54,6 +73,10 @@ export function viewRange(view, date) {
     const start = startOfWeek(date, WEEK);
     return { start, end: addDays(start, 7) };
   }
+  if (view === "3dias") {
+    const start = startOfDay(date);
+    return { start, end: addDays(start, THREE_DAYS) };
+  }
   if (view === "dia") {
     const start = startOfDay(date);
     return { start, end: addDays(start, 1) };
@@ -66,6 +89,7 @@ export function viewRange(view, date) {
 export function shiftDate(view, date, direction) {
   if (view === "mes") return addMonths(date, direction);
   if (view === "semana") return addWeeks(date, direction);
+  if (view === "3dias") return addDays(date, direction * THREE_DAYS);
   if (view === "dia") return addDays(date, direction);
   return addDays(date, direction * LIST_DAYS);
 }

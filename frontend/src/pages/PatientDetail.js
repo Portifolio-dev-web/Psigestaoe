@@ -18,7 +18,7 @@ import { toast } from "sonner";
 import {
   ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Phone, Mail,
   CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload,
-  History, CalendarCheck,
+  History, CalendarCheck, ChevronDown,
 } from "lucide-react";
 
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js;
@@ -52,6 +52,8 @@ export default function PatientDetail() {
   const { user } = useAuth();
   const [patient, setPatient] = useState(null);
   const [records, setRecords] = useState([]);
+  // Celular (UX): dados cadastrais completos recolhidos por padrão (ver abaixo).
+  const [showDetails, setShowDetails] = useState(false);
   // ESCALA: a evolução clínica vem paginada (20 por vez, a mais recente
   // primeiro). Antes, abrir a ficha trazia TODAS as evoluções do paciente.
   const [recordsCursor, setRecordsCursor] = useState(null);
@@ -218,38 +220,53 @@ export default function PatientDetail() {
                 </div>
               </div>
             </div>
+            {/* Celular (UX): antes as 11 linhas de dados vinham ANTES de "Nova evolução"
+                e das evoluções (o que mais se usa na ficha). No celular ficam à vista só
+                nascimento e telefone; o resto abre em "Ver todos os dados cadastrais".
+                No computador tudo aparece, na coluna ao lado das evoluções. */}
             <div className="mt-5 space-y-3 text-sm">
               <InfoRow icon={CalendarClock} label="Nascimento" value={birthLabel(patient)} />
-              <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
-              <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
-              <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
-              <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
-              <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
-              <InfoRow icon={Phone} label="Telefone" value={patient.phone || "—"} />
-              <InfoRow icon={Mail} label="E-mail" value={patient.email || "—"} />
-              <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
-              <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />
-              <InfoRow icon={ShieldCheck} label="Consentimento" value={consentLabel(patient)} />
+              {/* Celular (UX): um toque no telefone liga; no e-mail, abre o aplicativo de e-mail. */}
+              <InfoRow icon={Phone} label="Telefone" value={contactLink("tel", patient.phone)} />
             </div>
-            {/* Item 12: transparência sobre a guarda obrigatória dos prontuários. */}
-            {patient.retention_until && (
-              <p className="mt-3 flex items-start gap-2 rounded-md bg-slate-50 p-2.5 text-xs text-slate-500">
-                <Archive className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                Prontuário sob guarda obrigatória (CFP) até {fmtDate(patient.retention_until)}. Até lá ele não pode ser excluído.
-              </p>
-            )}
-            <details className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
-              <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
-                Termo de consentimento
-              </summary>
-              <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-slate-600">{patient.consent_terms_text}</p>
-            </details>
-            {patient.initial_notes && (
-              <div className="mt-4 rounded-md bg-[#F0F4F8] p-3">
-                <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Observações iniciais</p>
-                <p className="mt-1 text-sm text-slate-700">{patient.initial_notes}</p>
+            <button type="button" onClick={() => setShowDetails((open) => !open)}
+              aria-expanded={showDetails} aria-controls="patient-details"
+              className="mt-3 flex items-center gap-1 text-sm font-medium text-[#1E3A8A] lg:hidden" data-testid="toggle-details">
+              <ChevronDown className={`h-4 w-4 transition-transform ${showDetails ? "rotate-180" : ""}`} aria-hidden="true" />
+              {showDetails ? "Ocultar dados cadastrais" : "Ver todos os dados cadastrais"}
+            </button>
+            <div id="patient-details" className={showDetails ? "" : "hidden lg:block"}>
+              <div className="mt-3 space-y-3 text-sm">
+                <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
+                <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
+                <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
+                <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
+                <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
+                <InfoRow icon={Mail} label="E-mail" value={contactLink("mailto", patient.email)} />
+                <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
+                <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />
+                <InfoRow icon={ShieldCheck} label="Consentimento" value={consentLabel(patient)} />
               </div>
-            )}
+              {/* Item 12: transparência sobre a guarda obrigatória dos prontuários. */}
+              {patient.retention_until && (
+                <p className="mt-3 flex items-start gap-2 rounded-md bg-slate-50 p-2.5 text-xs text-slate-500">
+                  <Archive className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Prontuário sob guarda obrigatória (CFP) até {fmtDate(patient.retention_until)}. Até lá ele não pode ser excluído.
+                </p>
+              )}
+              <details className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-500">
+                  Termo de consentimento
+                </summary>
+                <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-slate-600">{patient.consent_terms_text}</p>
+              </details>
+              {patient.initial_notes && (
+                <div className="mt-4 rounded-md bg-[#F0F4F8] p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Observações iniciais</p>
+                  <p className="mt-1 text-sm text-slate-700">{patient.initial_notes}</p>
+                </div>
+              )}
+            </div>
             <div className="mt-5 flex flex-col gap-2">
               {patient.archived && (
                 <Button onClick={unarchive} disabled={inFlight.isBusy("unarchive")} variant="outline"
@@ -387,13 +404,24 @@ export default function PatientDetail() {
   );
 }
 
+// Telefone/e-mail como link (tel:/mailto:). O tel: leva só os dígitos ("(11) 91234-5678" -> 11912345678).
+function contactLink(scheme, value) {
+  if (!value) return "—";
+  const target = scheme === "tel" ? value.replace(/\D/g, "") : value;
+  return (
+    <a href={`${scheme}:${target}`} className="text-[#1E3A8A] underline-offset-2 hover:underline">{value}</a>
+  );
+}
+
 function InfoRow({ icon: Icon, label, value }) {
   return (
-    <div className="flex items-center gap-3">
-      <Icon className="h-4 w-4 shrink-0 text-slate-400" />
+    <div className="flex items-start gap-3">
+      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
       {/* Acessibilidade (varredura de UI): rótulos em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
-      <span className="w-24 shrink-0 text-xs uppercase tracking-wide text-slate-500">{label}</span>
-      <span className="truncate text-slate-700">{value}</span>
+      <span className="mt-0.5 w-24 shrink-0 text-xs uppercase tracking-wide text-slate-500">{label}</span>
+      {/* Celular (UX): o valor quebra a linha em vez de ser cortado com "…"
+          (endereço, e-mail e a data do consentimento sumiam pela metade). */}
+      <span className="min-w-0 break-words text-slate-700">{value}</span>
     </div>
   );
 }

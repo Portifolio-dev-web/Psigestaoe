@@ -17,9 +17,10 @@ import MonthView from "@/components/agenda/MonthView";
 import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { WIDE_SCREEN, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
-  STATUS, VIEWS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
-  parseDateParam, sessionInterval, shiftDate, viewRange, viewTitle,
+  STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
+  parseDateParam, sessionInterval, shiftDate, viewForScreen, viewRange, viewTitle, viewsForScreen,
 } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ import {
 //
 // Agora:
 //   - visões Mês, Semana, Dia e Lista. Padrão: Semana no computador,
-//     Lista no celular;
+//     Lista no celular. No celular, "Semana" vira "3 dias" (ver agendaUtils);
 //   - visão e data ficam na URL (?visao=semana&data=2026-10-01): recarregar
 //     a página ou voltar da ficha de um paciente mantém onde você estava;
 //   - busca só o período visível (paginação por período, ver backend);
@@ -42,9 +43,6 @@ import {
 //   - conflito de horário: o servidor recusa e aqui a pessoa decide se salva
 //     mesmo assim (ex.: um horário propositalmente encaixado).
 // ---------------------------------------------------------------------------
-
-const defaultView = () =>
-  (typeof window !== "undefined" && window.matchMedia?.("(min-width: 768px)").matches ? "semana" : "lista");
 
 // Dados completos de uma sessão para o PUT, com novos horários.
 const sessionPayload = (session, start, end) => ({
@@ -60,7 +58,10 @@ const sessionPayload = (session, start, end) => ({
 export default function Agenda() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const view = VIEW_IDS.includes(searchParams.get("visao")) ? searchParams.get("visao") : defaultView();
+  // Celular (UX): a largura é acompanhada (girar o aparelho troca Semana <-> 3 dias).
+  const wide = useMediaQuery(WIDE_SCREEN);
+  const requestedView = VIEW_IDS.includes(searchParams.get("visao")) ? searchParams.get("visao") : (wide ? "semana" : "lista");
+  const view = viewForScreen(requestedView, wide);
   const dateParam = searchParams.get("data");
   const date = useMemo(() => parseDateParam(dateParam), [dateParam]);
   const range = useMemo(() => viewRange(view, date), [view, date]);
@@ -227,7 +228,7 @@ export default function Agenda() {
             {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" aria-label="Carregando" />}
           </div>
           <div className="inline-flex self-start rounded-lg bg-slate-100 p-1" role="group" aria-label="Visão da agenda">
-            {VIEWS.map((v) => (
+            {viewsForScreen(wide).map((v) => (
               <button key={v.id} type="button" onClick={() => navigateTo(v.id, date)} aria-pressed={view === v.id}
                 className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                   // Acessibilidade (varredura de UI): opção inativa slate-500 sobre slate-100 = 4,3:1 -> slate-600.
@@ -240,7 +241,7 @@ export default function Agenda() {
         </div>
 
         {view === "mes" && <MonthView date={date} {...viewProps} />}
-        {(view === "semana" || view === "dia") && <TimeGridView days={daysBetween(range.start, range.end)} {...viewProps} />}
+        {["semana", "3dias", "dia"].includes(view) && <TimeGridView days={daysBetween(range.start, range.end)} {...viewProps} />}
         {view === "lista" && <ListView sessions={sessions} onOpenSession={openSession} />}
       </Card>
 

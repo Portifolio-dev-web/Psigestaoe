@@ -22,7 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -43,13 +43,14 @@ const fmtDate = formatDateOnly;
 // servidor (PATIENT_REQUIRED_LABELS em backend/server.py), que recusa a ficha
 // incompleta mesmo que alguém chame a API sem esta tela. [campo, rótulo, id do campo]
 // A idade não está aqui: é calculada pela data de nascimento.
+// Na mesma ordem da tela: o foco vai para o primeiro campo vazio que a pessoa vê.
 const REQUIRED_FIELDS = [
   ["full_name", "Nome completo", "patient-name"],
   ["cpf", "CPF", "patient-cpf"],
   ["rg", "RG", "patient-rg"],
   ["birth_date", "Data de nascimento", "patient-birth-date"],
-  ["education", "Escolaridade", "patient-education"],
   ["marital_status", "Estado civil", "patient-marital-status"],
+  ["education", "Escolaridade", "patient-education"],
   ["profession", "Profissão", "patient-profession"],
   ["phone", "Telefone", "patient-phone"],
   ["email", "E-mail", "patient-email"],
@@ -60,11 +61,16 @@ const REQUIRED_FIELDS = [
 // Espaços em branco contam como vazio (o `required` do navegador aceitaria "   ").
 const missingFields = (form) => REQUIRED_FIELDS.filter(([key]) => !String(form[key] ?? "").trim());
 
+// consent_terms começa SEM resposta (null): a pessoa precisa escolher
+// "Concordo" ou "Não concordo" (antes "Não concordo" já vinha marcado).
 const EMPTY_FORM = {
   full_name: "", cpf: "", rg: "", birth_date: "", age: "",
   education: "", marital_status: "", profession: "", phone: "", email: "",
-  address: "", emergency_contact: "", initial_notes: "", consent_terms: false
+  address: "", emergency_contact: "", initial_notes: "", consent_terms: null
 };
+
+// Listas de seleção com a mesma aparência dos campos de texto.
+const SELECT_CLASS = "mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950";
 
 // Termo por profissional: aqui existia uma CÓPIA do termo com o nome e o CRP de
 // uma psicóloga fixos no código ("Fernanda Andrade Da Silva – CRP 06/228054"),
@@ -242,6 +248,12 @@ export default function Patients() {
     if (missing.length) {
       toast.error(`Preencha todos os campos. Faltando: ${missing.map(([, label]) => label).join(", ")}.`);
       document.getElementById(missing[0][2])?.focus();
+      return;
+    }
+    // PRODUTO: a pergunta sobre o termo precisa de resposta (não há mais opção pré-marcada).
+    if (typeof form.consent_terms !== "boolean") {
+      toast.error("Responda se o paciente concorda com o termo de consentimento.");
+      document.getElementById("patient-consent-yes")?.focus();
       return;
     }
     const problem = cpfProblem(form.cpf) || phoneProblem(form.phone);
@@ -673,6 +685,20 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
   );
 }
 
+// UX (cadastro de paciente): uma seção do formulário. <fieldset> + <legend>:
+// o leitor de tela anuncia o grupo ("Contato") ao entrar nos campos dele.
+// Duas colunas no computador, uma no celular; `sm:col-span-2` ocupa a linha toda.
+function FormSection({ title, children }) {
+  return (
+    <fieldset>
+      <legend className="mb-3 w-full border-b border-slate-200 pb-1.5 text-xs font-semibold uppercase tracking-wide text-[#1E3A8A]">
+        {title}
+      </legend>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{children}</div>
+    </fieldset>
+  );
+}
+
 function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm }) {
   // Quem já consentiu vê a cópia do texto que aceitou; os demais, o termo atual.
   const consentText = editing?.consent_terms ? editing.consent_terms_text : currentTerm;
@@ -686,7 +712,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
   const phoneError = phoneProblem(form.phone);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+      {/* UX (cadastro de paciente): mais largo no computador (duas colunas). */}
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="font-head">{editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
           {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
@@ -697,95 +724,108 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
         </DialogHeader>
         {/* Acessibilidade (varredura de UI): cada rótulo agora aponta para o seu campo
             (htmlFor/id). Antes 9 campos e as 2 listas de seleção não tinham nome para o
-            leitor de tela, e clicar no rótulo não levava ao campo. */}
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div>
-            <Label htmlFor="patient-name">Nome completo *</Label>
-            <Input
-              id="patient-name"
-              required
-              maxLength={LIMITS.patientName}
-              value={form.full_name}
-              onChange={onFormChange("full_name")}
-              className="mt-1.5"
-              data-testid="patient-name-input"
-            />
-          </div>
+            leitor de tela, e clicar no rótulo não levava ao campo.
+            UX (cadastro de paciente): antes eram 13 campos numa coluna só. Agora são
+            seções (identificação, contato, informações clínicas, consentimento), em
+            duas colunas no computador e uma no celular.
+            autoComplete="off": o navegador sugeria os dados do PRÓPRIO profissional
+            (nome, e-mail, endereço) nos campos do paciente. */}
+        <form onSubmit={onSubmit} className="space-y-6" autoComplete="off">
+          <FormSection title="Identificação">
+            <div className="sm:col-span-2">
+              <Label htmlFor="patient-name">Nome completo *</Label>
+              <Input
+                id="patient-name"
+                required
+                maxLength={LIMITS.patientName}
+                value={form.full_name}
+                onChange={onFormChange("full_name")}
+                className="mt-1.5"
+                data-testid="patient-name-input"
+              />
+            </div>
 
-          <div>
-            <Label htmlFor="patient-cpf">CPF *</Label>
-            <Input
-              id="patient-cpf"
-              required
-              inputMode="numeric"
-              maxLength={LIMITS.cpf}
-              value={form.cpf}
-              onChange={onFormChange("cpf")}
-              className="mt-1.5"
-              aria-invalid={Boolean(cpfError)}
-              aria-describedby={cpfError ? "patient-cpf-error" : undefined}
-              data-testid="patient-cpf-input"
-              placeholder="000.000.000-00"
-            />
-            {cpfError && <p id="patient-cpf-error" className="mt-1 text-xs text-red-600">{cpfError}</p>}
-          </div>
-
-          <div>
-            <Label htmlFor="patient-rg">RG *</Label>
-            <Input
-              id="patient-rg"
-              required
-              maxLength={LIMITS.rg}
-              value={form.rg}
-              onChange={onFormChange("rg")}
-              className="mt-1.5"
-              data-testid="patient-rg-input"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="patient-birth-date">Data de nascimento *</Label>
-            <Input
-              id="patient-birth-date"
-              required
-              type="date"
-              min="1900-01-01"
-              max={todayISO()}
-              value={form.birth_date}
-              onChange={onFormChange("birth_date")}
-              className="mt-1.5"
-              data-testid="patient-birthdate-input"
-            />
-          </div>
-
-          <div>
-            {/* PRODUTO: idade calculada pela data de nascimento (somente leitura).
-                Antes era digitada à parte e podia contradizer a data. */}
-            <Label htmlFor="patient-age">Idade</Label>
-            <Input
-              id="patient-age"
-              readOnly
-              aria-describedby="patient-age-hint"
-              value={form.age ? `${form.age} anos` : ""}
-              placeholder="Calculada pela data de nascimento"
-              className="mt-1.5"
-              data-testid="patient-age-input"
-            />
-            <p id="patient-age-hint" className="mt-1 text-xs text-slate-500">Calculada automaticamente pela data de nascimento.</p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
             <div>
-              {/* Correção (varredura de UI, defeito 5): tinha "*" (obrigatório), mas
-                  nem o formulário nem o servidor exigem o campo (cadastros vindos do
-                  Google Forms podem chegar sem ele). O "*" fica só no que é exigido. */}
+              <Label htmlFor="patient-cpf">CPF *</Label>
+              <Input
+                id="patient-cpf"
+                required
+                inputMode="numeric"
+                maxLength={LIMITS.cpf}
+                value={form.cpf}
+                onChange={onFormChange("cpf")}
+                className="mt-1.5"
+                aria-invalid={Boolean(cpfError)}
+                aria-describedby={cpfError ? "patient-cpf-error" : undefined}
+                data-testid="patient-cpf-input"
+                placeholder="000.000.000-00"
+              />
+              {cpfError && <p id="patient-cpf-error" className="mt-1 text-xs text-red-600">{cpfError}</p>}
+            </div>
+
+            <div>
+              <Label htmlFor="patient-rg">RG *</Label>
+              <Input
+                id="patient-rg"
+                required
+                maxLength={LIMITS.rg}
+                value={form.rg}
+                onChange={onFormChange("rg")}
+                className="mt-1.5"
+                data-testid="patient-rg-input"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="patient-birth-date">Data de nascimento *</Label>
+              <Input
+                id="patient-birth-date"
+                required
+                type="date"
+                min="1900-01-01"
+                max={todayISO()}
+                value={form.birth_date}
+                onChange={onFormChange("birth_date")}
+                className="mt-1.5"
+                aria-describedby="patient-age-hint"
+                data-testid="patient-birthdate-input"
+              />
+              {/* PRODUTO: a idade é calculada pela data de nascimento. Antes havia um
+                  campo "Idade" (primeiro digitado, depois só de leitura) que ocupava
+                  uma linha inteira para repetir a data; agora ela aparece aqui. */}
+              <p id="patient-age-hint" className="mt-1 text-xs text-slate-500" aria-live="polite" data-testid="patient-age-hint">
+                {form.age !== "" && form.age != null ? `Idade: ${form.age} ${Number(form.age) === 1 ? "ano" : "anos"}` : "A idade é calculada pela data."}
+              </p>
+            </div>
+
+            <div>
+              <Label htmlFor="patient-marital-status">Estado civil *</Label>
+              <select
+                id="patient-marital-status"
+                required
+                value={form.marital_status}
+                onChange={onFormChange("marital_status")}
+                className={SELECT_CLASS}
+              >
+                <option value="">Selecione...</option>
+                <option value="Solteiro(a)">Solteiro(a)</option>
+                <option value="Casado(a)">Casado(a)</option>
+                <option value="Divorciado(a)">Divorciado(a)</option>
+                <option value="Viúvo(a)">Viúvo(a)</option>
+                <option value="União estável">União estável</option>
+              </select>
+            </div>
+
+            <div>
+              {/* Correção (varredura de UI, defeito 5): o "*" aparecia sem o campo ser
+                  exigido. Agora TODOS os campos são obrigatórios (aqui e no servidor). */}
               <Label htmlFor="patient-education">Escolaridade *</Label>
               <select
                 id="patient-education"
                 required
                 value={form.education}
                 onChange={onFormChange("education")}
-                className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
+                className={SELECT_CLASS}
               >
                 <option value="">Selecione...</option>
                 <option value="Fundamental - Incompleto">Fundamental - Incompleto</option>
@@ -797,158 +837,159 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 <option value="Pós Graduação - Completo">Pós Graduação - Completo</option>
               </select>
             </div>
+
             <div>
-              <Label htmlFor="patient-marital-status">Estado civil *</Label>
-              <select
-                id="patient-marital-status"
+              <Label htmlFor="patient-profession">Profissão *</Label>
+              <Input
+                id="patient-profession"
                 required
-                value={form.marital_status}
-                onChange={onFormChange("marital_status")}
-                className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
-              >
-                <option value="">Selecione...</option>
-                <option value="Solteiro(a)">Solteiro(a)</option>
-                <option value="Casado(a)">Casado(a)</option>
-                <option value="Divorciado(a)">Divorciado(a)</option>
-                <option value="Viúvo(a)">Viúvo(a)</option>
-                <option value="União estável">União estável</option>
-              </select>
+                maxLength={LIMITS.profession}
+                value={form.profession}
+                onChange={onFormChange("profession")}
+                className="mt-1.5"
+                data-testid="patient-profession-input"
+              />
             </div>
-          </div>
+          </FormSection>
 
-          <div>
-            <Label htmlFor="patient-profession">Profissão *</Label>
-            <Input
-              id="patient-profession"
-              required
-              maxLength={LIMITS.profession}
-              value={form.profession}
-              onChange={onFormChange("profession")}
-              className="mt-1.5"
-              data-testid="patient-profession-input"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="patient-phone">Telefone *</Label>
-            <Input
-              id="patient-phone"
-              required
-              type="tel"
-              inputMode="tel"
-              maxLength={LIMITS.phone}
-              value={form.phone}
-              onChange={onFormChange("phone")}
-              className="mt-1.5"
-              aria-invalid={Boolean(phoneError)}
-              aria-describedby={phoneError ? "patient-phone-error" : undefined}
-              data-testid="patient-phone-input"
-              placeholder="(11) 91234-5678"
-            />
-            {phoneError && <p id="patient-phone-error" className="mt-1 text-xs text-red-600">{phoneError}</p>}
-          </div>
-
-          <div>
-            <Label htmlFor="patient-email">Email *</Label>
-            <Input
-              id="patient-email"
-              required
-              type="email"
-              maxLength={LIMITS.email}
-              value={form.email}
-              onChange={onFormChange("email")}
-              className="mt-1.5"
-              data-testid="patient-email-input"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="patient-address">Endereço *</Label>
-            <Input
-              id="patient-address"
-              required
-              maxLength={LIMITS.address}
-              value={form.address}
-              onChange={onFormChange("address")}
-              className="mt-1.5"
-              data-testid="patient-address-input"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="patient-emergency">Contato de emergência *</Label>
-            <Input
-              id="patient-emergency"
-              required
-              maxLength={LIMITS.emergencyContact}
-              value={form.emergency_contact}
-              onChange={onFormChange("emergency_contact")}
-              className="mt-1.5"
-              data-testid="patient-emergency-input"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="patient-notes">Notas iniciais *</Label>
-            <Textarea
-              id="patient-notes"
-              required
-              maxLength={LIMITS.patientNotes}
-              value={form.initial_notes}
-              onChange={onFormChange("initial_notes")}
-              className="mt-1.5"
-              data-testid="patient-notes-input"
-              rows={3}
-            />
-          </div>
-
-          <div className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4">
+          <FormSection title="Contato">
             <div>
-              <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
-              {consentText ? (
-                // Acessibilidade (varredura de UI): texto com rolagem precisa receber foco
-                // (tabIndex), senão quem usa só o teclado não consegue rolar e ler o termo inteiro.
-                <p tabIndex={0} role="region" aria-label="Texto do termo de consentimento"
-                  className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">{consentText}</p>
-              ) : (
-                <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" /></div>
-              )}
-              {consentDate && (
-                <p className="mt-2 text-xs font-medium text-emerald-700">Consentimento registrado em {consentDate}.</p>
-              )}
+              <Label htmlFor="patient-phone">Telefone *</Label>
+              <Input
+                id="patient-phone"
+                required
+                type="tel"
+                inputMode="tel"
+                maxLength={LIMITS.phone}
+                value={form.phone}
+                onChange={onFormChange("phone")}
+                className="mt-1.5"
+                aria-invalid={Boolean(phoneError)}
+                aria-describedby={phoneError ? "patient-phone-error" : undefined}
+                data-testid="patient-phone-input"
+                placeholder="(11) 91234-5678"
+              />
+              {phoneError && <p id="patient-phone-error" className="mt-1 text-xs text-red-600">{phoneError}</p>}
             </div>
-            <fieldset className="space-y-2">
-              <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="radio"
-                  name="consent_terms"
-                  value="true"
-                  checked={form.consent_terms === true}
-                  onChange={onFormChange("consent_terms")}
-                  required
-                />
-                Concordo
-              </label>
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="radio"
-                  name="consent_terms"
-                  value="false"
-                  checked={form.consent_terms === false}
-                  onChange={onFormChange("consent_terms")}
-                />
-                Não concordo
-              </label>
-            </fieldset>
-          </div>
 
-          <DialogFooter>
+            <div>
+              <Label htmlFor="patient-email">E-mail *</Label>
+              <Input
+                id="patient-email"
+                required
+                type="email"
+                inputMode="email"
+                maxLength={LIMITS.email}
+                value={form.email}
+                onChange={onFormChange("email")}
+                className="mt-1.5"
+                data-testid="patient-email-input"
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <Label htmlFor="patient-address">Endereço *</Label>
+              <Input
+                id="patient-address"
+                required
+                maxLength={LIMITS.address}
+                value={form.address}
+                onChange={onFormChange("address")}
+                className="mt-1.5"
+                placeholder="Rua, número, bairro, cidade"
+                data-testid="patient-address-input"
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <Label htmlFor="patient-emergency">Contato de emergência *</Label>
+              <Input
+                id="patient-emergency"
+                required
+                maxLength={LIMITS.emergencyContact}
+                value={form.emergency_contact}
+                onChange={onFormChange("emergency_contact")}
+                className="mt-1.5"
+                placeholder="Nome, parentesco e telefone"
+                data-testid="patient-emergency-input"
+              />
+            </div>
+          </FormSection>
+
+          <FormSection title="Informações clínicas">
+            <div className="sm:col-span-2">
+              <Label htmlFor="patient-notes">Notas iniciais *</Label>
+              <Textarea
+                id="patient-notes"
+                required
+                maxLength={LIMITS.patientNotes}
+                value={form.initial_notes}
+                onChange={onFormChange("initial_notes")}
+                className="mt-1.5"
+                placeholder="Motivo da procura, encaminhamento, observações da triagem"
+                data-testid="patient-notes-input"
+                rows={3}
+              />
+            </div>
+          </FormSection>
+
+          <FormSection title="Consentimento">
+            <div className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
+              <div>
+                <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
+                {consentText ? (
+                  // Acessibilidade (varredura de UI): texto com rolagem precisa receber foco
+                  // (tabIndex), senão quem usa só o teclado não consegue rolar e ler o termo inteiro.
+                  <p tabIndex={0} role="region" aria-label="Texto do termo de consentimento"
+                    className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">{consentText}</p>
+                ) : (
+                  <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" /></div>
+                )}
+                {consentDate && (
+                  <p className="mt-2 text-xs font-medium text-emerald-700">Consentimento registrado em {consentDate}.</p>
+                )}
+              </div>
+              {/* PRODUTO: a resposta é obrigatória e explícita. Antes "Não concordo" já
+                  vinha marcado, e a ficha podia ser salva sem a pergunta ser respondida.
+                  Celular: opções com área de toque maior (linha inteira, 44 px). */}
+              <fieldset className="space-y-1">
+                <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
+                <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
+                  <input
+                    id="patient-consent-yes"
+                    type="radio"
+                    name="consent_terms"
+                    value="true"
+                    checked={form.consent_terms === true}
+                    onChange={onFormChange("consent_terms")}
+                    required
+                  />
+                  Concordo
+                </label>
+                <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
+                  <input
+                    type="radio"
+                    name="consent_terms"
+                    value="false"
+                    checked={form.consent_terms === false}
+                    onChange={onFormChange("consent_terms")}
+                  />
+                  Não concordo
+                </label>
+              </fieldset>
+            </div>
+          </FormSection>
+
+          {/* UX (celular): os botões ficam sempre à vista, presos ao pé do diálogo.
+              Antes "Salvar" só aparecia depois de rolar o formulário inteiro. */}
+          {/* -bottom-6: o diálogo tem 24 px de espaçamento interno; sem isso o rodapé
+              parava 24 px acima da borda, com o formulário aparecendo por baixo dele. */}
+          <div className="sticky -bottom-6 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-slate-200 bg-background px-6 py-3">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
             <Button type="submit" disabled={saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="save-patient-btn">
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
             </Button>
-          </DialogFooter>
+          </div>
         </form>
       </DialogContent>
     </Dialog>

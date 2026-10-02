@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { format, isToday } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import {
-  HOUR_HEIGHT, STATUS, dragState, formatTimeRange, layoutDay, snapMinutes,
+  HOUR_HEIGHT, STATUS, THREE_DAYS, dragState, formatTimeRange, layoutDay, snapMinutes,
 } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
-// Visões SEMANA e DIA (produto): grade de horários.
+// Visões SEMANA, 3 DIAS (celular) e DIA (produto): grade de horários.
 //   - cada sessão ocupa a altura da sua duração; sobrepostas ficam lado a
 //     lado (conflito fica visível em vez de uma esconder a outra);
 //   - clicar num horário vazio cria a sessão ali (encaixe de 15 min);
@@ -43,8 +43,10 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
 
   return (
     <div className="overflow-x-auto">
-      {/* Semana no celular: rolagem horizontal em vez de 7 colunas espremidas. */}
-      <div style={{ minWidth: multiDay ? 720 : undefined }}>
+      {/* Semana (7 colunas) em tela estreita: rolagem horizontal em vez de colunas
+          espremidas. Celular (UX): a visão "3 dias" cabe na tela, sem a largura mínima
+          (antes ela herdava os 720 px da semana e só um dia aparecia). */}
+      <div style={{ minWidth: days.length > THREE_DAYS ? 720 : undefined }}>
         <div className="grid border-b border-slate-200" style={{ gridTemplateColumns: columns }}>
           <div />
           {days.map((day) => (
