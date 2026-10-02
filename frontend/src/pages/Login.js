@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
@@ -32,6 +32,22 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // Correção (varredura de UI, defeito 8): o botão do Google tinha largura fixa
+  // de 384 px e, no celular, passava das bordas do formulário. O Google só
+  // aceita largura em pixels (entre 200 e 400), não "100%", então medimos a
+  // área do botão e acompanhamos mudanças de tamanho (girar o celular, etc.).
+  const googleBoxRef = useRef(null);
+  const [googleWidth, setGoogleWidth] = useState(384);
+  useEffect(() => {
+    const box = googleBoxRef.current;
+    if (!box) return undefined;
+    const update = () => setGoogleWidth(Math.max(200, Math.min(400, Math.floor(box.clientWidth))));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, []);
 
   const handleEmailLogin = async (e) => {
     e.preventDefault();
@@ -155,18 +171,19 @@ export default function Login() {
 
           <div className="my-5 flex items-center gap-3">
             <div className="h-px flex-1 bg-slate-200" />
-            <span className="text-xs text-slate-400">ou</span>
+            {/* Acessibilidade (varredura de UI): slate-400 -> slate-500 (contraste mínimo 4,5:1). */}
+            <span className="text-xs text-slate-500">ou</span>
             <div className="h-px flex-1 bg-slate-200" />
           </div>
 
           {/* Substitui o botão original pelo componente oficial da Google */}
-          <div className="flex w-full justify-center" data-testid="login-google-btn">
+          <div ref={googleBoxRef} className="flex w-full justify-center" data-testid="login-google-btn">
             <GoogleLogin
               onSuccess={handleGoogleSuccess}
               onError={() => toast.error("Ocorreu um erro no processo de login com o Google.")}
               shape="rectangular"
               size="large"
-              width="384"
+              width={String(googleWidth)}
             />
           </div>
 
@@ -180,7 +197,7 @@ export default function Login() {
               implícito não vale como evidência. O aceite explícito acontece no
               cadastro ou na tela de aceite (TermsGate). */}
           <p className="mt-3 text-center text-xs">
-            <Link to="/privacidade" className="text-slate-400 hover:text-[#1E3A8A] hover:underline" data-testid="login-privacy-link">
+            <Link to="/privacidade" className="text-slate-500 hover:text-[#1E3A8A] hover:underline" data-testid="login-privacy-link">
               Política de Privacidade
             </Link>
           </p>

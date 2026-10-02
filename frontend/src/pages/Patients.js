@@ -13,6 +13,7 @@ import {
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { formatDateOnly } from "@/lib/datetime";
 
 // UI Components
 import { Card } from "@/components/ui/card";
@@ -35,11 +36,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 // ============================================================================
 // CONSTANTS & HELPERS
 // ============================================================================
-const fmtDate = (s) => {
-  if (!s) return "—";
-  const [year, month, day] = String(s).slice(0, 10).split("-");
-  return year && month && day ? `${day}/${month}/${year}` : "—";
-};
+// Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js).
+const fmtDate = formatDateOnly;
 
 const EMPTY_FORM = {
   full_name: "", cpf: "", rg: "", birth_date: "", age: "",
@@ -506,11 +504,15 @@ function PatientHeader({ onNew, onIntegration }) {
 }
 
 function PatientSearch({ query, onQueryChange }) {
+  // Correção (varredura de UI, defeito 7): o campo não tinha largura própria e,
+  // na linha ao lado do filtro Ativos/Arquivados, encolhia até cortar o texto de
+  // ajuda ("Buscar por nome (mín. 2"). Agora ocupa a largura disponível, até ~380 px.
   return (
-    <div className="relative max-w-sm">
-      <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+    <div className="relative w-full sm:max-w-sm">
+      <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" aria-hidden="true" />
       <Input
         maxLength={LIMITS.search} // varredura, item 2: o servidor aceita até 120 caracteres
+        aria-label="Buscar paciente por nome"
         placeholder="Buscar por nome (mín. 2 letras)..."
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
@@ -525,7 +527,8 @@ function PatientSearch({ query, onQueryChange }) {
 function ArchiveFilter({ showArchived, onChange }) {
   const option = (active) =>
     `rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-      active ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-500 hover:text-[#0F172A]"
+      // Acessibilidade (varredura de UI): opção inativa slate-500 sobre slate-100 = 4,3:1 -> slate-600.
+      active ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-600 hover:text-[#0F172A]"
     }`;
   return (
     <div className="inline-flex self-start rounded-lg bg-slate-100 p-1" role="group" aria-label="Filtrar pacientes">
@@ -658,10 +661,14 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
           <DialogDescription>Nome, documentos, contatos e observações são criptografados antes de serem salvos.</DialogDescription>
         </DialogHeader>
+        {/* Acessibilidade (varredura de UI): cada rótulo agora aponta para o seu campo
+            (htmlFor/id). Antes 9 campos e as 2 listas de seleção não tinham nome para o
+            leitor de tela, e clicar no rótulo não levava ao campo. */}
         <form onSubmit={onSubmit} className="space-y-4">
           <div>
-            <Label>Nome completo *</Label>
+            <Label htmlFor="patient-name">Nome completo *</Label>
             <Input
+              id="patient-name"
               required
               maxLength={LIMITS.patientName}
               value={form.full_name}
@@ -689,8 +696,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>RG</Label>
+            <Label htmlFor="patient-rg">RG</Label>
             <Input
+              id="patient-rg"
               maxLength={LIMITS.rg}
               value={form.rg}
               onChange={onFormChange("rg")}
@@ -700,8 +708,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Data de nascimento</Label>
+            <Label htmlFor="patient-birth-date">Data de nascimento</Label>
             <Input
+              id="patient-birth-date"
               type="date"
               min="1900-01-01"
               max={todayISO()}
@@ -713,8 +722,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Idade</Label>
+            <Label htmlFor="patient-age">Idade</Label>
             <Input
+              id="patient-age"
               type="number"
               min={0}
               max={130}
@@ -727,8 +737,12 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label>Escolaridade *</Label>
+              {/* Correção (varredura de UI, defeito 5): tinha "*" (obrigatório), mas
+                  nem o formulário nem o servidor exigem o campo (cadastros vindos do
+                  Google Forms podem chegar sem ele). O "*" fica só no que é exigido. */}
+              <Label htmlFor="patient-education">Escolaridade</Label>
               <select
+                id="patient-education"
                 value={form.education}
                 onChange={onFormChange("education")}
                 className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
@@ -744,8 +758,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </select>
             </div>
             <div>
-              <Label>Estado civil</Label>
+              <Label htmlFor="patient-marital-status">Estado civil</Label>
               <select
+                id="patient-marital-status"
                 value={form.marital_status}
                 onChange={onFormChange("marital_status")}
                 className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
@@ -761,8 +776,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Profissão</Label>
+            <Label htmlFor="patient-profession">Profissão</Label>
             <Input
+              id="patient-profession"
               maxLength={LIMITS.profession}
               value={form.profession}
               onChange={onFormChange("profession")}
@@ -790,8 +806,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Email</Label>
+            <Label htmlFor="patient-email">Email</Label>
             <Input
+              id="patient-email"
               type="email"
               maxLength={LIMITS.email}
               value={form.email}
@@ -802,8 +819,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Endereço</Label>
+            <Label htmlFor="patient-address">Endereço</Label>
             <Input
+              id="patient-address"
               maxLength={LIMITS.address}
               value={form.address}
               onChange={onFormChange("address")}
@@ -813,8 +831,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Contato de emergência</Label>
+            <Label htmlFor="patient-emergency">Contato de emergência</Label>
             <Input
+              id="patient-emergency"
               maxLength={LIMITS.emergencyContact}
               value={form.emergency_contact}
               onChange={onFormChange("emergency_contact")}
@@ -824,8 +843,9 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label>Notas iniciais</Label>
+            <Label htmlFor="patient-notes">Notas iniciais</Label>
             <Textarea
+              id="patient-notes"
               maxLength={LIMITS.patientNotes}
               value={form.initial_notes}
               onChange={onFormChange("initial_notes")}
@@ -839,7 +859,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             <div>
               <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
               {consentText ? (
-                <p className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600">{consentText}</p>
+                // Acessibilidade (varredura de UI): texto com rolagem precisa receber foco
+                // (tabIndex), senão quem usa só o teclado não consegue rolar e ler o termo inteiro.
+                <p tabIndex={0} role="region" aria-label="Texto do termo de consentimento"
+                  className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">{consentText}</p>
               ) : (
                 <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" /></div>
               )}
@@ -1011,10 +1034,16 @@ function RowMenu({ p, busy, onEdit, onOpen, onDelete, onAnon, onArchive }) {
   // Varredura, item 9: enquanto uma ação deste paciente está em andamento, o
   // menu mostra "carregando" e as ações que gravam ficam desabilitadas.
   return (
-    <DropdownMenu>
+    // Acessibilidade (varredura de UI):
+    // - o botão ⋮ só tinha ícone: o leitor de tela anunciava apenas "botão".
+    //   Agora diz de quem é o menu ("Ações de Mariana Souza");
+    // - modal={false}: o menu aberto escondia o resto da página dos leitores de
+    //   tela (aria-hidden) sem impedir o foco de chegar lá, um estado
+    //   inconsistente. Um menu de ações não precisa bloquear a página.
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" className="h-8 w-8" data-testid={`patient-menu-${p.id}`}
-          aria-busy={busy || undefined}>
+          aria-label={`Ações de ${p.full_name}`} aria-busy={busy || undefined}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin text-slate-500" /> : <MoreVertical className="h-4 w-4 text-slate-500" />}
         </Button>
       </DropdownMenuTrigger>
@@ -1028,7 +1057,7 @@ function RowMenu({ p, busy, onEdit, onOpen, onDelete, onAnon, onArchive }) {
           <DropdownMenuItem disabled={busy} onClick={() => onArchive(p, true)}><Archive className="mr-2 h-4 w-4" /> Arquivar</DropdownMenuItem>
         )}
         <DropdownMenuItem disabled={busy} onClick={() => onAnon(p)}><ShieldOff className="mr-2 h-4 w-4" /> Anonimizar</DropdownMenuItem>
-        <DropdownMenuItem disabled={busy} onClick={() => onDelete(p)} className="text-[#EF4444]"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
+        <DropdownMenuItem disabled={busy} onClick={() => onDelete(p)} className="text-red-600"><Trash2 className="mr-2 h-4 w-4" /> Excluir</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -5,8 +5,11 @@ import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Users, CalendarCheck, FileText, Clock, UserPlus, ArrowRight, Activity } from "lucide-react";
+import { formatDateOnly } from "@/lib/datetime";
 
-const fmtDate = (s) => (s ? new Date(s).toLocaleDateString("pt-BR") : "—");
+// Correção (varredura de UI, defeito 1): antes `new Date(s).toLocaleDateString()`,
+// que mostrava o nascimento UM DIA ANTES no Brasil (ver lib/datetime.js).
+const fmtDate = formatDateOnly;
 const fmtDateTime = (s) => (s ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
 
 function StatCard({ icon: Icon, label, value, tint, testid }) {
@@ -66,8 +69,9 @@ export default function Dashboard() {
             <h2 className="font-head text-lg font-bold text-[#0F172A]">Evoluções recentes</h2>
           </div>
           <div className="mt-4 space-y-1">
+            {/* Acessibilidade (varredura de UI): textos de "lista vazia" em slate-400 -> slate-500 (contraste mínimo 4,5:1). */}
             {stats.records_feed.length === 0 && (
-              <p className="py-8 text-center text-sm text-slate-400">Nenhum prontuário registrado ainda.</p>
+              <p className="py-8 text-center text-sm text-slate-500">Nenhum prontuário registrado ainda.</p>
             )}
             {stats.records_feed.map((r) => (
               <button key={r.record_id}
@@ -97,7 +101,7 @@ export default function Dashboard() {
           </div>
           <div className="mt-4 space-y-1">
             {stats.recent_patients.length === 0 && (
-              <p className="py-8 text-center text-sm text-slate-400">Cadastre seu primeiro paciente.</p>
+              <p className="py-8 text-center text-sm text-slate-500">Cadastre seu primeiro paciente.</p>
             )}
             {stats.recent_patients.map((p) => (
               <button key={p.id} onClick={() => navigate(`/pacientes/${p.id}`)}

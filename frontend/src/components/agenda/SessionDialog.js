@@ -111,8 +111,9 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
               onChange={(e) => setForm({ ...form, title: e.target.value })} className="mt-1.5" data-testid="session-title-input" />
           </div>
           <div>
-            <Label>Paciente</Label>
-            <PatientPicker value={form.patient_id} valueLabel={form.patient_name}
+            {/* Acessibilidade (varredura de UI): rótulo ligado ao seletor (htmlFor/id). */}
+            <Label htmlFor="session-patient">Paciente</Label>
+            <PatientPicker id="session-patient" value={form.patient_id} valueLabel={form.patient_name}
               onChange={(p) => setForm({ ...form, patient_id: p ? p.id : "", patient_name: p ? p.full_name : "" })} />
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

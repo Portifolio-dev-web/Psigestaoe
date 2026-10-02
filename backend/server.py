@@ -1381,6 +1381,16 @@ async def verify_google_credential(credential: str) -> dict:
     return id_info
 
 
+def count_label(count: int, singular: str, plural: str) -> str:
+    """"1 sessão encerrada" / "2 sessões encerradas".
+
+    Correção (varredura de UI, defeito 9): mensagens e detalhes da auditoria
+    usavam "sessão(ões)", "tentativa(s)", "registro(s)". Mesma regra do
+    frontend (countLabel em frontend/src/lib/utils.js).
+    """
+    return f"{count} {singular if count == 1 else plural}"
+
+
 def google_identity_matches(id_info: dict, user: User) -> bool:
     """A conta Google do token é a MESMA do usuário? (desbloqueio e troca de senha)
 
@@ -1631,7 +1641,8 @@ async def unlock_session(data: UnlockInput, request: Request, response: Response
         remaining = MAX_UNLOCK_FAILURES - attempt
         raise HTTPException(status_code=403, detail={
             "code": "unlock_failed",
-            "msg": f"Senha incorreta. Restam {remaining} tentativa(s) antes de a sessão ser encerrada.",
+            "msg": (f"Senha incorreta. {'Resta' if remaining == 1 else 'Restam'} "
+                    f"{count_label(remaining, 'tentativa', 'tentativas')} antes de a sessão ser encerrada."),
             "remaining": remaining,
         })
 
@@ -1705,7 +1716,8 @@ async def change_password(data: PasswordChangeInput, sess: UserSession = Depends
     # aparelho) perde o acesso na hora. Esta sessão continua aberta.
     ended = await end_login_sessions(db, user, keep=sess)
     await log_audit(db, user.user_id, user.email, "alterar_senha", "usuario", user.user_id,
-                    f"Senha {'alterada' if had_password else 'definida'}; {ended} outra(s) sessão(ões) encerrada(s)")
+                    f"Senha {'alterada' if had_password else 'definida'}; "
+                    f"{count_label(ended, 'outra sessão encerrada', 'outras sessões encerradas')}")
     await db.refresh(user)
     return {"user": public_user(user), "ended_sessions": ended}
 
@@ -1728,7 +1740,7 @@ async def end_other_sessions(data: EndSessionsInput, sess: UserSession = Depends
     user = sess.user
     ended = await end_login_sessions(db, user, keep=sess)
     await log_audit(db, user.user_id, user.email, "encerrar", "sessao", user.user_id,
-                    f"Sair dos outros dispositivos: {ended} sessão(ões) encerrada(s)")
+                    f"Sair dos outros dispositivos: {count_label(ended, 'sessão encerrada', 'sessões encerradas')}")
     return {"ended_sessions": ended}
 
 
@@ -2273,7 +2285,7 @@ async def list_records(
     # Item 14: acesso ao conteúdo clínico é o evento mais sensível do sistema.
     # Cada página aberta é um acesso e fica registrada.
     await log_audit(db, user.user_id, user.email, "visualizar", "prontuario", pid,
-                    f"Evolução clínica ({len(records)} registro(s))")
+                    f"Evolução clínica ({count_label(len(records), 'registro', 'registros')})")
     return {"items": records, "next_cursor": next_cursor, "total": total}
 
 @api_router.post("/patients/{pid}/records")
@@ -2296,6 +2308,8 @@ async def create_record(pid: str, data: RecordInput, user: User = Depends(get_ac
     await db.commit()
     await db.refresh(novo_prontuario)
 
+    # A data fica em ISO/UTC (sem ambiguidade de fuso); a tela de auditoria a
+    # converte para a hora local ao exibir (Settings.js, formatAuditDetail).
     await log_audit(db, user.user_id, user.email, "criar", "prontuario", novo_prontuario.id, f"Sessão {data.session_datetime.isoformat()}")
     return record_public(novo_prontuario)
 
@@ -2507,8 +2521,17 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
 
     month_start = now_utc().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+    # CORREÇÃO (varredura de UI, defeito 2): sessão CANCELADA não é consulta.
+    # Antes "Consultas no mês" e "Sessões futuras" somavam também as canceladas
+    # (o painel mostrava 4 consultas quando uma das quatro tinha sido cancelada).
+    # coalesce: sessões antigas podem ter status vazio (NULL), que vale como
+    # "agendada"; sem ele, o SQL descartaria essas sessões da contagem.
+    not_cancelled = func.coalesce(Session.status, "agendada") != "cancelada"
+
     # Como start_time agora é DateTime nativo, comparamos diretamente com month_start (removida a função iso())
-    stmt_sessoes = select(func.count()).select_from(Session).where(Session.owner_id == uid, Session.start_time >= month_start)
+    stmt_sessoes = select(func.count()).select_from(Session).where(
+        Session.owner_id == uid, Session.start_time >= month_start, not_cancelled,
+    )
     sessions_month = await db.scalar(stmt_sessoes)
 
     stmt_records = select(func.count()).select_from(Record).where(Record.owner_id == uid)
@@ -2516,7 +2539,9 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
 
     # --- LÓGICA DO BÔNUS APLICADA AQUI ---
     # Conta sessões agendadas que vão ocorrer de hoje em diante
-    stmt_upcoming = select(func.count()).select_from(Session).where(Session.owner_id == uid, Session.start_time >= now_utc())
+    stmt_upcoming = select(func.count()).select_from(Session).where(
+        Session.owner_id == uid, Session.start_time >= now_utc(), not_cancelled,  # defeito 2: sem canceladas
+    )
     upcoming = await db.scalar(stmt_upcoming)
 
     # Listagens recentes (LIMIT)

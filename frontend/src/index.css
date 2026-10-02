@@ -24,7 +24,10 @@ h1, h2, h3, h4, .font-head {
         --popover-foreground: 222.2 47.4% 11.2%;
         --primary: 224 64% 33%;
         --primary-foreground: 210 40% 98%;
-        --secondary: 200 98% 39%;
+        /* Acessibilidade (varredura de UI): antes 200 98% 39% (~#0284C5). O texto branco
+           dos selos (Badge "secondary") tinha contraste 4,1:1, abaixo do mínimo de 4,5:1
+           (WCAG AA). Um tom mais escuro da mesma cor: ~#0369A1, 5,9:1. */
+        --secondary: 201 96% 32%;
         --secondary-foreground: 0 0% 100%;
         --muted: 210 40% 96.1%;
         --muted-foreground: 215.4 16.3% 46.9%;

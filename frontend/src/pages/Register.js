@@ -120,7 +120,9 @@ export default function Register() {
               <Label htmlFor="terms" className="text-xs leading-relaxed text-slate-600">
                 Li e aceito a{" "}
                 <Link to="/privacidade" target="_blank" rel="noopener noreferrer"
-                  className="font-medium text-[#1E3A8A] underline-offset-2 hover:underline" data-testid="register-privacy-link">
+                  // Acessibilidade (varredura de UI): link no meio do texto precisa de algo além
+                  // da cor (daltonismo, baixa visão): fica sempre sublinhado.
+                  className="font-medium text-[#1E3A8A] underline underline-offset-2" data-testid="register-privacy-link">
                   Política de Privacidade
                 </Link>
                 , que explica como o PsiGestão trata os meus dados e os dados dos meus pacientes (LGPD).

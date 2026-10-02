@@ -50,7 +50,8 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
           {days.map((day) => (
             <button key={day.toISOString()} type="button" onClick={() => onOpenDay(day)} disabled={!multiDay}
               className="py-2 text-center enabled:hover:bg-slate-50" aria-label={multiDay ? `Abrir ${format(day, "dd/MM")} na visão Dia` : undefined}>
-              <span className="block text-[11px] font-medium uppercase tracking-wide text-slate-400">
+              {/* Acessibilidade (varredura de UI): slate-400 -> slate-500 (contraste 2,6:1 -> 4,8:1). */}
+              <span className="block text-[11px] font-medium uppercase tracking-wide text-slate-500">
                 {format(day, "EEE", { locale: ptBR })}
               </span>
               <span className={`mx-auto mt-0.5 flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold ${
@@ -66,7 +67,7 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
           <div className="grid" style={{ gridTemplateColumns: columns }}>
             <div className="relative" style={{ height: 24 * HOUR_HEIGHT }} aria-hidden="true">
               {HOURS.map((h) => (
-                <span key={h} className="absolute right-2 -translate-y-1/2 text-[10px] text-slate-400" style={{ top: h * HOUR_HEIGHT }}>
+                <span key={h} className="absolute right-2 -translate-y-1/2 text-[10px] text-slate-500" style={{ top: h * HOUR_HEIGHT }}>
                   {h === 0 ? "" : `${String(h).padStart(2, "0")}:00`}
                 </span>
               ))}

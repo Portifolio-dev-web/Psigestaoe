@@ -15,7 +15,8 @@ import { LIMITS } from "@/lib/validation";
 //     com o nome no corpo da requisição, nunca na URL).
 // `value` é o id escolhido; `valueLabel`, o nome a exibir (vem da própria
 // sessão ao editar, sem precisar buscar o paciente de novo).
-export default function PatientPicker({ value, valueLabel, onChange }) {
+// `id`: liga o seletor ao <Label htmlFor> de quem o usa (acessibilidade, varredura de UI).
+export default function PatientPicker({ id, value, valueLabel, onChange }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
@@ -51,7 +52,9 @@ export default function PatientPicker({ value, valueLabel, onChange }) {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button type="button" variant="outline" role="combobox" aria-expanded={open}
+        {/* Acessibilidade (varredura de UI): um "combobox" não usa o texto de dentro
+            como nome; sem id ligado ao rótulo, o leitor de tela anunciava só "caixa de combinação". */}
+        <Button id={id} type="button" variant="outline" role="combobox" aria-expanded={open}
           className="mt-1.5 w-full justify-between font-normal" data-testid="session-patient-select">
           <span className="truncate">{value ? valueLabel || "Paciente selecionado" : "Sem paciente"}</span>
           <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />

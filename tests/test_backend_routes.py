@@ -1783,3 +1783,43 @@ def test_forwarded_allow_ips_is_validated(monkeypatch):
         monkeypatch.setenv("FORWARDED_ALLOW_IPS", invalid)
         with pytest.raises(SystemExit):
             forwarded_allow_ips_from_env()
+
+
+# ---------------------------------------------------------------------------
+# Varredura de UI/UX: defeitos corrigidos
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_dashboard_does_not_count_cancelled_sessions(client):
+    # Defeito 2: "Consultas no mês" e "Sessões futuras" somavam sessões canceladas.
+    await _register(client, "painel.canceladas@example.com")
+    future = datetime.now(timezone.utc) + timedelta(days=2)
+    for status, hour in (("agendada", 9), ("agendada", 11), ("cancelada", 14)):
+        start = future.replace(hour=hour, minute=0, second=0, microsecond=0)
+        response = await client.post("/api/sessions", json={
+            "title": "Sessão", "start": start.isoformat(), "end": (start + timedelta(minutes=50)).isoformat(),
+            "status": status})
+        assert response.status_code == 200
+
+    stats = (await client.get("/api/dashboard/stats")).json()
+    assert stats["upcoming_sessions"] == 2
+    if future.month == datetime.now(timezone.utc).month:  # dois dias à frente ainda no mesmo mês
+        assert stats["sessions_month"] == 2
+
+
+@pytest.mark.anyio
+async def test_unlock_message_uses_real_plural(client):
+    # Defeito 9: "Restam 1 tentativa(s)" -> "Resta 1 tentativa" / "Restam 4 tentativas".
+    await _register(client, "plural@example.com")
+    await client.post("/api/auth/lock", json={"reason": "manual"})
+    messages = [(await client.post("/api/auth/unlock", json={"password": f"errada-{i}-x"})).json()["detail"]["msg"]
+                for i in range(4)]
+    assert "Restam 4 tentativas antes" in messages[0]
+    assert "Resta 1 tentativa antes" in messages[3]
+    assert not any("(s)" in m for m in messages)
+
+
+def test_count_label():
+    assert server.count_label(1, "sessão encerrada", "sessões encerradas") == "1 sessão encerrada"
+    assert server.count_label(0, "sessão encerrada", "sessões encerradas") == "0 sessões encerradas"
+    assert server.count_label(3, "registro", "registros") == "3 registros"

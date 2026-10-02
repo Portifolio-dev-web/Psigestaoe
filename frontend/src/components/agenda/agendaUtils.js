@@ -28,7 +28,8 @@ const WEEK = { weekStartsOn: 0 };  // domingo, como o cabeçalho que a agenda j�
 export const STATUS = {
   agendada: { label: "Agendada", cls: "bg-blue-100 text-[#1E3A8A]", block: "border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]" },
   realizada: { label: "Realizada", cls: "bg-emerald-100 text-emerald-700", block: "border-emerald-600 bg-emerald-50 text-emerald-800" },
-  cancelada: { label: "Cancelada", cls: "bg-red-100 text-red-600", block: "border-red-300 bg-red-50/70 text-red-500 line-through" },
+  // Acessibilidade (varredura de UI): vermelho-600 sobre rosa = 3,9:1; o 700 passa de 4,5:1.
+  cancelada: { label: "Cancelada", cls: "bg-red-100 text-red-700", block: "border-red-300 bg-red-50/70 text-red-700 line-through" },
 };
 
 /** "2026-10-01" (parâmetro da URL) -> Date local; inválido ou ausente -> hoje. */

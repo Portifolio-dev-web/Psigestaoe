@@ -4,7 +4,7 @@ import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
-import { formatDateTime } from "@/lib/datetime";
+import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
 import RecordEditorDialog from "@/components/RecordEditorDialog";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
@@ -19,12 +19,22 @@ import {
   CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload
 } from "lucide-react";
 
-const fmtDate = (s) => {
-  if (!s) return "—";
-  const [year, month, day] = String(s).slice(0, 10).split("-");
-  return year && month && day ? `${day}/${month}/${year}` : "—";
-};
+// Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js;
+// antes havia uma cópia desta função em cada tela).
+const fmtDate = formatDateOnly;
 const fmtDateTime = formatDateTime; // sempre na hora local (ver lib/datetime.js)
+
+// Correção (varredura de UI, defeito 3): "14/05/1990 (36 anos)". Antes aparecia
+// "(— anos)" mesmo com a data de nascimento cadastrada, porque só o campo manual
+// "Idade" era usado. Agora a idade vem da data; o campo manual fica como reserva
+// (cadastros antigos ou vindos do Google Forms sem data). Sem nenhum dos dois,
+// mostra só a data, sem o "(— anos)".
+const birthLabel = (p) => {
+  const age = ageFromBirthDate(p.birth_date) ?? (String(p.age || "").trim() || null);
+  const date = fmtDate(p.birth_date);
+  if (age === null) return date;
+  return date === "—" ? `${age} anos` : `${date} (${age} anos)`;
+};
 // Termo por profissional: o status do consentimento mostra a EVIDÊNCIA
 // (quando foi dado ou revogado), não só "Concordo"/"Não concordo".
 const consentLabel = (p) => {
@@ -176,7 +186,7 @@ export default function PatientDetail() {
               </div>
             </div>
             <div className="mt-5 space-y-3 text-sm">
-              <InfoRow icon={CalendarClock} label="Nascimento" value={`${fmtDate(patient.birth_date)} (${patient.age || '—'} anos)`} />
+              <InfoRow icon={CalendarClock} label="Nascimento" value={birthLabel(patient)} />
               <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
               <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
               <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
@@ -218,7 +228,8 @@ export default function PatientDetail() {
               <Button onClick={openNew} className="w-full gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-record-btn">
                 <Plus className="h-4 w-4" /> Nova anotação
               </Button>
-              <DropdownMenu>
+              {/* Acessibilidade (varredura de UI): menu não modal (ver RowMenu em Patients.js). */}
+              <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" disabled={exporting} className="w-full gap-2 border-slate-300" data-testid="export-btn">
                     {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -278,8 +289,10 @@ export default function PatientDetail() {
                           </Badge>
                         )}
                       </div>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`edit-record-${r.id}`}>
-                        <Pencil className="h-4 w-4 text-slate-400" />
+                      {/* Acessibilidade (varredura de UI): o lápis não tinha nome para o leitor de tela. */}
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`edit-record-${r.id}`}
+                        aria-label={`Editar evolução de ${fmtDateTime(r.session_datetime)}`}>
+                        <Pencil className="h-4 w-4 text-slate-500" aria-hidden="true" />
                       </Button>
                     </div>
                     {r.diagnosis && (
@@ -289,8 +302,14 @@ export default function PatientDetail() {
                       </div>
                     )}
                     <p className="mt-3 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700">{r.content}</p>
-                    <p className="mt-3 flex items-center gap-1 text-[11px] text-slate-400">
-                      <Lock className="h-3 w-3" /> Registro imutável · criptografado
+                    {/* Correção (varredura de UI, defeito 4): dizia "Registro imutável"
+                        ao lado do botão de editar. A evolução É editável; o que não se
+                        perde são as versões anteriores, guardadas a cada edição. */}
+                    <p className="mt-3 flex items-center gap-1 text-[11px] text-slate-500">
+                      <Lock className="h-3 w-3" /> Criptografado
+                      {(r.version || 1) > 1
+                        ? ` · editado (versão ${r.version}; as anteriores ficam guardadas)`
+                        : " · versão original"}
                     </p>
                   </Card>
                 </motion.div>
@@ -320,7 +339,8 @@ function InfoRow({ icon: Icon, label, value }) {
   return (
     <div className="flex items-center gap-3">
       <Icon className="h-4 w-4 shrink-0 text-slate-400" />
-      <span className="w-24 shrink-0 text-xs uppercase tracking-wide text-slate-400">{label}</span>
+      {/* Acessibilidade (varredura de UI): rótulos em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
+      <span className="w-24 shrink-0 text-xs uppercase tracking-wide text-slate-500">{label}</span>
       <span className="truncate text-slate-700">{value}</span>
     </div>
   );

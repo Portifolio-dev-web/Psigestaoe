@@ -37,3 +37,33 @@ export function formatDateTime(value) {
 export function formatTime(value) {
   return new Date(value).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
+
+// ---------------------------------------------------------------------------
+// CORREÇÃO (varredura de UI, defeito 1): datas SEM hora (nascimento, última
+// consulta) não podem passar por `new Date("1985-11-02")`: o JavaScript lê
+// esse texto como meia-noite em UTC, e no Brasil (UTC-3) isso ainda é o dia
+// ANTERIOR. O painel mostrava quem nasceu em 02/11 como nascido em 01/11.
+// Aqui a data é tratada como texto (dia, mês, ano), sem fuso nenhum.
+// ---------------------------------------------------------------------------
+
+/** "1985-11-02" (ou "1985-11-02T..." ) -> "02/11/1985". Sem data: "—". */
+export function formatDateOnly(value) {
+  if (!value) return "—";
+  const [year, month, day] = String(value).slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : "—";
+}
+
+/**
+ * Idade em anos completos a partir da data de nascimento ("AAAA-MM-DD"),
+ * comparando com a data de HOJE no fuso local. null se não houver data válida.
+ * CORREÇÃO (varredura de UI, defeito 3): a ficha mostrava "(— anos)" porque
+ * usava só o campo manual "Idade", mesmo com a data de nascimento preenchida.
+ */
+export function ageFromBirthDate(value, today = new Date()) {
+  const [year, month, day] = String(value || "").slice(0, 10).split("-").map(Number);
+  if (!year || !month || !day) return null;
+  let age = today.getFullYear() - year;
+  // Ainda não fez aniversário este ano: um ano a menos.
+  if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) age -= 1;
+  return age >= 0 && age < 150 ? age : null;
+}

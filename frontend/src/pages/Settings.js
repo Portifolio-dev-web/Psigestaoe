@@ -5,6 +5,8 @@ import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { clearUserDrafts, forgetDraftKey } from "@/lib/drafts";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { formatDateTime } from "@/lib/datetime";
+import { countLabel } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -37,6 +39,14 @@ const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
   termos: "Política", termo: "Termo", integracao: "Integração", sessao: "Sessão",
 };
+
+// Correção (varredura de UI, defeito 6): alguns detalhes da trilha guardam a
+// data em ISO ("Sessão 2026-09-24T13:00:00+00:00"), e a tela a mostrava crua,
+// em UTC. A trilha é só de inclusão (registros antigos não podem ser
+// alterados), então a correção é na exibição: toda data ISO do detalhe vira
+// data e hora locais ("24/09/2026, 10:00"), inclusive nos registros antigos.
+const ISO_INSTANT = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})/g;
+const formatAuditDetail = (detail) => String(detail || "").replace(ISO_INSTANT, (iso) => formatDateTime(iso));
 
 const fmtDateTime = (s) => (s
   ? new Date(s).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
@@ -303,7 +313,8 @@ function AccountSecurity() {
       setForm(EMPTY_PASSWORD_FORM);
       setOtherSessions(0);
       const ended = data.ended_sessions
-        ? ` ${data.ended_sessions} sessão(ões) em outros aparelhos foram encerradas.`
+        // Varredura de UI, defeito 9: plural de verdade, sem "sessão(ões)".
+        ? ` ${countLabel(data.ended_sessions, "sessão em outro aparelho foi encerrada", "sessões em outros aparelhos foram encerradas")}.`
         : "";
       toast.success(`${hasPassword ? "Senha alterada" : "Senha definida"}.${ended}`);
     } catch (err) {
@@ -321,7 +332,7 @@ function AccountSecurity() {
       const { data } = await api.post("/auth/sessions/end-others", { confirm: true });
       setOtherSessions(0);
       toast.success(data.ended_sessions
-        ? `${data.ended_sessions} sessão(ões) encerrada(s) em outros aparelhos.`
+        ? `${countLabel(data.ended_sessions, "sessão encerrada em outro aparelho", "sessões encerradas em outros aparelhos")}.`
         : "Não havia outras sessões abertas.");
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail));
@@ -396,7 +407,8 @@ function AccountSecurity() {
               ? "Verificando sessões abertas…"
               : otherSessions === 0
                 ? "Nenhuma outra sessão aberta: só este navegador está conectado."
-                : `${otherSessions} outra(s) sessão(ões) aberta(s) em outros aparelhos ou navegadores.`}
+                : `${countLabel(otherSessions, "outra sessão aberta em outro aparelho ou navegador",
+                  "outras sessões abertas em outros aparelhos ou navegadores")}.`}
           </p>
           <p className="mt-1 text-xs leading-relaxed text-slate-500">
             Use se esqueceu a conta aberta em outro computador ou se suspeita de acesso indevido.
@@ -446,7 +458,8 @@ export default function Settings() {
   const items = [
     { icon: Lock, title: "Criptografia em repouso", desc: "Nome, CPF, RG, contatos, endereço, observações, prontuários e agenda são cifrados (Fernet: AES-128 + HMAC-SHA256) antes de gravar no banco." },
     { icon: Shield, title: "Criptografia em trânsito", desc: "Toda comunicação ocorre via HTTPS/TLS." },
-    { icon: History, title: "Imutabilidade & versionamento", desc: "Prontuários não são sobrescritos: cada edição gera uma nova versão arquivada." },
+    // Varredura de UI (defeito 4): "Imutabilidade" sugeria que nada podia ser editado.
+    { icon: History, title: "Histórico de versões", desc: "Evoluções podem ser corrigidas, mas nada se perde: cada edição guarda a versão anterior." },
     { icon: KeyRound, title: "Multi-tenancy seguro", desc: "Cada profissional acessa apenas os próprios dados, com sessão isolada." },
     { icon: FileCheck, title: "Direitos do titular (LGPD)", desc: "Exportação (PDF/JSON), correção, anonimização e registro ou revogação do consentimento, com data." },
     { icon: Archive, title: "Guarda legal (CFP)", desc: "Prontuários não podem ser excluídos antes de 5 anos do último registro. Até lá, o paciente pode ser arquivado." },
@@ -506,25 +519,29 @@ export default function Settings() {
           <ScrollText className="h-4 w-4 text-[#1E3A8A]" />
           <h2 className="font-head text-lg font-bold text-[#0F172A]">Trilha de auditoria</h2>
           {/* Item 14: agora é de fato somente inclusão (gatilho no banco) e inclui leituras e IP. */}
-          <span className="text-xs text-slate-400">(somente inclusão · inclui visualizações e IP)</span>
+          {/* Acessibilidade (varredura de UI): textos da trilha em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
+          <span className="text-xs text-slate-500">(somente inclusão · inclui visualizações e IP)</span>
         </div>
         <Separator className="my-4" />
         {logs === null ? (
           <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
         ) : logs.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-400">Nenhum registro de auditoria ainda.</p>
+          <p className="py-8 text-center text-sm text-slate-500">Nenhum registro de auditoria ainda.</p>
         ) : (
-          <div className="max-h-[420px] space-y-1 overflow-y-auto psi-scroll" data-testid="audit-log">
+          // Acessibilidade (varredura de UI): lista com rolagem alcançável pelo teclado.
+          <div tabIndex={0} role="region" aria-label="Registros da trilha de auditoria"
+            className="max-h-[420px] space-y-1 overflow-y-auto psi-scroll focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+            data-testid="audit-log">
             {logs.map((l) => (
               <div key={l.log_id} className="flex items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-slate-50">
                 <Badge variant="secondary" className="w-28 shrink-0 justify-center text-[11px]">{ACTION_LABEL[l.action] || l.action}</Badge>
                 <span className="text-slate-600">{ENTITY_LABEL[l.entity_type] || l.entity_type}</span>
-                <span className="truncate text-slate-400">{l.detail}</span>
+                <span className="truncate text-slate-500">{formatAuditDetail(l.detail)}</span>
                 <span className="ml-auto flex shrink-0 items-center gap-3">
-                  <span className="hidden font-mono text-[11px] text-slate-400 md:inline" title="Endereço IP da ação">
+                  <span className="hidden font-mono text-[11px] text-slate-500 md:inline" title="Endereço IP da ação">
                     {l.ip_address || "—"}
                   </span>
-                  <span className="text-xs text-slate-400">
+                  <span className="text-xs text-slate-500">
                     {new Date(l.timestamp).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </span>
                 </span>

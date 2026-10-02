@@ -3,6 +3,7 @@ import { format, isSameMonth, isToday } from "date-fns";
 import {
   STATUS, WEEKDAY_LABELS, daysBetween, dayKey, dragState, sessionInterval, sessionsOfDay, viewRange,
 } from "@/components/agenda/agendaUtils";
+import { countLabel } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Visão MÊS (produto). Melhorias em relação à grade antiga:
@@ -33,7 +34,9 @@ export default function MonthView({ date, sessions, onCreateAt, onOpenSession, o
     <div>
       <div className="grid grid-cols-7 gap-1 text-center">
         {WEEKDAY_LABELS.map((w) => (
-          <div key={w} className="py-2 text-xs font-medium uppercase tracking-wide text-slate-400">{w}</div>
+          // Acessibilidade (varredura de UI): textos em slate-400 (contraste 2,6:1) passaram a
+          // slate-500/600 (mínimo de 4,5:1). Dias fora do mês seguem mais claros, mas legíveis.
+          <div key={w} className="py-2 text-xs font-medium uppercase tracking-wide text-slate-500">{w}</div>
         ))}
       </div>
       <div className="grid grid-cols-7 gap-1">
@@ -53,7 +56,7 @@ export default function MonthView({ date, sessions, onCreateAt, onOpenSession, o
               } ${outside ? "bg-slate-50/60" : ""} ${dropKey === key ? "ring-2 ring-[#0284C7]" : ""}`}
               data-testid={`day-${key}`}>
               <button type="button" onClick={(e) => { e.stopPropagation(); onOpenDay(day); }}
-                className={`rounded px-1 text-xs font-medium hover:underline ${today ? "text-[#1E3A8A]" : outside ? "text-slate-300" : "text-slate-500"}`}
+                className={`rounded px-1 text-xs font-medium hover:underline ${today ? "text-[#1E3A8A]" : outside ? "font-normal text-slate-500" : "text-slate-700"}`}
                 aria-label={`Abrir ${format(day, "dd/MM")} na visão Dia`}>
                 {format(day, "d")}
               </button>
@@ -83,7 +86,7 @@ export default function MonthView({ date, sessions, onCreateAt, onOpenSession, o
 
               {/* Celular: só a indicação de que há sessões no dia. */}
               {list.length > 0 && (
-                <div className="mt-1 flex flex-wrap gap-0.5 sm:hidden" aria-label={`${list.length} sessão(ões)`}>
+                <div className="mt-1 flex flex-wrap gap-0.5 sm:hidden" aria-label={countLabel(list.length, "sessão", "sessões")}>
                   {list.slice(0, 4).map((s) => (
                     <span key={s.id} className={`h-1.5 w-1.5 rounded-full ${s.status === "cancelada" ? "bg-red-300" : s.status === "realizada" ? "bg-emerald-500" : "bg-[#1E3A8A]"}`} />
                   ))}

@@ -224,7 +224,8 @@ export default function Agenda() {
             {VIEWS.map((v) => (
               <button key={v.id} type="button" onClick={() => navigateTo(v.id, date)} aria-pressed={view === v.id}
                 className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  view === v.id ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-500 hover:text-[#0F172A]"
+                  // Acessibilidade (varredura de UI): opção inativa slate-500 sobre slate-100 = 4,3:1 -> slate-600.
+                  view === v.id ? "bg-white text-[#0F172A] shadow-sm" : "text-slate-600 hover:text-[#0F172A]"
                 }`} data-testid={`view-${v.id}`}>
                 {v.label}
               </button>
@@ -245,7 +246,7 @@ export default function Agenda() {
             <h2 className="font-head text-lg font-bold text-[#0F172A]">Próximas sessões</h2>
           </div>
           <div className="mt-4 space-y-2">
-            {upcoming.length === 0 && <p className="py-6 text-center text-sm text-slate-400">Nenhuma sessão agendada.</p>}
+            {upcoming.length === 0 && <p className="py-6 text-center text-sm text-slate-500">Nenhuma sessão agendada.</p>}
             {upcoming.map((s) => (
               <button key={s.id} type="button" onClick={() => openSession(s)}
                 className="flex w-full items-center gap-3 rounded-md border border-slate-100 p-3 text-left transition-colors hover:bg-slate-50">

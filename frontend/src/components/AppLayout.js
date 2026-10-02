@@ -59,7 +59,8 @@ export default function AppLayout() {
         <div className="flex items-center gap-3 rounded-md px-3 py-2">
           <Avatar className="h-9 w-9 border border-white/20">
             <AvatarImage src={user?.picture} />
-            <AvatarFallback className="bg-[#0284C7] text-xs text-white">{initials}</AvatarFallback>
+            {/* Acessibilidade (varredura de UI): fundo #0284C7 -> #0369A1 (contraste 4,1:1 -> 5,9:1). */}
+            <AvatarFallback className="bg-[#0369A1] text-xs text-white">{initials}</AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium text-white">{user?.name || "Profissional"}</p>
