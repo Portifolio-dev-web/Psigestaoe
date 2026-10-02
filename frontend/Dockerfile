@@ -17,7 +17,9 @@
 # ---------------------------------------------------------------------------
 
 # --- Dependências (compartilhadas pelos estágios) ---
-FROM node:20-alpine AS deps
+# SEGURANÇA ALTA: Node 20 saiu de suporte em abril de 2026 (sem correções de
+# segurança desde então). Node 24 é a versão LTS ativa, com suporte até abril de 2028.
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json yarn.lock ./
 # --frozen-lockfile: instala EXATAMENTE as versões do yarn.lock e falha se ele

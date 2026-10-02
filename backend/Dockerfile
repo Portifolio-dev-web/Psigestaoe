@@ -1,7 +1,9 @@
 FROM python:3.11-slim
 
 # Logs saem na hora (sem buffer), o que importa para coleta de logs em produção.
-ENV PYTHONUNBUFFERED=1
+# PYTHONDONTWRITEBYTECODE: o Python não tenta gravar .pyc na pasta do app, que
+# agora é somente leitura para o processo (ver USER abaixo).
+ENV PYTHONUNBUFFERED=1     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
@@ -15,7 +17,19 @@ COPY requirements.txt .
 # (ficam em requirements-dev.txt).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
+# SEGURANÇA ALTA (varredura de UI/segurança): o processo NÃO roda mais como root.
+# Antes, uma falha explorável na API daria ao invasor o root do container: ler
+# e alterar qualquer arquivo, instalar ferramentas e partir dali para o resto
+# do servidor. Agora o app roda com um usuário sem privilégios (uid 10001) que:
+#   - só LÊ o código (os arquivos abaixo continuam de root): uma invasão não
+#     consegue alterar o próprio app para se manter instalada;
+#   - só escreve em /tmp (métricas do Prometheus, ver start.sh);
+#   - escuta na porta 5000 (acima de 1024, não precisa de privilégio).
+RUN groupadd --system --gid 10001 app     && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+
 COPY . .
+
+USER app
 
 EXPOSE 5000
 

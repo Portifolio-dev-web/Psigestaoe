@@ -102,3 +102,31 @@ A imagem escuta na porta `8080` (healthcheck em `/healthz`). O build:
   acrescente o domínio dele na CSP do `nginx.conf`, senão o navegador o bloqueia.
 
 A API precisa listar o endereço do frontend em `CORS_ORIGINS`.
+
+## Endereços do deploy (frontend e API)
+
+O login usa um cookie `__Host-access_token` com `SameSite=Strict`: o navegador
+só o envia quando a requisição parte do **mesmo site** da API. Por isso o
+frontend e a API precisam ficar sob o **mesmo domínio registrado** e com HTTPS.
+
+| Frontend | API | Funciona? |
+|---|---|---|
+| `https://app.seudominio.com.br` | `https://api.seudominio.com.br` | Sim (mesmo site) |
+| `https://seudominio.com.br` | `https://api.seudominio.com.br` | Sim (mesmo site) |
+| `https://psigestao.vercel.app` | `https://psigestao-api.onrender.com` | **Não**: o login parece funcionar, mas o cookie nunca é enviado e a pessoa volta para a tela de login |
+| `https://web.onrender.com` | `https://api.onrender.com` | **Não**: subdomínios de plataformas (`vercel.app`, `onrender.com`, `herokuapp.com`, `netlify.app`...) contam como sites diferentes |
+
+Use um domínio próprio e aponte os dois subdomínios para os serviços
+(registros DNS do tipo CNAME). Alternativa ainda mais simples: servir a API no
+mesmo endereço do frontend, em `/api`, por um proxy reverso; aí nem o CORS entra
+em jogo.
+
+Variáveis que precisam bater entre si:
+
+- frontend (build): `REACT_APP_BACKEND_URL=https://api.seudominio.com.br`;
+- API: `CORS_ORIGINS=https://app.seudominio.com.br` (só `https://`; a API recusa subir com `http://` em produção);
+- API: `FORWARDED_ALLOW_IPS` com o IP do proxy da plataforma (ver `backend/.env.example`).
+
+Para conferir depois do deploy: entre no sistema e, nas ferramentas do navegador
+(Aplicativo > Cookies), veja o cookie `__Host-access_token` no endereço da API;
+recarregar a página deve manter a pessoa logada.

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet, MultiFernet
 from sqlalchemy import select, text, update
@@ -41,6 +41,19 @@ from server import app
 
 
 CSRF_HEADERS = {"X-Requested-With": "psigestao"}
+
+
+def patient_data(name="Paciente de Teste", **overrides):
+    """Ficha de paciente COMPLETA e válida. Produto: todos os campos do cadastro
+    são obrigatórios, então os testes partem desta ficha e trocam só o que testam."""
+    data = {
+        "full_name": name, "cpf": "123.456.789-09", "rg": "12.345.678-9", "birth_date": "1990-01-02",
+        "education": "Superior - Completo", "marital_status": "Solteiro(a)", "profession": "Professora",
+        "phone": "(11) 91234-5678", "email": "paciente@example.com", "address": "Rua A, 1",
+        "emergency_contact": "Maria (11) 99999-0000", "initial_notes": "Primeiro contato.", "consent_terms": False,
+    }
+    data.update(overrides)
+    return data
 
 
 @pytest.fixture
@@ -87,16 +100,11 @@ async def client():
 async def test_all_backend_routes(client):
     email = "route.test@example.com"
     password = "Senha-segura-123"
-    patient_payload = {
-        "full_name": "Paciente de Teste",
-        # Segurança (varredura, item 3): o CPF agora é conferido (dígitos
-        # verificadores). 123.456.789-09 é válido; o antigo ...-00 não era.
-        "cpf": "12345678909",
-        "birth_date": "1990-01-02",
-        "phone": "11999999999",
-        "marital_status": "Casado(a)",
-        "consent_terms": True,
-    }
+    # Produto: ficha completa (todos os campos são obrigatórios).
+    # Segurança (varredura, item 3): o CPF é conferido (dígitos verificadores).
+    # 123.456.789-09 é válido; o antigo ...-00 não era.
+    patient_payload = patient_data(cpf="12345678909", phone="11999999999", marital_status="Casado(a)",
+                                   consent_terms=True)
     record_payload = {
         "session_datetime": "2026-09-15T10:00:00Z",
         "content": "Relato inicial",
@@ -308,9 +316,7 @@ async def _create_patient(client, email="crypto.test@example.com"):
     await client.post("/api/auth/register", json={
         "name": "Crypto Test", "email": email, "password": "Senha-segura-123", "terms_accepted": True,
     })
-    response = await client.post("/api/patients", json={
-        "full_name": "Paciente Cripto", "cpf": "123.456.789-09", "address": "Rua A, 1",
-    })
+    response = await client.post("/api/patients", json=patient_data("Paciente Cripto", address="Rua A, 1"))
     assert response.status_code == 200
     return response.json()["id"]
 
@@ -507,10 +513,10 @@ async def test_records_under_retention_block_deletion_but_allow_archiving(client
 async def test_patient_and_agenda_identifiers_are_encrypted_at_rest(client):
     # Item 13: o que identifica o paciente não pode ficar legível no banco.
     patient_id = await _create_patient(client, "cripto13@example.com")
-    await client.put(f"/api/patients/{patient_id}", json={
-        "full_name": "Maria Sigilosa", "phone": "11988887777", "email": "maria@example.com",
-        "emergency_contact": "Joao 11977776666", "initial_notes": "Queixa de ansiedade",
-    })
+    await client.put(f"/api/patients/{patient_id}", json=patient_data(
+        "Maria Sigilosa", phone="11988887777", email="maria@example.com",
+        emergency_contact="Joao 11977776666", initial_notes="Queixa de ansiedade",
+    ))
     await client.post("/api/sessions", json={
         "title": "Sessão com Maria Sigilosa", "patient_name": "Maria Sigilosa",
         "start": "2026-10-01T10:00:00Z", "notes": "Primeira sessão",
@@ -716,7 +722,7 @@ async def test_consent_keeps_exact_copy_of_the_accepted_term(client, monkeypatch
     await client.put("/api/auth/profile", json={"name": "Dra. Original", "crp": "06/111111"})
     await client.put("/api/consent-term", json={"body": "Cláusula personalizada: sessões online."})
 
-    created = (await client.post("/api/patients", json={"full_name": "Com Termo", "consent_terms": True})).json()
+    created = (await client.post("/api/patients", json=patient_data("Com Termo", consent_terms=True))).json()
     assert created["consent_given_at"]
     assert "Dra. Original – CRP 06/111111" in created["consent_terms_text"]
     assert "Cláusula personalizada" in created["consent_terms_text"]
@@ -729,7 +735,7 @@ async def test_consent_keeps_exact_copy_of_the_accepted_term(client, monkeypatch
     assert (await client.get("/api/consent-term")).json()["is_default"] is True
 
     # A revogação fica registrada com data; o texto exibido volta a ser o atual.
-    revoked = (await client.put(patient_url, json={"full_name": "Com Termo", "consent_terms": False})).json()
+    revoked = (await client.put(patient_url, json=patient_data("Com Termo", consent_terms=False))).json()
     assert revoked["consent_revoked_at"]
     assert "Dra. Nova" in revoked["consent_terms_text"]
     actions = {log["action"] for log in (await client.get("/api/audit")).json()["items"]}
@@ -764,7 +770,7 @@ async def test_patient_list_is_paginated_by_cursor_without_gaps_or_repeats(clien
     await _register(client, "paginas@example.com")
     created = []
     for i in range(5):
-        created.append((await client.post("/api/patients", json={"full_name": f"Paciente {i}"})).json()["id"])
+        created.append((await client.post("/api/patients", json=patient_data(f"Paciente {i}"))).json()["id"])
 
     first = (await client.get("/api/patients", params={"limit": 2})).json()
     assert len(first["items"]) == 2 and first["next_cursor"]
@@ -772,7 +778,7 @@ async def test_patient_list_is_paginated_by_cursor_without_gaps_or_repeats(clien
     assert set(first["items"][0]) == {"id", "full_name", "birth_date", "last_consultation_date", "anonymized", "archived"}
 
     # Um cadastro novo ENTRE uma página e outra não faz o cursor repetir nem pular itens.
-    await client.post("/api/patients", json={"full_name": "Chegou depois"})
+    await client.post("/api/patients", json=patient_data("Chegou depois"))
 
     async def fetch(cursor):
         params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
@@ -791,7 +797,7 @@ async def test_server_side_name_search_uses_blind_index(client):
     await _register(client, "busca@example.com")
     ids = {}
     for name in ("Maria Silva", "Marcos Pereira", "José Souza"):
-        ids[name] = (await client.post("/api/patients", json={"full_name": name})).json()["id"]
+        ids[name] = (await client.post("/api/patients", json=patient_data(name))).json()["id"]
 
     async def search(q):
         response = await client.post("/api/patients/search", json={"q": q})
@@ -804,7 +810,7 @@ async def test_server_side_name_search_uses_blind_index(client):
     assert await search("ilva") == []                                    # só prefixo de palavra
 
     # O índice acompanha edição e anonimização.
-    await client.put(f"/api/patients/{ids['Marcos Pereira']}", json={"full_name": "Pedro Pereira"})
+    await client.put(f"/api/patients/{ids['Marcos Pereira']}", json=patient_data("Pedro Pereira"))
     assert await search("mar") == ["Maria Silva"]
     await client.post(f"/api/patients/{ids['Maria Silva']}/anonymize")
     assert await search("maria") == []
@@ -1448,7 +1454,7 @@ async def test_patient_fields_are_validated(client):
     await _register(client, "validacao@example.com")
 
     async def create(**fields):
-        return await client.post("/api/patients", json={"full_name": "Paciente Válido", **fields})
+        return await client.post("/api/patients", json=patient_data("Paciente Válido", **fields))
 
     ok = await create(cpf="123.456.789-09", phone="(11) 91234-5678", email="Paciente@Example.com")
     assert ok.status_code == 200
@@ -1472,9 +1478,11 @@ async def test_patient_fields_are_validated(client):
     too_long = (await create(address="Rua " * 100)).json()["detail"][0]
     assert too_long["msg"] == "Texto longo demais (máximo de 300 caracteres)."
 
-    # Data de nascimento em branco no formulário = sem data (antes: erro 422 em inglês).
+    # Data de nascimento em branco: lida como "sem data" (antes virava erro em
+    # inglês) e recusada porque o campo é obrigatório, com mensagem clara.
     blank_date = await create(birth_date="")
-    assert blank_date.status_code == 200 and blank_date.json()["birth_date"] in ("", None)
+    assert blank_date.status_code == 422
+    assert "Data de nascimento" in blank_date.json()["detail"][0]["msg"]
 
 
 @pytest.mark.anyio
@@ -1676,7 +1684,7 @@ async def test_integrity_error_handler_hides_values():
 @pytest.mark.anyio
 async def test_writes_require_csrf_header_and_allowed_origin(client):
     await _register(client, "csrf@example.com")
-    patient_id = (await client.post("/api/patients", json={"full_name": "Paciente CSRF"})).json()["id"]
+    patient_id = (await client.post("/api/patients", json=patient_data("Paciente CSRF"))).json()["id"]
     cookie = {"Cookie": f"access_token={client.cookies['access_token']}"}
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as browser:
@@ -1823,3 +1831,77 @@ def test_count_label():
     assert server.count_label(1, "sessão encerrada", "sessões encerradas") == "1 sessão encerrada"
     assert server.count_label(0, "sessão encerrada", "sessões encerradas") == "0 sessões encerradas"
     assert server.count_label(3, "registro", "registros") == "3 registros"
+
+
+@pytest.mark.anyio
+async def test_patient_form_requires_every_field(client):
+    # Produto: nenhum campo do cadastro pode ficar em branco (nem só com espaços).
+    await _register(client, "obrigatorios@example.com")
+    only_name = await client.post("/api/patients", json={"full_name": "Só o Nome"})
+    assert only_name.status_code == 422
+    message = only_name.json()["detail"][0]["msg"]
+    for label in ("CPF", "RG", "Data de nascimento", "Escolaridade", "Estado civil", "Profissão", "Telefone",
+                  "E-mail", "Endereço", "Contato de emergência", "Notas iniciais"):
+        assert label in message, label
+
+    blanks = await client.post("/api/patients", json=patient_data(rg="   ", initial_notes="  "))
+    assert blanks.status_code == 422 and "RG, Notas iniciais" in blanks.json()["detail"][0]["msg"]
+
+    # A idade não é digitada: sai da data de nascimento (e ignora um valor enviado).
+    complete = await client.post("/api/patients", json=patient_data(birth_date="1990-01-02", age="99"))
+    assert complete.status_code == 200
+    assert complete.json()["age"] == str(server.age_from_birth_date(date(1990, 1, 2)))
+
+    # A edição segue a mesma regra.
+    pid = complete.json()["id"]
+    assert (await client.put(f"/api/patients/{pid}", json=patient_data(address=""))).status_code == 422
+
+
+def test_age_from_birth_date():
+    assert server.age_from_birth_date(date(1990, 5, 14), today=date(2026, 5, 13)) == 35  # véspera do aniversário
+    assert server.age_from_birth_date(date(1990, 5, 14), today=date(2026, 5, 14)) == 36
+    assert server.age_from_birth_date(None) is None
+
+
+@pytest.mark.anyio
+async def test_logins_and_logouts_are_audited(client, monkeypatch):
+    # Segurança alta: logins não entravam na trilha de auditoria; o profissional
+    # não tinha como perceber um acesso indevido.
+    chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
+    await _register(client, "auditoria.login@example.com")
+    credentials = {"email": "auditoria.login@example.com", "password": "Senha-segura-123"}
+    assert (await client.post("/api/auth/login", json={**credentials, "password": "errada-123"},
+                              headers={"User-Agent": chrome})).status_code == 401
+    assert (await client.post("/api/auth/login", json=credentials, headers={"User-Agent": chrome})).status_code == 200
+    # E-mail sem conta: mesma resposta, nada para mostrar (não revela quem tem conta).
+    assert (await client.post("/api/auth/login", json={**credentials, "email": "ninguem@example.com"})).status_code == 401
+
+    logs = (await client.get("/api/audit")).json()["items"]
+    actions = [(log["action"], log["detail"]) for log in logs]
+    assert ("entrar", "Login com senha (Chrome no Windows)") in actions
+    assert ("entrar_falha", "Login recusado: senha incorreta (Chrome no Windows)") in actions
+    assert all(log["ip_address"] for log in logs if log["action"].startswith("entrar"))
+
+    await client.post("/api/auth/logout")
+    await client.post("/api/auth/login", json=credentials)
+    assert any(log["action"] == "sair" for log in (await client.get("/api/audit")).json()["items"])
+
+    # Login com Google: cadastro e acesso registrados.
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    async with _second_client() as other:
+        with _google("novo.auditado@example.com", "sub-auditado"):
+            await other.post("/api/auth/google", json={"credential": "t"}, headers={"User-Agent": chrome})
+        await other.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
+        google_logs = [(log["action"], log["detail"]) for log in (await other.get("/api/audit")).json()["items"]]
+    assert ("criar", "Cadastro com Google") in google_logs
+    assert ("entrar", "Login com Google (Chrome no Windows)") in google_logs
+
+
+def test_describe_user_agent():
+    edge = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/140.0 Safari/537.36 Edg/140.0"
+    iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Safari/604.1"
+    android = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
+    assert server.describe_user_agent(edge) == "Edge no Windows"
+    assert server.describe_user_agent(iphone) == "Safari no iPhone"
+    assert server.describe_user_agent(android) == "Chrome no Android"
+    assert server.describe_user_agent("") == "navegador não identificado no sistema não identificado"

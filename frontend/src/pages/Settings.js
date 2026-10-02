@@ -34,6 +34,8 @@ const ACTION_LABEL = {
   bloquear: "Bloqueio", desbloquear: "Desbloqueio", desbloquear_falha: "Senha incorreta", encerrar: "Encerramento",
   // Segurança (varredura, Fase 2): vínculo com o Google e troca de senha.
   vincular: "Vínculo Google", alterar_senha: "Troca de senha", alterar_senha_falha: "Senha incorreta",
+  // Segurança alta (auditoria de login): cada acesso, tentativa recusada e saída.
+  entrar: "Login", entrar_falha: "Login recusado", sair: "Logout",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",

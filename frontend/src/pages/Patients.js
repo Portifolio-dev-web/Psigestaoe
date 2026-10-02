@@ -13,7 +13,7 @@ import {
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
-import { formatDateOnly } from "@/lib/datetime";
+import { ageFromBirthDate, formatDateOnly } from "@/lib/datetime";
 
 // UI Components
 import { Card } from "@/components/ui/card";
@@ -38,6 +38,27 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 // ============================================================================
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js).
 const fmtDate = formatDateOnly;
+
+// PRODUTO: TODOS os campos do cadastro são obrigatórios. Mesma lista do
+// servidor (PATIENT_REQUIRED_LABELS em backend/server.py), que recusa a ficha
+// incompleta mesmo que alguém chame a API sem esta tela. [campo, rótulo, id do campo]
+// A idade não está aqui: é calculada pela data de nascimento.
+const REQUIRED_FIELDS = [
+  ["full_name", "Nome completo", "patient-name"],
+  ["cpf", "CPF", "patient-cpf"],
+  ["rg", "RG", "patient-rg"],
+  ["birth_date", "Data de nascimento", "patient-birth-date"],
+  ["education", "Escolaridade", "patient-education"],
+  ["marital_status", "Estado civil", "patient-marital-status"],
+  ["profession", "Profissão", "patient-profession"],
+  ["phone", "Telefone", "patient-phone"],
+  ["email", "E-mail", "patient-email"],
+  ["address", "Endereço", "patient-address"],
+  ["emergency_contact", "Contato de emergência", "patient-emergency"],
+  ["initial_notes", "Notas iniciais", "patient-notes"],
+];
+// Espaços em branco contam como vazio (o `required` do navegador aceitaria "   ").
+const missingFields = (form) => REQUIRED_FIELDS.filter(([key]) => !String(form[key] ?? "").trim());
 
 const EMPTY_FORM = {
   full_name: "", cpf: "", rg: "", birth_date: "", age: "",
@@ -204,6 +225,8 @@ export default function Patients() {
   const upd = (k) => (e) => setForm({
     ...form,
     [k]: k === "consent_terms" ? e.target.value === "true" : (MASKS[k] ? MASKS[k](e.target.value) : e.target.value),
+    // PRODUTO: a idade acompanha a data de nascimento (não é mais digitada).
+    ...(k === "birth_date" ? { age: String(ageFromBirthDate(e.target.value) ?? "") } : {}),
   });
 
   // ========================================================================
@@ -213,6 +236,14 @@ export default function Patients() {
     e.preventDefault();
     // Segurança (varredura, item 2): avisa antes de enviar. O servidor confere
     // de novo (e é ele quem decide), mas assim a pessoa corrige sem esperar.
+    // PRODUTO: nenhum campo em branco. Lista tudo o que falta e leva o foco ao
+    // primeiro campo vazio, em vez de a pessoa descobrir um erro de cada vez.
+    const missing = missingFields(form);
+    if (missing.length) {
+      toast.error(`Preencha todos os campos. Faltando: ${missing.map(([, label]) => label).join(", ")}.`);
+      document.getElementById(missing[0][2])?.focus();
+      return;
+    }
     const problem = cpfProblem(form.cpf) || phoneProblem(form.phone);
     if (problem) {
       toast.error(problem);
@@ -659,7 +690,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
         <DialogHeader>
           <DialogTitle className="font-head">{editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
           {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
-          <DialogDescription>Nome, documentos, contatos e observações são criptografados antes de serem salvos.</DialogDescription>
+          <DialogDescription>
+            {/* Produto: todos os campos são obrigatórios (marcados com *). */}
+            Todos os campos são obrigatórios. Nome, documentos, contatos e observações são criptografados antes de serem salvos.
+          </DialogDescription>
         </DialogHeader>
         {/* Acessibilidade (varredura de UI): cada rótulo agora aponta para o seu campo
             (htmlFor/id). Antes 9 campos e as 2 listas de seleção não tinham nome para o
@@ -679,9 +713,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-cpf">CPF</Label>
+            <Label htmlFor="patient-cpf">CPF *</Label>
             <Input
               id="patient-cpf"
+              required
               inputMode="numeric"
               maxLength={LIMITS.cpf}
               value={form.cpf}
@@ -696,9 +731,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-rg">RG</Label>
+            <Label htmlFor="patient-rg">RG *</Label>
             <Input
               id="patient-rg"
+              required
               maxLength={LIMITS.rg}
               value={form.rg}
               onChange={onFormChange("rg")}
@@ -708,9 +744,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-birth-date">Data de nascimento</Label>
+            <Label htmlFor="patient-birth-date">Data de nascimento *</Label>
             <Input
               id="patient-birth-date"
+              required
               type="date"
               min="1900-01-01"
               max={todayISO()}
@@ -722,17 +759,19 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
+            {/* PRODUTO: idade calculada pela data de nascimento (somente leitura).
+                Antes era digitada à parte e podia contradizer a data. */}
             <Label htmlFor="patient-age">Idade</Label>
             <Input
               id="patient-age"
-              type="number"
-              min={0}
-              max={130}
-              value={form.age}
-              onChange={onFormChange("age")}
+              readOnly
+              aria-describedby="patient-age-hint"
+              value={form.age ? `${form.age} anos` : ""}
+              placeholder="Calculada pela data de nascimento"
               className="mt-1.5"
               data-testid="patient-age-input"
             />
+            <p id="patient-age-hint" className="mt-1 text-xs text-slate-500">Calculada automaticamente pela data de nascimento.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -740,9 +779,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               {/* Correção (varredura de UI, defeito 5): tinha "*" (obrigatório), mas
                   nem o formulário nem o servidor exigem o campo (cadastros vindos do
                   Google Forms podem chegar sem ele). O "*" fica só no que é exigido. */}
-              <Label htmlFor="patient-education">Escolaridade</Label>
+              <Label htmlFor="patient-education">Escolaridade *</Label>
               <select
                 id="patient-education"
+                required
                 value={form.education}
                 onChange={onFormChange("education")}
                 className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
@@ -758,9 +798,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </select>
             </div>
             <div>
-              <Label htmlFor="patient-marital-status">Estado civil</Label>
+              <Label htmlFor="patient-marital-status">Estado civil *</Label>
               <select
                 id="patient-marital-status"
+                required
                 value={form.marital_status}
                 onChange={onFormChange("marital_status")}
                 className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950"
@@ -776,9 +817,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-profession">Profissão</Label>
+            <Label htmlFor="patient-profession">Profissão *</Label>
             <Input
               id="patient-profession"
+              required
               maxLength={LIMITS.profession}
               value={form.profession}
               onChange={onFormChange("profession")}
@@ -788,9 +830,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-phone">Telefone</Label>
+            <Label htmlFor="patient-phone">Telefone *</Label>
             <Input
               id="patient-phone"
+              required
               type="tel"
               inputMode="tel"
               maxLength={LIMITS.phone}
@@ -806,9 +849,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-email">Email</Label>
+            <Label htmlFor="patient-email">Email *</Label>
             <Input
               id="patient-email"
+              required
               type="email"
               maxLength={LIMITS.email}
               value={form.email}
@@ -819,9 +863,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-address">Endereço</Label>
+            <Label htmlFor="patient-address">Endereço *</Label>
             <Input
               id="patient-address"
+              required
               maxLength={LIMITS.address}
               value={form.address}
               onChange={onFormChange("address")}
@@ -831,9 +876,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-emergency">Contato de emergência</Label>
+            <Label htmlFor="patient-emergency">Contato de emergência *</Label>
             <Input
               id="patient-emergency"
+              required
               maxLength={LIMITS.emergencyContact}
               value={form.emergency_contact}
               onChange={onFormChange("emergency_contact")}
@@ -843,9 +889,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           </div>
 
           <div>
-            <Label htmlFor="patient-notes">Notas iniciais</Label>
+            <Label htmlFor="patient-notes">Notas iniciais *</Label>
             <Textarea
               id="patient-notes"
+              required
               maxLength={LIMITS.patientNotes}
               value={form.initial_notes}
               onChange={onFormChange("initial_notes")}

@@ -579,6 +579,36 @@ def cpf_is_valid(digits: str) -> bool:
     return True
 
 
+# PRODUTO: TODOS os dados do cadastro do paciente são obrigatórios.
+# Antes só o nome era exigido, e fichas incompletas (sem contato de emergência,
+# sem telefone) chegavam ao atendimento. Rótulos na ordem do formulário, para a
+# mensagem de erro listar o que falta como a pessoa vê na tela. O nome tem
+# validação própria (validate_full_name) e a idade é CALCULADA pela data de
+# nascimento (age_from_birth_date), por isso não estão aqui.
+PATIENT_REQUIRED_LABELS = {
+    "cpf": "CPF",
+    "rg": "RG",
+    "birth_date": "Data de nascimento",
+    "education": "Escolaridade",
+    "marital_status": "Estado civil",
+    "profession": "Profissão",
+    "phone": "Telefone",
+    "email": "E-mail",
+    "address": "Endereço",
+    "emergency_contact": "Contato de emergência",
+    "initial_notes": "Notas iniciais",
+}
+
+
+def age_from_birth_date(birth_date: Optional[date], today: Optional[date] = None) -> Optional[int]:
+    """Idade em anos completos. PRODUTO: a idade não é mais digitada; sai da data
+    de nascimento, então nunca fica desatualizada nem contradiz a data."""
+    if birth_date is None:
+        return None
+    today = today or date.today()
+    return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+
+
 class PatientInput(BaseModel):
     full_name: str = Field(max_length=PATIENT_NAME_MAX)
     cpf: Optional[str] = Field(default="", max_length=20)
@@ -673,6 +703,21 @@ class PatientInput(BaseModel):
             raise ValueError("Data de nascimento inválida.")
         return value
 
+    @model_validator(mode="after")
+    def require_all_fields(self):
+        """PRODUTO: nenhum campo do cadastro pode ficar em branco.
+
+        Checado no MODELO (e não campo a campo) porque assim vale também para o
+        campo que nem foi enviado, e a resposta lista de uma vez tudo o que falta.
+        Espaços em branco contam como vazio. O frontend faz a mesma checagem antes
+        de enviar (frontend/src/pages/Patients.js); quem decide é o servidor.
+        """
+        missing = [label for field, label in PATIENT_REQUIRED_LABELS.items()
+                   if not str(getattr(self, field) or "").strip()]
+        if missing:
+            raise ValueError("Preencha todos os campos do cadastro. Faltando: " + ", ".join(missing) + ".")
+        return self
+
 
 class WebhookPatientInput(PatientInput):
     """Paciente vindo do Google Forms (webhook).
@@ -700,6 +745,14 @@ class WebhookPatientInput(PatientInput):
     @classmethod
     def validate_email_address(cls, value: Optional[str]) -> str:
         return (value or "").strip()
+
+    @model_validator(mode="after")
+    def require_all_fields(self):
+        """Campos obrigatórios NÃO se aplicam ao Google Forms: o formulário do
+        profissional pode não ter todas as perguntas, e recusar o envio perderia
+        o cadastro em silêncio (o Google não mostra o erro a ninguém). A ficha
+        entra incompleta e, ao editá-la, o profissional precisa preencher tudo."""
+        return self
 
 
 # CORREÇÃO (item 6 da auditoria): termo de consentimento por profissional.
@@ -946,7 +999,9 @@ def patient_public(p: Patient, owner: User) -> dict:
         "rg": decrypt_field(p.rg),
         # Usamos .isoformat() para transformar objetos Date em string "YYYY-MM-DD" para o JSON
         "birth_date": p.birth_date.isoformat() if p.birth_date else "",
-        "age": p.age or "",
+        # PRODUTO: idade calculada na leitura (nunca desatualizada); o valor
+        # digitado só vale para fichas antigas ou do Google Forms sem data.
+        "age": str(age_from_birth_date(p.birth_date)) if p.birth_date else (p.age or ""),
         "education": p.education or "",
         "marital_status": p.marital_status or "",
         "profession": p.profession or "",
@@ -987,7 +1042,8 @@ def _apply_patient_input(p: Patient, data: PatientInput) -> None:
     p.cpf = encrypt_field(data.cpf)
     p.rg = encrypt_field(data.rg)
     p.birth_date = data.birth_date
-    p.age = data.age
+    # PRODUTO: idade sai da data de nascimento (obrigatória no cadastro manual).
+    p.age = str(age_from_birth_date(data.birth_date)) if data.birth_date else data.age
     p.education = data.education
     p.marital_status = data.marital_status
     p.profession = data.profession
@@ -1291,9 +1347,21 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
     password_hash = user.password_hash if user and user.password_hash else _DUMMY_PASSWORD_HASH
     password_ok = await verify_password_async(data.password, password_hash)
     if not user or not user.password_hash or not password_ok:
+        # SEGURANÇA (auditoria de login): antes os logins não entravam na trilha.
+        # Uma senha errada numa conta EXISTENTE fica registrada (com IP e
+        # navegador), para o profissional perceber tentativas de acesso. E-mail
+        # inexistente não tem dono a quem mostrar; a resposta é a mesma de
+        # sempre, para não revelar quais e-mails têm conta.
+        if user:
+            reason = "senha incorreta" if user.password_hash else "conta sem senha (entra pelo Google)"
+            await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
+                            f"Login recusado: {reason} ({describe_user_agent(_audit_user_agent.get())})")
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
     set_auth_cookie(response, await open_login_session(db, user))
+    # Auditoria de login: cada acesso aparece em Configurações > Trilha de auditoria.
+    await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id,
+                    f"Login com senha ({describe_user_agent(_audit_user_agent.get())})")
 
     return {"user": public_user(user)}
 
@@ -1381,6 +1449,23 @@ async def verify_google_credential(credential: str) -> dict:
     return id_info
 
 
+def describe_user_agent(user_agent: str) -> str:
+    """"Chrome no Windows", a partir do cabeçalho User-Agent.
+
+    SEGURANÇA (auditoria de login): só para leitura humana na trilha. O texto
+    completo do User-Agent continua gravado na coluna user_agent. A ordem das
+    checagens importa: o User-Agent do Edge também contém "Chrome", o do Chrome
+    contém "Safari", o do Android contém "Linux" e o do iPhone contém "Mac OS X".
+    """
+    ua = user_agent or ""
+    browsers = (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari"))
+    systems = (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Windows", "Windows"),
+               ("Mac OS X", "macOS"), ("Linux", "Linux"))
+    browser = next((name for token, name in browsers if token in ua), "navegador não identificado")
+    system = next((name for token, name in systems if token in ua), "sistema não identificado")
+    return f"{browser} no {system}"
+
+
 def count_label(count: int, singular: str, plural: str) -> str:
     """"1 sessão encerrada" / "2 sessões encerradas".
 
@@ -1431,6 +1516,7 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
     user = (await db.execute(select(User).where(User.google_sub == google_sub))).scalar_one_or_none()
     password_discarded = False
     newly_linked = False
+    created_account = False
     if user is None:
         user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
         if user is not None:
@@ -1478,6 +1564,7 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
             email_verified_at=now_utc(),
         )
         db.add(user)
+        created_account = True
 
     await db.commit()
     await db.refresh(user)
@@ -1490,6 +1577,11 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
 
     # 4. Geração da NOSSA sessão. Nunca dependemos da sessão do Google a longo prazo.
     set_auth_cookie(response, await open_login_session(db, user))
+    # Auditoria de login (antes nem o cadastro pelo Google ficava registrado).
+    if created_account:
+        await log_audit(db, user.user_id, user.email, "criar", "usuario", user.user_id, "Cadastro com Google")
+    await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id,
+                    f"Login com Google ({describe_user_agent(_audit_user_agent.get())})")
 
     # `password_discarded` permite ao frontend explicar por que a senha antiga
     # desta conta deixou de funcionar.
@@ -1553,8 +1645,11 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
     token = request.cookies.get(auth_cookie_name())  # varredura, item 18: nome com __Host- em produção
     sess = await _session_from_token(token, db) if token else None
     if sess:
+        user = sess.user
         await db.delete(sess)
         await db.commit()
+        # Auditoria de login: a saída também fica registrada.
+        await log_audit(db, user.user_id, user.email, "sair", "sessao", user.user_id, "Logout")
 
     clear_auth_cookie(response)
     return {"ok": True}
