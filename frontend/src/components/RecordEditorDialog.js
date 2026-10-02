@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AlertTriangle, CloudOff, HardDriveDownload, Loader2, Save } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { LIMITS } from "@/lib/validation";
+import { RECORD_TEMPLATES, applyTemplate } from "@/lib/recordTemplates";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -92,6 +93,21 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
   });
 
   const set = (key) => (event) => setFields((current) => ({ ...current, [key]: event.target.value }));
+
+  // Complementares (evoluções): modelo de texto (SOAP, DAP...). Campo vazio
+  // recebe o modelo; com texto, o modelo vai para o fim (nada é apagado). O
+  // rascunho automático guarda o resultado como qualquer outra digitação.
+  const contentRef = useRef(null);
+  const insertTemplate = (template) => {
+    setFields((current) => ({ ...current, content: applyTemplate(current.content, template).slice(0, LIMITS.recordContent) }));
+    requestAnimationFrame(() => {
+      const area = contentRef.current;
+      if (area) {
+        area.focus();
+        area.setSelectionRange(area.value.length, area.value.length);
+      }
+    });
+  };
 
   const discardDraft = () => {
     draft.discard();
@@ -225,11 +241,24 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
             </div>
           </div>
           <div>
-            <Label htmlFor="record-content">Texto da evolução</Label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Label htmlFor="record-content">Texto da evolução</Label>
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Modelos de texto">
+                <span className="text-xs text-slate-500">Modelo:</span>
+                {RECORD_TEMPLATES.map((template) => (
+                  <button key={template.id} type="button" onClick={() => insertTemplate(template)} title={template.description}
+                    aria-label={`Usar o modelo ${template.label} (${template.description})`}
+                    className="rounded-full border border-slate-200 px-2.5 py-0.5 text-xs text-slate-600 transition-colors hover:border-[#1E3A8A] hover:text-[#1E3A8A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+                    data-testid={`record-template-${template.id}`}>
+                    {template.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             {/* Segurança (varredura, item 2): mesmo limite do servidor (50 mil
                 caracteres, ~10 páginas). Perto do limite aparece um contador,
                 para a anotação não ser cortada sem a pessoa perceber. */}
-            <Textarea id="record-content" value={fields.content} onChange={set("content")}
+            <Textarea id="record-content" ref={contentRef} value={fields.content} onChange={set("content")}
               maxLength={LIMITS.recordContent}
               aria-describedby={fields.content.length > LIMITS.recordContent * 0.9 ? "record-content-count" : undefined}
               rows={12} className="mt-1.5 psi-scroll font-normal leading-relaxed"

@@ -2,9 +2,9 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, X, Stethoscope, Lock,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, X, Stethoscope, Lock, Loader2,
 } from "lucide-react";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 
@@ -133,7 +133,16 @@ export default function AppLayout() {
           </Button>
         </header>
         <main className="flex-1 px-4 py-6 lg:px-8">
-          <Outlet />
+          {/* Complementares (desempenho): as telas são carregadas sob demanda
+              (App.js). Este Suspense deixa o menu e o topo na tela enquanto só
+              o conteúdo carrega, em vez de piscar a página inteira. */}
+          <Suspense fallback={(
+            <div className="flex justify-center py-16" role="status" aria-label="Carregando">
+              <Loader2 className="h-6 w-6 animate-spin text-[#1E3A8A]" />
+            </div>
+          )}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

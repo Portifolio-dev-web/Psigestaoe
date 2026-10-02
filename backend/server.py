@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import csv
 import hashlib
 import hmac
 import io
@@ -24,7 +25,8 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import jwt
 from cryptography.fernet import InvalidToken
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,20 +46,22 @@ from starlette.concurrency import run_in_threadpool
 from xml.sax.saxutils import escape
 
 import legal
+import mailer
 import observability
+import totp
 from crypto import (
     hash_token, is_fernet_token, load_fernet, load_search_key, name_search_tokens, query_search_tokens,
 )
 import rate_limit as rate_limiting
 from rate_limit import client_ip, enforce, rate_limit, require_shared_rate_limit
-from database import get_db, engine, Base
+from database import AsyncSessionLocal, get_db, engine, Base
 from environment import get_environment
 from http_security import (
     BodySizeLimitMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, integrity_error_handler,
     validation_error_handler,
 )
 from models import (
-    AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
+    AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
 )
 
 # MONITORAMENTO (escala): configura os logs antes de qualquer outra coisa,
@@ -216,7 +220,12 @@ async def lifespan(_app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
     # Varredura, itens 8 e 15: um REDIS_URL errado apareceria só como "sem limite".
     await rate_limiting.check_redis()
+    # Segurança média: rotina de manutenção (expurgo de contas encerradas no fim
+    # da guarda e aviso de token do Google Forms vencendo). Ver run_maintenance.
+    maintenance = asyncio.create_task(_maintenance_loop()) if MAINTENANCE_ENABLED else None
     yield
+    if maintenance:
+        maintenance.cancel()
 
 
 # 1. Inicializa o app UMA ÚNICA VEZ
@@ -257,6 +266,19 @@ def _load_cors_origins() -> list[str]:
 
 origins = _load_cors_origins()
 
+
+def frontend_link(path: str, token: Optional[str] = None) -> str:
+    """Endereço de uma tela do frontend, para os links enviados por e-mail.
+
+    Base: FRONTEND_URL ou, sem ela, a primeira origem de CORS_ORIGINS (que já
+    é o endereço do frontend, e em produção só aceita https://). O token vai
+    no FRAGMENTO (#token=...): o navegador não envia o fragmento a servidor
+    nenhum, então o link não fica gravado em logs de acesso, proxies ou no
+    cabeçalho Referer.
+    """
+    base = (os.environ.get("FRONTEND_URL", "").strip() or origins[0]).rstrip("/")
+    return f"{base}{path}#token={token}" if token else f"{base}{path}"
+
 # SEGURANÇA (varredura, item 3): limite de tamanho do corpo (detalhes em
 # http_security.py). Registrado ANTES do CORS para ficar por dentro dele: a
 # resposta 413 também leva os cabeçalhos de CORS, e o frontend consegue ler
@@ -279,7 +301,9 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Requested-With", "X-Request-ID"],
     # Monitoramento: o navegador só deixa o frontend ler o ID da requisição
     # (para mostrar ao usuário ao reportar um erro) se ele for exposto aqui.
-    expose_headers=["X-Request-ID"],
+    # Content-Disposition: o nome dos arquivos baixados (ZIP da conta, CSV da
+    # auditoria), que leva a data; sem expor, o navegador esconde o cabeçalho.
+    expose_headers=["X-Request-ID", "Content-Disposition"],
     # O navegador guarda a licença do preflight por 10 min, em vez de
     # perguntar de novo antes de cada escrita.
     max_age=600,
@@ -335,6 +359,9 @@ require_shared_rate_limit(ENVIRONMENT)
 
 # Aviso de conformidade: dados do controlador/encarregado em branco na política.
 legal.warn_if_incomplete(ENVIRONMENT)
+# Segurança média: cadastro e recuperação de senha dependem de e-mail; em
+# produção o servidor não sobe sem SMTP criptografado (ver mailer.py).
+mailer.check_mail_config(ENVIRONMENT)
 
 # 3. Cria e inclui as suas rotas
 api_router = APIRouter(prefix="/api")
@@ -405,7 +432,10 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
     # SEGURANÇA (varredura, itens 7 e 14): o ID da sessão vai SÓ no JWT (cookie);
     # o banco guarda o hash dele. Ver UserSession.token_hash em models.py.
     db.add(UserSession(token_hash=hash_token(session_id), user_id=user.user_id, expires_at=expires_at,
-                       last_activity_at=issued_at))  # produto: ponto de partida da inatividade
+                       last_activity_at=issued_at,  # produto: ponto de partida da inatividade
+                       # Segurança média (sessões com aparelho): de onde a sessão foi aberta,
+                       # para o profissional reconhecer (e encerrar) um acesso estranho.
+                       device=describe_user_agent(_audit_user_agent.get()), ip_address=_audit_ip.get()))
     await db.commit()
 
     payload = {
@@ -500,9 +530,17 @@ def validate_password_strength(password: str) -> str:
 
 
 class RegisterInput(BaseModel):
+    """Cadastro com senha, PASSO 1 (segurança média + backlog: confirmação de e-mail).
+
+    A senha NÃO vem aqui: ela é criada no passo 2, depois de a pessoa abrir o
+    link que chega no e-mail (SignupConfirmInput). Antes, o cadastro criava a
+    conta na hora com a senha digitada, e isso permitia:
+      - criar uma conta com o e-mail de outra pessoa (que depois a usaria com
+        uma senha conhecida pelo atacante);
+      - descobrir quais e-mails têm conta ("E-mail já cadastrado").
+    """
     name: str
     email: EmailStr
-    password: str
     terms_accepted: bool = False
 
     @field_validator("name")
@@ -513,10 +551,61 @@ class RegisterInput(BaseModel):
             raise ValueError("Informe um nome entre 1 e 120 caracteres.")
         return value
 
+
+class EmailLinkCheckInput(BaseModel):
+    """Confere um link recebido por e-mail antes de mostrar o formulário."""
+    token: str = Field(min_length=20, max_length=128)
+    purpose: Literal["signup", "password_reset"]
+
+
+class SignupConfirmInput(BaseModel):
+    """Cadastro com senha, PASSO 2: o link do e-mail + a senha escolhida."""
+    token: str = Field(min_length=20, max_length=128)
+    password: str
+
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:
         return validate_password_strength(value)
+
+
+class ForgotPasswordInput(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordInput(BaseModel):
+    token: str = Field(min_length=20, max_length=128)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+
+class MfaLoginInput(BaseModel):
+    """Login, PASSO 2 de quem tem verificação em duas etapas."""
+    mfa_token: str = Field(max_length=2048)
+    # 6 dígitos do aplicativo ou um código de recuperação ("k7m2-p9xq-4tbn-h3wd").
+    code: str = Field(max_length=32)
+
+
+class MfaCodeInput(BaseModel):
+    code: str = Field(max_length=32)
+
+
+class MfaDisableInput(BaseModel):
+    code: str = Field(max_length=32)
+    password: str = Field(max_length=256)
+
+
+class CloseAccountInput(BaseModel):
+    """Encerramento da conta: a pessoa digita ENCERRAR e confirma quem é."""
+    confirmation: str = Field(max_length=32)
+    password: Optional[str] = Field(default=None, max_length=256)
+    credential: Optional[str] = Field(default=None, max_length=8192)
+    code: Optional[str] = Field(default=None, max_length=32)
+
 
 class LoginInput(BaseModel):
     email: EmailStr
@@ -1103,6 +1192,10 @@ def public_user(u: User) -> dict:
         # (senha para quem tem; Google para quem só entra pelo Google).
         "lock_minutes": u.lock_minutes or DEFAULT_LOCK_MINUTES,
         "has_password": bool(u.password_hash),
+        # Segurança (backlog): verificação em duas etapas e e-mail comprovado.
+        "mfa_enabled": u.mfa_enabled_at is not None,
+        "mfa_recovery_codes_left": len(json.loads(u.mfa_recovery_codes or "[]")) if u.mfa_enabled_at else 0,
+        "email_verified": u.email_verified_at is not None,
         # Recursos ligados/desligados nesta implantação (o frontend esconde o
         # que estiver desligado, ex.: o cadastro de nome/CRP nas Configurações).
         "features": {"professional_identification": SHOW_PROFESSIONAL_IDENTIFICATION},
@@ -1288,52 +1381,221 @@ async def get_active_user(user: User = Depends(get_current_user)) -> User:
 # requisições por IP (ver rate_limit.py). Valores pensados para não atrapalhar
 # o uso real nem o desenvolvimento, mas travar automação.
 
+# ---------------------------------------------------------------------------
+# SEGURANÇA MÉDIA + backlog: links enviados por e-mail
+# ---------------------------------------------------------------------------
+# Usados no cadastro (confirmação do e-mail) e no "Esqueci minha senha". Cada
+# link é de uso único, vence sozinho e pedir um novo invalida os anteriores.
+# O banco guarda só o hash do token (models.EmailToken).
+SIGNUP, PASSWORD_RESET = "signup", "password_reset"
+SIGNUP_LINK_HOURS = 24
+RESET_LINK_MINUTES = 60
+INVALID_LINK_DETAIL = {"code": "invalid_link",
+                       "msg": "Este link é inválido, já foi usado ou venceu. Peça um novo."}
+
+
+async def _issue_email_token(db: AsyncSession, purpose: str, email: str, *, lifetime: timedelta,
+                             user_id: Optional[str] = None, payload: Optional[dict] = None) -> str:
+    """Cria um link novo (e apaga os anteriores do mesmo e-mail e finalidade)."""
+    await db.execute(delete(EmailToken).where(EmailToken.email == email, EmailToken.purpose == purpose))
+    token = secrets.token_urlsafe(32)
+    db.add(EmailToken(
+        purpose=purpose, token_hash=hash_token(token), email=email, user_id=user_id,
+        payload=encrypt_field(json.dumps(payload, ensure_ascii=False)) if payload else "",
+        expires_at=now_utc() + lifetime,
+    ))
+    await db.commit()
+    return token
+
+
+async def _valid_email_token(db: AsyncSession, token: str, purpose: str) -> EmailToken:
+    row = (await db.execute(select(EmailToken).where(
+        EmailToken.token_hash == hash_token(token), EmailToken.purpose == purpose,
+    ))).scalar_one_or_none()
+    if row is None or row.used_at is not None or _as_utc(row.expires_at) <= now_utc():
+        raise HTTPException(status_code=400, detail=INVALID_LINK_DETAIL)
+    return row
+
+
+async def _consume_email_token(db: AsyncSession, row: EmailToken) -> None:
+    """Marca o link como usado. Atômico: dois envios simultâneos do mesmo link
+    (duplo clique) não passam os dois; o segundo recebe "link inválido"."""
+    result = await db.execute(
+        update(EmailToken).where(EmailToken.id == row.id, EmailToken.used_at.is_(None))
+        .values(used_at=now_utc()).execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=INVALID_LINK_DETAIL)
+
+
+def _token_payload(row: EmailToken) -> dict:
+    try:
+        return json.loads(decrypt_field(row.payload)) if row.payload else {}
+    except ValueError:
+        return {}
+
+
+def _when_and_where() -> tuple[str, str]:
+    """"Quando" e "onde" para os avisos de segurança por e-mail."""
+    moment = now_utc()
+    try:
+        from zoneinfo import ZoneInfo
+        when = moment.astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y às %H:%M (horário de Brasília)")
+    except Exception:  # sem base de fusos no sistema (ex.: Windows sem tzdata)
+        when = moment.strftime("%d/%m/%Y às %H:%M (UTC)")
+    ip = _audit_ip.get()
+    where = describe_user_agent(_audit_user_agent.get()) + (f", IP {ip}" if ip else "")
+    return when, where
+
+
+def _security_notice(user: User, subject: str, what: str) -> "mailer.OutgoingEmail":
+    when, where = _when_and_where()
+    return mailer.security_notice(user.email, user.name or "", subject, what, when, where)
+
+
 @api_router.post("/auth/register", dependencies=[Depends(rate_limit("register", 5, 600))])
-async def register_user(data: RegisterInput, response: Response, db: AsyncSession = Depends(get_db)):
+async def register_user(data: RegisterInput, background: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Cadastro com senha, passo 1: manda o link de confirmação por e-mail.
+
+    A resposta é SEMPRE a mesma ("enviamos um link"), exista ou não uma conta
+    com o e-mail; quem já tem conta recebe, no e-mail, os atalhos para entrar
+    ou recuperar a senha. Assim o cadastro não revela quais e-mails têm conta
+    (antes: "E-mail já cadastrado."). O e-mail sai depois da resposta
+    (BackgroundTasks), para o tempo de resposta também não revelar nada.
+    """
     if not data.terms_accepted:
         raise HTTPException(status_code=400, detail="É necessário aceitar os Termos de Privacidade (LGPD).")
 
     email = data.email.lower().strip()
+    # Além do limite por IP: no máximo 3 pedidos por e-mail por hora, para o
+    # cadastro não virar ferramenta de encher a caixa de alguém de e-mails.
+    await enforce(f"register-email:{email}", 3, 3600)
 
-    # Verifica se já existe
-    stmt = select(User).where(User.email == email)
-    result = await db.execute(stmt)
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if existing:
+        mail = mailer.signup_existing_account(email, frontend_link("/login"), frontend_link("/esqueci-senha"))
+    else:
+        token = await _issue_email_token(db, SIGNUP, email, lifetime=timedelta(hours=SIGNUP_LINK_HOURS), payload={
+            "name": data.name,
+            # Item 16: a versão da política aceita no formulário (evidência gravada na confirmação).
+            "terms_version": legal.PRIVACY_POLICY_VERSION,
+            "terms_accepted_at": now_utc().isoformat(),
+        })
+        mail = mailer.signup_confirmation(email, data.name, frontend_link("/criar-senha", token), SIGNUP_LINK_HOURS)
+    background.add_task(mailer.send_email, mail)
+    return {"status": "check_email", "email": email}
 
-    # Cria o novo usuário (senha já validada pela política do item 10 em RegisterInput)
+
+@api_router.post("/auth/email-link/check", dependencies=[Depends(rate_limit("email-link", 30, 600))])
+async def check_email_link(data: EmailLinkCheckInput, db: AsyncSession = Depends(get_db)):
+    """A tela de "criar senha"/"nova senha" confere o link antes de mostrar o
+    formulário (e mostra para qual e-mail ele vale)."""
+    row = await _valid_email_token(db, data.token, data.purpose)
+    return {"email": row.email, "name": _token_payload(row).get("name", "")}
+
+
+@api_router.post("/auth/register/confirm", dependencies=[Depends(rate_limit("register-confirm", 10, 600))])
+async def confirm_signup(data: SignupConfirmInput, response: Response, db: AsyncSession = Depends(get_db)):
+    """Cadastro com senha, passo 2: o link do e-mail + a senha. Só aqui a conta
+    nasce, já com o e-mail comprovado (email_verified_at)."""
+    row = await _valid_email_token(db, data.token, SIGNUP)
+    payload = _token_payload(row)
+    already = (await db.execute(select(User).where(User.email == row.email))).scalar_one_or_none()
+    await _consume_email_token(db, row)
+    if already:
+        # A conta foi criada nesse meio-tempo (ex.: pelo login com Google).
+        await db.commit()
+        raise HTTPException(status_code=409, detail=(
+            "Este e-mail já tem uma conta. Entre pelo login (ou use “Esqueci minha senha”)."))
+
+    try:
+        accepted_at = datetime.fromisoformat(payload.get("terms_accepted_at", ""))
+    except ValueError:
+        accepted_at = now_utc()
     new_user = User(
-        email=email,
-        name=data.name,
+        email=row.email,
+        name=payload.get("name", ""),
         password_hash=await hash_password_async(data.password),  # escala: fora do event loop
         auth_provider="email",
-        # Item 16: o aceite marcado no formulário vale para a versão vigente
-        # da política (a página de cadastro linka exatamente este texto).
         terms_accepted=True,
-        terms_version=legal.PRIVACY_POLICY_VERSION,
-        terms_accepted_at=now_utc(),
+        terms_version=payload.get("terms_version") or legal.PRIVACY_POLICY_VERSION,
+        terms_accepted_at=accepted_at,
+        # A pessoa abriu o link enviado a este e-mail: a posse está comprovada.
+        email_verified_at=now_utc(),
     )
-
     db.add(new_user)
     try:
         await db.commit()
     except IntegrityError:
-        # SEGURANÇA (varredura, item 9): dois cadastros SIMULTÂNEOS com o mesmo
-        # e-mail passavam juntos pela checagem acima; o segundo batia na regra
-        # de e-mail único do banco e virava erro 500. Agora recebe a mesma
-        # resposta de um e-mail já cadastrado.
+        # Varredura, item 9: duas confirmações simultâneas batem na regra de e-mail único.
         await db.rollback()
-        raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
-    await db.refresh(new_user) # Atualiza o objeto com os dados gerados pelo banco (ex: user_id)
+        raise HTTPException(status_code=409, detail=(
+            "Este e-mail já tem uma conta. Entre pelo login (ou use “Esqueci minha senha”)."))
+    await db.refresh(new_user)
 
     set_auth_cookie(response, await open_login_session(db, new_user))
-
-    await log_audit(db, new_user.user_id, email, "criar", "usuario", new_user.user_id, "Cadastro de profissional")
+    await log_audit(db, new_user.user_id, new_user.email, "criar", "usuario", new_user.user_id,
+                    "Cadastro de profissional (e-mail confirmado)")
     # Evidência do aceite: versão aceita + data/IP (gravados pelo log_audit).
-    await log_audit(db, new_user.user_id, email, "aceitar", "termos", new_user.user_id,
-                    f"Política de Privacidade versão {legal.PRIVACY_POLICY_VERSION}")
-
+    await log_audit(db, new_user.user_id, new_user.email, "aceitar", "termos", new_user.user_id,
+                    f"Política de Privacidade versão {new_user.terms_version}")
     return {"user": public_user(new_user)}
+
+
+@api_router.post("/auth/password/forgot", dependencies=[Depends(rate_limit("forgot", 5, 600))])
+async def forgot_password(data: ForgotPasswordInput, background: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """"Esqueci minha senha" (segurança média). Antes não existia: quem
+    esquecia a senha perdia o acesso aos prontuários.
+
+    Mesma resposta para qualquer e-mail (não revela quem tem conta). O link
+    vale 1 hora, uma vez. Quem só entra pelo Google também pode usar: o link
+    prova a posse do e-mail, e a pessoa passa a ter uma senha.
+    """
+    email = data.email.lower().strip()
+    await enforce(f"forgot-email:{email}", 3, 3600)
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if user and user.closed_at is None:
+        token = await _issue_email_token(db, PASSWORD_RESET, email, user_id=user.user_id,
+                                         lifetime=timedelta(minutes=RESET_LINK_MINUTES))
+        background.add_task(mailer.send_email, mailer.password_reset(
+            email, user.name or "", frontend_link("/redefinir-senha", token), RESET_LINK_MINUTES,
+            bool(user.password_hash)))
+        # O dono vê na trilha que alguém pediu a troca (com IP), mesmo sem usar o link.
+        await log_audit(db, user.user_id, user.email, "solicitar_senha", "usuario", user.user_id,
+                        "Link de redefinição de senha enviado por e-mail")
+    return {"status": "check_email"}
+
+
+@api_router.post("/auth/password/reset", dependencies=[Depends(rate_limit("password-reset", 10, 600))])
+async def reset_password(data: ResetPasswordInput, background: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Nova senha pelo link do e-mail. Encerra TODAS as sessões abertas (quem
+    tinha a senha antiga perde o acesso) e NÃO entra direto: a pessoa faz o
+    login normal, inclusive a verificação em duas etapas, se ativa."""
+    row = await _valid_email_token(db, data.token, PASSWORD_RESET)
+    user = await db.get(User, row.user_id) if row.user_id else None
+    if user is None or user.closed_at is not None or user.email != row.email:
+        raise HTTPException(status_code=400, detail=INVALID_LINK_DETAIL)
+    await _consume_email_token(db, row)
+
+    had_password = bool(user.password_hash)
+    user.password_hash = await hash_password_async(data.new_password)
+    # O link chegou no e-mail da conta: a posse do e-mail está comprovada.
+    user.email_verified_at = user.email_verified_at or now_utc()
+    await db.commit()
+
+    ended = await end_login_sessions(db, user)
+    # Outros links de redefinição que ainda estivessem valendo morrem aqui.
+    await db.execute(delete(EmailToken).where(EmailToken.user_id == user.user_id,
+                                              EmailToken.purpose == PASSWORD_RESET))
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "alterar_senha", "usuario", user.user_id,
+                    f"Senha {'redefinida' if had_password else 'criada'} pelo link enviado por e-mail; "
+                    f"{count_label(ended, 'sessão encerrada', 'sessões encerradas')}")
+    background.add_task(mailer.send_email, _security_notice(
+        user, "Senha alterada", "A senha da sua conta foi redefinida pelo link enviado por e-mail."))
+    return {"ok": True}
+
 
 @api_router.post("/auth/login", dependencies=[Depends(rate_limit("login", 10, 60))])
 async def login(data: LoginInput, response: Response, db: AsyncSession = Depends(get_db)):
@@ -1363,6 +1625,11 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
             await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
                             f"Login recusado: {reason} ({describe_user_agent(_audit_user_agent.get())})")
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
+
+    if user.mfa_enabled_at is not None:
+        # Segurança (backlog: MFA): senha certa, mas a sessão só nasce depois
+        # do código do aplicativo (POST /auth/login/mfa). Nada de cookie aqui.
+        return {"mfa_required": True, "mfa_token": _mfa_login_token(user)}
 
     set_auth_cookie(response, await open_login_session(db, user))
     # Auditoria de login: cada acesso aparece em Configurações > Trilha de auditoria.
@@ -1792,8 +2059,8 @@ async def update_lock_settings(data: LockSettingsInput, user: User = Depends(get
 # outro lugar, o profissional não tinha o que fazer.
 
 @api_router.post("/auth/password", dependencies=[Depends(rate_limit("password", 5, 900))])
-async def change_password(data: PasswordChangeInput, sess: UserSession = Depends(get_current_session),
-                          db: AsyncSession = Depends(get_db)):
+async def change_password(data: PasswordChangeInput, background: BackgroundTasks,
+                          sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
     user = sess.user
     # Além do limite por IP (acima), limite por CONTA: um cookie roubado usado
     # de vários IPs não ganha mais tentativas de adivinhar a senha atual.
@@ -1823,19 +2090,263 @@ async def change_password(data: PasswordChangeInput, sess: UserSession = Depends
     await log_audit(db, user.user_id, user.email, "alterar_senha", "usuario", user.user_id,
                     f"Senha {'alterada' if had_password else 'definida'}; "
                     f"{count_label(ended, 'outra sessão encerrada', 'outras sessões encerradas')}")
+    # Segurança média: o dono fica sabendo da troca mesmo se não foi ele.
+    background.add_task(mailer.send_email, _security_notice(
+        user, "Senha alterada", f"A senha da sua conta foi {'alterada' if had_password else 'definida'} "
+                                "em Configurações."))
     await db.refresh(user)
     return {"user": public_user(user), "ended_sessions": ended}
 
 
+# ---------------------------------------------------------------------------
+# SEGURANÇA (backlog: MFA): verificação em duas etapas
+# ---------------------------------------------------------------------------
+# Opcional (decisão de produto): o profissional ativa em Configurações >
+# Minha conta, e o painel recomenda ativar enquanto estiver desligada. Vale
+# para o login com SENHA; quem entra pelo Google usa a proteção da própria
+# conta Google.
+#
+# Login com MFA, em dois passos:
+#   1. POST /auth/login com e-mail e senha certos -> NÃO cria sessão; devolve
+#      um `mfa_token` que vale 5 minutos e só serve para o passo 2;
+#   2. POST /auth/login/mfa com o mfa_token + o código do aplicativo (ou um
+#      código de recuperação) -> aí sim a sessão é criada.
+MFA_LOGIN_MINUTES = 5
+MFA_AUDIENCE = "psigestao-mfa"
+MFA_INVALID_DETAIL = {"code": "mfa_invalid", "msg": "Código incorreto. Confira o aplicativo e tente de novo."}
+
+
+def _mfa_login_token(user: User) -> str:
+    issued_at = now_utc()
+    return jwt.encode({
+        "sub": user.user_id, "iat": issued_at, "exp": issued_at + timedelta(minutes=MFA_LOGIN_MINUTES),
+        # Destinatário próprio: este token NUNCA é aceito como sessão (que exige
+        # aud=psigestao-web e sid), e o de sessão nunca é aceito aqui.
+        "iss": JWT_ISSUER, "aud": MFA_AUDIENCE, "jti": secrets.token_urlsafe(8),
+    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _mfa_login_user_id(token: str) -> str:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], issuer=JWT_ISSUER,
+                             audience=MFA_AUDIENCE, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail={
+            "code": "mfa_expired", "msg": "O tempo para digitar o código acabou. Entre de novo com a senha."})
+    return str(payload["sub"])
+
+
+def _recovery_hashes(user: User) -> list:
+    try:
+        return json.loads(user.mfa_recovery_codes or "[]")
+    except ValueError:
+        return []
+
+
+async def _check_mfa_code(db: AsyncSession, user: User, code: str) -> Optional[str]:
+    """Confere o código do aplicativo ou um código de recuperação.
+
+    Devolve "totp", "recovery" ou None. Os dois casos gravam de forma ATÔMICA
+    (UPDATE com condição), para o mesmo código não valer duas vezes nem em
+    requisições simultâneas.
+    """
+    if not user.mfa_secret or not code:
+        return None
+    step = totp.verify(decrypt_field(user.mfa_secret), code, user.mfa_last_step)
+    if step is not None:
+        result = await db.execute(
+            update(User).where(User.user_id == user.user_id,
+                               (User.mfa_last_step.is_(None)) | (User.mfa_last_step < step))
+            .values(mfa_last_step=step).execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        if result.rowcount == 1:
+            user.mfa_last_step = step
+            return "totp"
+        return None
+
+    hashes = _recovery_hashes(user)
+    candidate = totp.hash_recovery_code(code)
+    if candidate in hashes:
+        remaining = json.dumps([h for h in hashes if h != candidate])
+        result = await db.execute(
+            update(User).where(User.user_id == user.user_id, User.mfa_recovery_codes == user.mfa_recovery_codes)
+            .values(mfa_recovery_codes=remaining).execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        if result.rowcount == 1:
+            user.mfa_recovery_codes = remaining
+            return "recovery"
+    return None
+
+
+@api_router.post("/auth/login/mfa", dependencies=[Depends(rate_limit("login-mfa", 10, 60))])
+async def login_mfa(data: MfaLoginInput, background: BackgroundTasks, response: Response,
+                    db: AsyncSession = Depends(get_db)):
+    user_id = _mfa_login_user_id(data.mfa_token)
+    # Força bruta dos 6 dígitos (quem já tem a senha): 5 tentativas a cada
+    # 15 min e 20 por dia, por CONTA. Com ~3 códigos válidos por vez, a chance
+    # de acertar por sorte fica perto de 0,006% ao dia.
+    await enforce(f"mfa-user:{user_id}", 5, 900)
+    await enforce(f"mfa-user-day:{user_id}", 20, 86400)
+    user = await db.get(User, user_id)
+    if user is None or user.closed_at is not None or user.mfa_enabled_at is None:
+        raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
+
+    method = await _check_mfa_code(db, user, data.code)
+    device = describe_user_agent(_audit_user_agent.get())
+    if method is None:
+        await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
+                        f"Login recusado: código de verificação incorreto ({device})")
+        raise HTTPException(status_code=401, detail=MFA_INVALID_DETAIL)
+
+    set_auth_cookie(response, await open_login_session(db, user))
+    detail = f"Login com senha e verificação em duas etapas ({device})"
+    left = len(_recovery_hashes(user))
+    if method == "recovery":
+        detail += f"; código de recuperação usado ({count_label(left, 'restante', 'restantes')})"
+        background.add_task(mailer.send_email, _security_notice(
+            user, "Código de recuperação usado",
+            f"Um código de recuperação foi usado para entrar na sua conta. Restam {left}."))
+    await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id, detail)
+    return {"user": public_user(user)}
+
+
+@api_router.post("/auth/mfa/setup")
+async def mfa_setup(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Começa a configuração: segredo novo + endereço do QR code. Só passa a
+    valer depois de confirmado com um código (POST /auth/mfa/enable)."""
+    if user.mfa_enabled_at is not None:
+        raise HTTPException(status_code=409, detail="A verificação em duas etapas já está ativa.")
+    if not user.password_hash:
+        raise HTTPException(status_code=400, detail=(
+            "Quem entra pelo Google usa a verificação da própria conta Google. Para ativar aqui, "
+            "defina antes uma senha."))
+    secret = totp.new_secret()
+    user.mfa_secret = encrypt_field(secret)
+    user.mfa_last_step = None
+    await db.commit()
+    return {"secret": secret, "otpauth_uri": totp.provisioning_uri(secret, user.email)}
+
+
+@api_router.post("/auth/mfa/enable", dependencies=[Depends(rate_limit("mfa-manage", 10, 300))])
+async def mfa_enable(data: MfaCodeInput, background: BackgroundTasks, user: User = Depends(get_active_user),
+                     db: AsyncSession = Depends(get_db)):
+    if user.mfa_enabled_at is not None:
+        raise HTTPException(status_code=409, detail="A verificação em duas etapas já está ativa.")
+    if not user.mfa_secret:
+        raise HTTPException(status_code=400, detail="Comece a configuração de novo.")
+    step = totp.verify(decrypt_field(user.mfa_secret), data.code)
+    if step is None:
+        raise HTTPException(status_code=400, detail=MFA_INVALID_DETAIL)
+
+    codes = totp.new_recovery_codes()
+    user.mfa_enabled_at = now_utc()
+    user.mfa_last_step = step
+    user.mfa_recovery_codes = json.dumps([totp.hash_recovery_code(c) for c in codes])
+    await db.commit()
+    await db.refresh(user)
+    await log_audit(db, user.user_id, user.email, "mfa_ativar", "usuario", user.user_id,
+                    "Verificação em duas etapas ativada")
+    background.add_task(mailer.send_email, _security_notice(
+        user, "Verificação em duas etapas ativada",
+        "A verificação em duas etapas foi ativada. A partir de agora, o login com senha pede também o "
+        "código do aplicativo autenticador."))
+    # Os códigos de recuperação aparecem UMA vez (o banco só tem o hash).
+    return {"user": public_user(user), "recovery_codes": codes}
+
+
+@api_router.post("/auth/mfa/disable", dependencies=[Depends(rate_limit("mfa-manage", 10, 300))])
+async def mfa_disable(data: MfaDisableInput, background: BackgroundTasks, user: User = Depends(get_active_user),
+                      db: AsyncSession = Depends(get_db)):
+    """Desligar exige a senha E um código: quem achar o computador logado
+    não consegue desligar a proteção."""
+    if user.mfa_enabled_at is None:
+        raise HTTPException(status_code=400, detail="A verificação em duas etapas não está ativa.")
+    await enforce(f"mfa-manage-user:{user.user_id}", 5, 900)
+    if not user.password_hash or not await verify_password_async(data.password, user.password_hash):
+        raise HTTPException(status_code=403, detail={"code": "invalid_current_password",
+                                                     "msg": "A senha atual está incorreta."})
+    if await _check_mfa_code(db, user, data.code) is None:
+        raise HTTPException(status_code=403, detail=MFA_INVALID_DETAIL)
+
+    user.mfa_secret = None
+    user.mfa_enabled_at = None
+    user.mfa_last_step = None
+    user.mfa_recovery_codes = None
+    await db.commit()
+    await db.refresh(user)
+    await log_audit(db, user.user_id, user.email, "mfa_desativar", "usuario", user.user_id,
+                    "Verificação em duas etapas desativada")
+    background.add_task(mailer.send_email, _security_notice(
+        user, "Verificação em duas etapas desativada",
+        "A verificação em duas etapas foi desativada. O login volta a pedir só a senha."))
+    return {"user": public_user(user)}
+
+
+@api_router.post("/auth/mfa/recovery-codes", dependencies=[Depends(rate_limit("mfa-manage", 10, 300))])
+async def mfa_new_recovery_codes(data: MfaCodeInput, user: User = Depends(get_active_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Gera códigos de recuperação novos (os anteriores deixam de valer)."""
+    if user.mfa_enabled_at is None:
+        raise HTTPException(status_code=400, detail="A verificação em duas etapas não está ativa.")
+    await enforce(f"mfa-manage-user:{user.user_id}", 5, 900)
+    if await _check_mfa_code(db, user, data.code) != "totp":
+        # Só o código do APLICATIVO: um código de recuperação não gera outros.
+        raise HTTPException(status_code=403, detail=MFA_INVALID_DETAIL)
+    codes = totp.new_recovery_codes()
+    user.mfa_recovery_codes = json.dumps([totp.hash_recovery_code(c) for c in codes])
+    await db.commit()
+    await db.refresh(user)
+    await log_audit(db, user.user_id, user.email, "mfa_codigos", "usuario", user.user_id,
+                    "Novos códigos de recuperação gerados (os anteriores foram invalidados)")
+    return {"user": public_user(user), "recovery_codes": codes}
+
+
+# ---------------------------------------------------------------------------
+# SEGURANÇA MÉDIA: sessões com aparelho
+# ---------------------------------------------------------------------------
+# Antes a tela mostrava só QUANTAS outras sessões existiam. Agora lista cada
+# uma com aparelho, IP e último uso, e permite encerrar uma de cada vez.
+
 @api_router.get("/auth/sessions")
-async def count_other_sessions(sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
-    """Quantas OUTRAS sessões desta conta estão abertas (outros aparelhos ou navegadores)."""
-    stmt = select(func.count()).select_from(UserSession).where(
-        UserSession.user_id == sess.user_id,
-        UserSession.token_hash != sess.token_hash,
-        UserSession.expires_at > now_utc(),
-    )
-    return {"other_sessions": (await db.execute(stmt)).scalar_one()}
+async def list_login_sessions(sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(UserSession).where(
+        UserSession.user_id == sess.user_id, UserSession.expires_at > now_utc(),
+    ))).scalars().all()
+    items = [{
+        "id": s.public_id,
+        "device": s.device or "Aparelho não identificado",
+        "ip_address": s.ip_address or "",
+        "created_at": _iso(s.created_at),
+        "last_activity_at": _iso(s.last_activity_at or s.created_at),
+        "current": s.token_hash == sess.token_hash,
+    } for s in rows]
+    # Esta sessão primeiro; depois a usada mais recentemente.
+    items = [i for i in items if i["current"]] + sorted(
+        [i for i in items if not i["current"]], key=lambda i: i["last_activity_at"], reverse=True)
+    # `other_sessions`: mantido para quem ainda lê só a contagem.
+    return {"other_sessions": sum(1 for i in items if not i["current"]), "sessions": items}
+
+
+@api_router.post("/auth/sessions/{session_id}/end")
+async def end_one_session(data: EndSessionsInput, session_id: str = PathParam(max_length=64),
+                          sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
+    """Encerra UMA sessão de outro aparelho (ex.: o computador da clínica)."""
+    if session_id == sess.public_id:
+        raise HTTPException(status_code=400, detail="Para sair deste aparelho, use o botão Sair.")
+    target = (await db.execute(select(UserSession).where(
+        UserSession.user_id == sess.user_id, UserSession.public_id == session_id,
+    ))).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Sessão não encontrada (talvez já tenha sido encerrada).")
+    device = target.device or "aparelho não identificado"
+    await db.delete(target)
+    await db.commit()
+    user = sess.user
+    await log_audit(db, user.user_id, user.email, "encerrar", "sessao", user.user_id,
+                    f"Sessão encerrada em outro aparelho ({device})")
+    return {"ok": True}
 
 
 @api_router.post("/auth/sessions/end-others")
@@ -1910,11 +2421,21 @@ async def update_consent_term(data: ConsentTermInput, user: User = Depends(get_a
 # Integração Google Forms: token do webhook (item 15 da auditoria)
 # ---------------------------------------------------------------------------
 
+# SEGURANÇA (backlog: "token do webhook sem validade"): o token vence depois
+# de WEBHOOK_TOKEN_DAYS (padrão 1 ano). A rotina de manutenção avisa por e-mail
+# WEBHOOK_EXPIRY_NOTICE_DAYS antes, e a tela de integração mostra a data.
+WEBHOOK_TOKEN_DAYS = int(os.environ.get("WEBHOOK_TOKEN_DAYS", "365"))
+WEBHOOK_EXPIRY_NOTICE_DAYS = 30
+
+
 def _integration_status(u: User) -> dict:
+    expires_at = _as_utc(u.webhook_token_expires_at)
     return {
         "configured": bool(u.webhook_token_hash),
         "hint": u.webhook_token_hint or "",
         "created_at": _iso(u.webhook_token_created_at),
+        "expires_at": _iso(expires_at),
+        "expired": bool(u.webhook_token_hash and expires_at and expires_at <= now_utc()),
     }
 
 @api_router.get("/integrations/google-forms")
@@ -1936,6 +2457,8 @@ async def rotate_google_forms_token(user: User = Depends(get_active_user), db: A
     user.webhook_token_hash = hash_token(token)
     user.webhook_token_hint = token[-4:]
     user.webhook_token_created_at = now_utc()
+    user.webhook_token_expires_at = now_utc() + timedelta(days=WEBHOOK_TOKEN_DAYS)  # backlog: validade
+    user.webhook_expiry_notified_at = None
     await db.commit()
     await db.refresh(user)
 
@@ -1948,6 +2471,7 @@ async def revoke_google_forms_token(user: User = Depends(get_active_user), db: A
     user.webhook_token_hash = None
     user.webhook_token_hint = ""
     user.webhook_token_created_at = None
+    user.webhook_token_expires_at = None
     await db.commit()
     await db.refresh(user)
 
@@ -2108,36 +2632,104 @@ def patient_summary(p: Patient) -> dict:
 CURSOR_MAX = 200
 
 
+# Complementares (lista de pacientes): ordem da lista.
+#   - "recent": cadastrados mais recentemente primeiro (padrão, como antes);
+#   - "name": nome de A a Z (sem diferenciar acentos e maiúsculas);
+#   - "last_consultation": última consulta mais recente primeiro; quem nunca
+#     consultou fica no fim.
+# O nome é CRIPTOGRAFADO no banco (item 13), então o banco não consegue
+# ordená-lo. Nas ordens "name" e "last_consultation" a lista do profissional é
+# lida, descriptografada e ordenada aqui, e a página sai dessa lista (cursor =
+# posição). Mesmo com milhares de pacientes leva milissegundos; a ordem padrão
+# continua toda no banco, com o cursor por (data, id).
+PatientSort = Literal["recent", "name", "last_consultation"]
+
+
 class PatientSearchInput(BaseModel):
     q: str = Field(default="", max_length=120)
     archived: bool = False
     cursor: Optional[str] = Field(default=None, max_length=CURSOR_MAX)
     limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    sort: PatientSort = "recent"
+
+
+def _encode_offset_cursor(offset: int) -> str:
+    raw = json.dumps(["offset", offset]).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_offset_cursor(cursor: str) -> int:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        kind, offset = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        if kind != "offset" or not isinstance(offset, int) or offset < 0:
+            raise ValueError
+        return offset
+    except Exception:
+        raise HTTPException(status_code=400, detail="Cursor de paginação inválido.")
+
+
+def _name_sort_key(name: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode("ascii").casefold()
+
+
+async def _next_sessions(db: AsyncSession, user: User, patient_ids: list) -> dict:
+    """Complementares: próxima sessão marcada (não cancelada) de cada paciente
+    da página, numa consulta só (pelo índice ix_sessions_owner_start)."""
+    if not patient_ids:
+        return {}
+    rows = await db.execute(
+        select(Session.patient_id, func.min(Session.start_time)).where(
+            Session.owner_id == user.user_id, Session.patient_id.in_(patient_ids),
+            Session.start_time >= now_utc(), func.coalesce(Session.status, "agendada") != "cancelada",
+        ).group_by(Session.patient_id)
+    )
+    return {pid: _iso(_as_utc(start)) for pid, start in rows.all()}
 
 
 async def _patients_page(db: AsyncSession, user: User, *, archived: bool, query: str,
-                         cursor: Optional[str], limit: int) -> dict:
-    stmt = select(Patient).where(Patient.owner_id == user.user_id)
+                         cursor: Optional[str], limit: int, sort: str = "recent") -> dict:
     # Item 12: arquivados saem da lista ativa, mas continuam acessíveis por filtro.
-    stmt = stmt.where(Patient.archived_at.is_not(None) if archived else Patient.archived_at.is_(None))
+    conditions = [Patient.owner_id == user.user_id,
+                  Patient.archived_at.is_not(None) if archived else Patient.archived_at.is_(None)]
 
     # Cada palavra digitada vira um token; o paciente precisa ter TODOS.
     # Palavras de 1 letra são ignoradas (não há token para elas).
     for token in query_search_tokens(_search_key, user.user_id, query):
-        stmt = stmt.where(Patient.id.in_(
+        conditions.append(Patient.id.in_(
             select(PatientSearchToken.patient_id).where(
                 PatientSearchToken.owner_id == user.user_id, PatientSearchToken.token == token,
             )
         ))
 
-    if cursor:
-        moment, row_id = decode_cursor(cursor)
-        stmt = stmt.where(tuple_(Patient.created_at, Patient.id) < (moment, row_id))
+    # Complementares: total de pacientes (com os mesmos filtros), para a tela.
+    total = await db.scalar(select(func.count()).select_from(Patient).where(*conditions))
 
-    stmt = stmt.order_by(desc(Patient.created_at), desc(Patient.id)).limit(limit + 1)
-    rows = (await db.execute(stmt)).scalars().all()
-    rows, next_cursor = _split_page(rows, limit, lambda p: p.created_at)
-    return {"items": [patient_summary(p) for p in rows], "next_cursor": next_cursor}
+    if sort == "recent":
+        stmt = select(Patient).where(*conditions)
+        if cursor:
+            moment, row_id = decode_cursor(cursor)
+            stmt = stmt.where(tuple_(Patient.created_at, Patient.id) < (moment, row_id))
+        stmt = stmt.order_by(desc(Patient.created_at), desc(Patient.id)).limit(limit + 1)
+        rows = (await db.execute(stmt)).scalars().all()
+        rows, next_cursor = _split_page(rows, limit, lambda p: p.created_at)
+        items = [patient_summary(p) for p in rows]
+    else:
+        offset = _decode_offset_cursor(cursor) if cursor else 0
+        everything = [patient_summary(p) for p in (await db.execute(select(Patient).where(*conditions))).scalars().all()]
+        everything.sort(key=lambda item: _name_sort_key(item["full_name"]))
+        if sort == "last_consultation":
+            # Ordenação estável: entre datas iguais, continua por nome. Sem
+            # consulta ("") fica por último na ordem decrescente.
+            everything.sort(key=lambda item: item["last_consultation_date"] or "", reverse=True)
+        items = everything[offset:offset + limit]
+        next_cursor = _encode_offset_cursor(offset + limit) if offset + limit < len(everything) else None
+
+    upcoming = await _next_sessions(db, user, [item["id"] for item in items])
+    for item in items:
+        item["next_session"] = upcoming.get(item["id"], "")
+    return {"items": items, "next_cursor": next_cursor, "total": total}
 
 # ---------------------------------------------------------------------------
 # Rotas de Pacientes e Prontuários
@@ -2148,13 +2740,15 @@ async def list_patients(
     archived: bool = Query(False, description="true = lista só os arquivados (item 12)"),
     cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    # Complementares (lista de pacientes): ordem escolhida na tela.
+    sort: PatientSort = Query("recent"),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     # ESCALA: paginada e com itens enxutos (patient_summary).
     # A listagem não gera log de "visualizar" por paciente (seria um registro
     # por linha a cada abertura da tela); o acesso à ficha e ao prontuário sim.
-    return await _patients_page(db, user, archived=archived, query="", cursor=cursor, limit=limit)
+    return await _patients_page(db, user, archived=archived, query="", cursor=cursor, limit=limit, sort=sort)
 
 # SEGURANÇA (varredura, item 15): limites de busca e exportação.
 # Antes nenhuma das duas tinha limite. Com uma sessão roubada (ou um script),
@@ -2179,7 +2773,7 @@ async def search_patients(data: PatientSearchInput, user: User = Depends(get_act
     """
     await enforce(f"search-user:{user.user_id}", SEARCH_LIMIT_PER_MINUTE, 60)  # varredura, item 15
     return await _patients_page(db, user, archived=data.archived, query=data.q,
-                                cursor=data.cursor, limit=data.limit)
+                                cursor=data.cursor, limit=data.limit, sort=data.sort)
 
 @api_router.get("/patients/{pid}")
 async def get_patient(pid: str, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
@@ -2416,6 +3010,9 @@ async def list_records(
     pid: str,
     cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
+    # Complementares (evoluções): só as sessões do período (início incluído, fim excluído).
+    start: Optional[datetime] = Query(None, description="sessões a partir de (ISO com fuso)"),
+    end: Optional[datetime] = Query(None, description="sessões antes de (ISO com fuso)"),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2426,7 +3023,11 @@ async def list_records(
     # tem centenas de evoluções; antes TODAS eram descriptografadas e enviadas
     # a cada abertura da ficha. Usa o índice ix_records_patient_session.
     # session_datetime é sempre preenchido pela API (RecordInput o exige).
-    base = (Record.patient_id == pid, Record.owner_id == user.user_id)
+    base = [Record.patient_id == pid, Record.owner_id == user.user_id]
+    if start is not None:
+        base.append(Record.session_datetime >= _as_utc(start))
+    if end is not None:
+        base.append(Record.session_datetime < _as_utc(end))
     stmt = select(Record).where(*base)
     if cursor:
         moment, row_id = decode_cursor(cursor)
@@ -2440,8 +3041,9 @@ async def list_records(
 
     # Item 14: acesso ao conteúdo clínico é o evento mais sensível do sistema.
     # Cada página aberta é um acesso e fica registrada.
+    period = "; filtradas por período" if start is not None or end is not None else ""
     await log_audit(db, user.user_id, user.email, "visualizar", "prontuario", pid,
-                    f"Lista de evoluções ({count_label(len(records), 'evolução', 'evoluções')})")
+                    f"Lista de evoluções ({count_label(len(records), 'evolução', 'evoluções')}{period})")
     return {"items": records, "next_cursor": next_cursor, "total": total}
 
 @api_router.post("/patients/{pid}/records")
@@ -2606,17 +3208,58 @@ async def export_patient(pid: str,
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="prontuario_{pid}.pdf"'})
 
+# Complementares (auditoria): filtros por período, ação e tipo, e exportação.
+# Antes a trilha só podia ser rolada, do mais recente para trás: achar "quem
+# acessou este prontuário em março" exigia carregar página por página.
+AUDIT_EXPORT_MAX_ROWS = 50_000
+# Rótulos da exportação (os mesmos da tela, frontend/src/pages/Settings.js).
+AUDIT_ACTION_LABELS = {
+    "criar": "Criação", "editar": "Edição", "visualizar": "Visualização", "excluir": "Exclusão",
+    "anonimizar": "Anonimização", "exportar": "Exportação", "arquivar": "Arquivamento",
+    "desarquivar": "Reativação", "consentir": "Consentimento", "revogar": "Revogação", "aceitar": "Aceite",
+    "gerar_token": "Novo token", "bloquear": "Bloqueio", "desbloquear": "Desbloqueio",
+    "desbloquear_falha": "Senha incorreta", "encerrar": "Encerramento", "vincular": "Vínculo Google",
+    "alterar_senha": "Troca de senha", "alterar_senha_falha": "Senha incorreta", "entrar": "Login",
+    "entrar_falha": "Login recusado", "sair": "Logout", "solicitar_senha": "Pedido de nova senha",
+    "mfa_ativar": "Duas etapas ativada", "mfa_desativar": "Duas etapas desativada",
+    "mfa_codigos": "Novos códigos",
+}
+AUDIT_ENTITY_LABELS = {
+    "paciente": "Paciente", "prontuario": "Prontuário", "agenda": "Agenda", "usuario": "Usuário",
+    "termos": "Política", "termo": "Termo", "integracao": "Integração", "sessao": "Sessão",
+    "auditoria": "Auditoria",
+}
+
+
+def _audit_filters(user: User, action: Optional[str], entity: Optional[str],
+                   start: Optional[datetime], end: Optional[datetime]) -> list:
+    conditions = [AuditLog.owner_id == user.user_id]
+    if action:
+        conditions.append(AuditLog.action == action)
+    if entity:
+        conditions.append(AuditLog.entity_type == entity)
+    if start is not None:
+        conditions.append(AuditLog.timestamp >= _as_utc(start))
+    if end is not None:
+        conditions.append(AuditLog.timestamp < _as_utc(end))  # fim exclusivo
+    return conditions
+
+
 @api_router.get("/audit")
 async def get_audit(
     cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
     limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    action: Optional[str] = Query(None, max_length=40, description="só esta ação (ex.: entrar)"),
+    entity: Optional[str] = Query(None, max_length=40, description="só este tipo (ex.: prontuario)"),
+    start: Optional[datetime] = Query(None, description="a partir de (ISO com fuso)"),
+    end: Optional[datetime] = Query(None, description="antes de (ISO com fuso)"),
     user: User = Depends(get_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     # ESCALA: antes mostrava só os 100 últimos registros, sem como ver os
     # anteriores (a trilha só cresce: inclui leituras). Agora é paginada pelo
     # índice ix_audit_logs_owner_timestamp.
-    stmt = select(AuditLog).where(AuditLog.owner_id == user.user_id)
+    stmt = select(AuditLog).where(*_audit_filters(user, action, entity, start, end))
     if cursor:
         moment, row_id = decode_cursor(cursor)
         stmt = stmt.where(tuple_(AuditLog.timestamp, AuditLog.log_id) < (moment, row_id))
@@ -2636,6 +3279,67 @@ async def get_audit(
         "timestamp": a.timestamp.isoformat() if a.timestamp else ""
     } for a in docs]}
 
+
+def _csv_cell(value) -> str:
+    """Planilhas executam como FÓRMULA o que começa com = + - @ ("CSV
+    injection"). Um texto da trilha nunca deve virar fórmula ao abrir o arquivo."""
+    text_value = str(value or "")
+    return "'" + text_value if text_value[:1] in ("=", "+", "-", "@", "\t", "\r") else text_value
+
+
+_ISO_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _brasilia_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/Sao_Paulo")
+    except Exception:  # sem base de fusos no sistema: fica em UTC
+        return None
+
+
+@api_router.get("/audit/export", dependencies=[Depends(rate_limit("audit-export", 10, 300))])
+async def export_audit(
+    action: Optional[str] = Query(None, max_length=40),
+    entity: Optional[str] = Query(None, max_length=40),
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    user: User = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """A trilha (com os mesmos filtros da tela) em CSV, para guardar ou
+    entregar numa fiscalização. Separador ";" e BOM: abre certo no Excel em português."""
+    rows = (await db.execute(
+        select(AuditLog).where(*_audit_filters(user, action, entity, start, end))
+        .order_by(desc(AuditLog.timestamp), desc(AuditLog.log_id)).limit(AUDIT_EXPORT_MAX_ROWS)
+    )).scalars().all()
+    tz = _brasilia_tz()
+
+    def local(moment) -> str:
+        moment = _as_utc(moment)
+        return (moment.astimezone(tz) if tz else moment).strftime("%d/%m/%Y %H:%M:%S") if moment else ""
+
+    def build() -> bytes:
+        out = io.StringIO()
+        writer = csv.writer(out, delimiter=";")
+        writer.writerow([f"Data e hora ({'horário de Brasília' if tz else 'UTC'})", "Ação", "Tipo",
+                         "Identificador", "Detalhe", "IP", "Navegador"])
+        for a in rows:
+            detail = _ISO_INSTANT.sub(lambda m: local(datetime.fromisoformat(m.group(0).replace("Z", "+00:00"))),
+                                      a.detail or "")
+            writer.writerow([_csv_cell(v) for v in (
+                local(a.timestamp), AUDIT_ACTION_LABELS.get(a.action, a.action),
+                AUDIT_ENTITY_LABELS.get(a.entity_type, a.entity_type), a.entity_id, detail,
+                a.ip_address, a.user_agent)])
+        return ("﻿" + out.getvalue()).encode("utf-8")
+
+    data = await run_in_threadpool(build)
+    await log_audit(db, user.user_id, user.email, "exportar", "auditoria", user.user_id,
+                    f"Trilha de auditoria exportada ({count_label(len(rows), 'registro', 'registros')})")
+    return StreamingResponse(io.BytesIO(data), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="trilha_auditoria_{now_utc():%Y%m%d}.csv"'})
+
+
 # Webhook do Google Forms
 # (Header já importado no topo do arquivo)
 
@@ -2646,18 +3350,35 @@ class WebhookPayload(BaseModel):
 
 # Item 9: o token do webhook é o único segredo desta rota pública. O limite
 # impede tanto adivinhar tokens quanto inundar a base com pacientes falsos
-# caso o token vaze. 30/min comporta com folga um formulário real.
-@api_router.post("/webhook/google-forms", dependencies=[Depends(rate_limit("webhook", 30, 60))])
+# caso o token vaze.
+# SEGURANÇA MÉDIA: o limite era só POR IP (30/min). Mas o Google Forms envia de
+# IPs do Google COMPARTILHADOS por muitos usuários: os formulários de vários
+# profissionais dividiam a mesma cota e se bloqueavam entre si, enquanto um
+# token vazado usado de IPs variados escapava do limite. Agora:
+#   - por TOKEN: 30/min (comporta com folga um formulário real);
+#   - por IP: 300/min, só contra enxurrada de tokens inventados.
+WEBHOOK_LIMIT_PER_TOKEN = 30
+WEBHOOK_LIMIT_PER_IP = 300
+
+
+@api_router.post("/webhook/google-forms", dependencies=[Depends(rate_limit("webhook-ip", WEBHOOK_LIMIT_PER_IP, 60))])
 async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = Header(..., max_length=128),
                                db: AsyncSession = Depends(get_db)):
     # Item 15: o banco só tem o HASH do token; comparamos hash com hash.
     # A busca é por igualdade em coluna indexada, sem comparar caractere a
     # caractere em Python, então não há vazamento útil por tempo de resposta.
-    stmt = select(User).where(User.webhook_token_hash == hash_token(x_webhook_token))
+    token_hash = hash_token(x_webhook_token)
+    await enforce(f"webhook-token:{token_hash[:32]}", WEBHOOK_LIMIT_PER_TOKEN, 60)
+    stmt = select(User).where(User.webhook_token_hash == token_hash)
     owner = (await db.execute(stmt)).scalar_one_or_none()
 
-    if not owner:
+    if not owner or owner.closed_at is not None:
         raise HTTPException(status_code=401, detail="Token de integração inválido ou revogado")
+    expires_at = _as_utc(owner.webhook_token_expires_at)
+    if expires_at and expires_at <= now_utc():
+        # Backlog: token com validade. O profissional já recebeu o aviso por e-mail.
+        raise HTTPException(status_code=401, detail=(
+            "Token de integração vencido. Gere um novo em Pacientes > Integrar Google Forms."))
 
     # Não exigimos aqui o aceite da versão vigente da política (get_active_user):
     # se a política mudar, bloquear o webhook faria o formulário do profissional
@@ -2979,6 +3700,267 @@ async def delete_session(sid: str, user: User = Depends(get_active_user), db: As
     # Item 14: exclusões na agenda também não eram auditadas.
     await log_audit(db, user.user_id, user.email, "excluir", "agenda", sid, "Sessão removida")
     return {"ok": True}
+
+# ---------------------------------------------------------------------------
+# SEGURANÇA MÉDIA: encerramento da conta do profissional (LGPD art. 18)
+# ---------------------------------------------------------------------------
+# A Política de Privacidade (legal.py, item 8) promete: "Depois do
+# encerramento os dados são eliminados, exceto os que a lei obriga a guardar".
+# Antes não existia como encerrar a conta. Agora (decisão de produto):
+#   1. a pessoa pode baixar TUDO antes (GET /account/export: ZIP com o PDF de
+#      cada paciente e um JSON completo, para cumprir a própria guarda);
+#   2. ao encerrar (POST /account/close), na hora:
+#      - ninguém mais entra na conta (sessões encerradas, sem senha, sem Google);
+#      - pacientes SEM prontuário sob guarda são excluídos, com a agenda inteira;
+#      - pacientes COM prontuário sob guarda (Resolução CFP nº 001/2009, 5 anos)
+#        continuam criptografados, sem acesso de ninguém;
+#      - o e-mail é liberado (pode criar uma conta nova); nome e CRP ficam, só
+#        para identificar a autoria dos prontuários guardados;
+#   3. a rotina de manutenção (purge_closed_accounts) exclui cada prontuário no
+#      fim da guarda e, quando não sobra nada (e passaram os 6 meses de guarda
+#      dos registros de acesso do Marco Civil), a trilha de auditoria e a conta.
+ACCOUNT_CLOSE_CONFIRMATION = "ENCERRAR"
+ACCESS_LOG_RETENTION = timedelta(days=183)  # Marco Civil da Internet, art. 15: 6 meses
+
+
+def _safe_filename(text_value: str) -> str:
+    """Nome de arquivo seguro dentro do ZIP (sem acentos, barras ou espaços)."""
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", text_value or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9]+", "_", plain).strip("_")[:60] or "paciente"
+
+
+def _build_account_zip(user_name: str, user_email: str, entries: list, agenda: list) -> io.BytesIO:
+    """Monta o ZIP da exportação completa (roda numa thread: o PDF é pesado)."""
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        everything = []
+        for pat, recs, consent_given_at, consent_terms, consent_revoked_at in entries:
+            pdf = _render_patient_pdf(pat, recs, user_name, user_email,
+                                      consent_given_at, consent_terms, consent_revoked_at)
+            archive.writestr(f"pacientes/{_safe_filename(pat['full_name'])}_{pat['id']}.pdf", pdf.getvalue())
+            everything.append({"paciente": pat, "prontuarios": recs})
+        archive.writestr("psigestao_completo.json", json.dumps({
+            "exportado_em": now_utc().isoformat(), "profissional": user_email,
+            "pacientes": everything, "agenda": agenda,
+        }, ensure_ascii=False, indent=2))
+        archive.writestr("LEIA-ME.txt", (
+            "Exportação completa do PsiGestão.\n\n"
+            "- pacientes/: o prontuário de cada paciente em PDF;\n"
+            "- psigestao_completo.json: todos os dados (pacientes, evoluções e agenda) em formato aberto.\n\n"
+            "Estes arquivos contêm dados de saúde: guarde-os em local protegido (Resolução CFP nº 001/2009 "
+            "e LGPD). A guarda dos prontuários é responsabilidade do(a) psicólogo(a).\n"
+        ))
+    buf.seek(0)
+    return buf
+
+
+@api_router.get("/account/export", dependencies=[Depends(rate_limit("account-export", 3, 3600))])
+async def export_account(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Exportação COMPLETA da conta (portabilidade, LGPD art. 18, V).
+
+    Usa get_current_user (e não get_active_user): quem não quer aceitar uma
+    versão nova da política ainda tem direito de levar os próprios dados.
+    """
+    await enforce(f"account-export-user:{user.user_id}", 3, 3600)
+    patients = (await db.execute(select(Patient).where(Patient.owner_id == user.user_id)
+                                 .order_by(Patient.created_at))).scalars().all()
+    entries = []
+    for p in patients:
+        records = (await db.execute(select(Record).where(Record.patient_id == p.id)
+                                    .order_by(desc(Record.session_datetime)))).scalars().all()
+        pat = patient_public(p, user)
+        recs = await run_in_threadpool(lambda rows=records: [record_public(r) for r in rows])
+        entries.append((pat, recs, p.consent_given_at, bool(p.consent_terms), p.consent_revoked_at))
+    sessions = (await db.execute(select(Session).where(Session.owner_id == user.user_id)
+                                 .order_by(Session.start_time))).scalars().all()
+    agenda = [session_public(s) for s in sessions]
+
+    buf = await run_in_threadpool(_build_account_zip, user.name or "", user.email, entries, agenda)
+    await log_audit(db, user.user_id, user.email, "exportar", "usuario", user.user_id,
+                    f"Exportação completa da conta ({count_label(len(entries), 'paciente', 'pacientes')})")
+    filename = f"psigestao_exportacao_{now_utc():%Y%m%d}.zip"
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+async def _close_account(db: AsyncSession, user: User) -> dict:
+    """Aplica o encerramento (ver o comentário do bloco). Devolve o resumo."""
+    now = now_utc()
+    deleted, retained, last_deadline = 0, 0, None
+    patients = (await db.execute(select(Patient).where(Patient.owner_id == user.user_id))).scalars().all()
+    for p in patients:
+        deadline = await retention_deadline(db, p.id)
+        if deadline is None or deadline <= now:
+            await db.delete(p)  # cascata: evoluções, versões e índice de busca
+            deleted += 1
+        else:
+            p.archived_at = p.archived_at or now
+            retained += 1
+            last_deadline = deadline if last_deadline is None else max(last_deadline, deadline)
+    # A agenda não é prontuário: sai inteira (as evoluções guardadas perdem
+    # só o vínculo com a sessão, ON DELETE SET NULL).
+    await db.execute(update(Record).where(Record.owner_id == user.user_id).values(session_id=None)
+                     .execution_options(synchronize_session=False))
+    await db.execute(delete(Session).where(Session.owner_id == user.user_id))
+    await db.execute(delete(EmailToken).where(EmailToken.user_id == user.user_id))
+
+    user.closed_at = now
+    user.purge_after = max(last_deadline or now, now + ACCESS_LOG_RETENTION)
+    # Libera o e-mail (a pessoa pode criar uma conta nova no futuro) e apaga o
+    # que não é exigido por lei. Nome e CRP ficam: identificam o autor dos
+    # prontuários sob guarda.
+    user.email = f"encerrada+{user.user_id}@contas-encerradas.invalid"
+    user.password_hash = None
+    user.google_sub = None
+    user.email_verified_at = None
+    user.picture = ""
+    user.consent_term_body = None
+    user.draft_key = None
+    user.webhook_token_hash = None
+    user.webhook_token_hint = ""
+    user.webhook_token_created_at = None
+    user.webhook_token_expires_at = None
+    user.mfa_secret = None
+    user.mfa_enabled_at = None
+    user.mfa_last_step = None
+    user.mfa_recovery_codes = None
+    await db.commit()
+    await end_login_sessions(db, user)
+    return {"deleted_patients": deleted, "retained_patients": retained,
+            "retained_until": _iso(last_deadline) if last_deadline else ""}
+
+
+@api_router.post("/account/close", dependencies=[Depends(rate_limit("account-close", 5, 900))])
+async def close_account(data: CloseAccountInput, background: BackgroundTasks, response: Response,
+                        sess: UserSession = Depends(get_current_session), db: AsyncSession = Depends(get_db)):
+    """Encerra a conta. Exige digitar ENCERRAR e confirmar a identidade (senha
+    ou Google, e o código do aplicativo se a verificação em duas etapas
+    estiver ativa): quem achar o computador logado não consegue encerrar."""
+    user = sess.user
+    await enforce(f"account-close-user:{user.user_id}", 5, 900)
+    if data.confirmation.strip().upper() != ACCOUNT_CLOSE_CONFIRMATION:
+        raise HTTPException(status_code=400, detail=f"Digite {ACCOUNT_CLOSE_CONFIRMATION} para confirmar.")
+    if user.password_hash:
+        if not data.password or not await verify_password_async(data.password, user.password_hash):
+            raise HTTPException(status_code=403, detail={"code": "invalid_current_password",
+                                                         "msg": "A senha atual está incorreta."})
+    elif not data.credential or not google_identity_matches(await verify_google_credential(data.credential), user):
+        raise HTTPException(status_code=403, detail="Confirme sua identidade com a conta Google desta conta.")
+    if user.mfa_enabled_at is not None and await _check_mfa_code(db, user, data.code or "") is None:
+        raise HTTPException(status_code=403, detail=MFA_INVALID_DETAIL)
+
+    original_email, name = user.email, user.name or ""
+    summary = await _close_account(db, user)
+    until = summary["retained_until"]
+    until_label = datetime.fromisoformat(until).strftime("%d/%m/%Y") if until else None
+    await log_audit(db, user.user_id, original_email, "encerrar", "usuario", user.user_id,
+                    f"Conta encerrada: {count_label(summary['deleted_patients'], 'paciente excluído', 'pacientes excluídos')}"
+                    + (f"; {count_label(summary['retained_patients'], 'paciente', 'pacientes')} sob guarda até "
+                       f"{until_label}" if summary["retained_patients"] else ""))
+    background.add_task(mailer.send_email, mailer.account_closed(
+        original_email, name, summary["deleted_patients"], summary["retained_patients"], until_label))
+    clear_auth_cookie(response)
+    return summary
+
+
+async def _purge_audit_logs(db: AsyncSession, owner_id: str) -> None:
+    """Apaga a trilha de uma conta encerrada (fim da guarda). A trilha é
+    "somente inclusão" no banco; esta é a ÚNICA exceção (ver models.py)."""
+    if db.get_bind().dialect.name == "postgresql":
+        # SET LOCAL: vale só até o fim DESTA transação.
+        await db.execute(text("SET LOCAL psigestao.audit_purge = 'on'"))
+        await db.execute(delete(AuditLog).where(AuditLog.owner_id == owner_id))
+    else:  # SQLite (testes e desenvolvimento sem Postgres): o gatilho sai e volta na mesma transação
+        await db.execute(text("DROP TRIGGER IF EXISTS audit_logs_no_delete"))
+        await db.execute(delete(AuditLog).where(AuditLog.owner_id == owner_id))
+        await db.execute(text(
+            "CREATE TRIGGER IF NOT EXISTS audit_logs_no_delete BEFORE DELETE ON audit_logs "
+            "BEGIN SELECT RAISE(ABORT, 'audit_logs e somente inclusao (append-only)'); END"))
+    await db.commit()
+
+
+async def purge_closed_accounts(db: AsyncSession, now: Optional[datetime] = None) -> dict:
+    """Rotina de manutenção: exclui o que sobrou das contas encerradas quando o
+    prazo de guarda de cada coisa termina. Segura para rodar várias vezes."""
+    now = now or now_utc()
+    purged_patients, purged_accounts = 0, 0
+    closed = (await db.execute(select(User).where(User.closed_at.is_not(None)))).scalars().all()
+    for user in closed:
+        remaining = 0
+        patients = (await db.execute(select(Patient).where(Patient.owner_id == user.user_id))).scalars().all()
+        for p in patients:
+            deadline = await retention_deadline(db, p.id)
+            if deadline is None or deadline <= now:
+                await db.delete(p)
+                purged_patients += 1
+            else:
+                remaining += 1
+        await db.commit()
+        if remaining == 0 and (_as_utc(user.purge_after) or now) <= now:
+            await _purge_audit_logs(db, user.user_id)
+            await db.delete(user)
+            await db.commit()
+            purged_accounts += 1
+    if purged_patients or purged_accounts:
+        logger.info("Expurgo de contas encerradas: %d pacientes e %d contas excluídos.",
+                    purged_patients, purged_accounts)
+    return {"purged_patients": purged_patients, "purged_accounts": purged_accounts}
+
+
+async def notify_expiring_webhook_tokens(db: AsyncSession, now: Optional[datetime] = None) -> int:
+    """Avisa por e-mail (uma vez por token) quem tem o token do Google Forms
+    vencendo nos próximos WEBHOOK_EXPIRY_NOTICE_DAYS dias."""
+    now = now or now_utc()
+    rows = (await db.execute(select(User).where(
+        User.closed_at.is_(None), User.webhook_token_hash.is_not(None),
+        User.webhook_token_expires_at.is_not(None),
+        User.webhook_token_expires_at > now,
+        User.webhook_token_expires_at <= now + timedelta(days=WEBHOOK_EXPIRY_NOTICE_DAYS),
+        User.webhook_expiry_notified_at.is_(None),
+    ))).scalars().all()
+    for user in rows:
+        expires_on = _as_utc(user.webhook_token_expires_at).strftime("%d/%m/%Y")
+        if await mailer.send_email(mailer.webhook_token_expiring(user.email, user.name or "", expires_on,
+                                                                 frontend_link("/pacientes"))):
+            user.webhook_expiry_notified_at = now
+            await db.commit()
+    return len(rows)
+
+
+# Rotina de manutenção: roda dentro da API (a cada MAINTENANCE_INTERVAL_HOURS)
+# e também pode ser chamada por um agendador externo (python maintenance.py).
+# No Postgres, uma trava consultiva garante que só UM worker rode por vez.
+MAINTENANCE_LOCK_KEY = 73104201
+MAINTENANCE_INTERVAL_HOURS = float(os.environ.get("MAINTENANCE_INTERVAL_HOURS", "6"))
+MAINTENANCE_ENABLED = os.environ.get("MAINTENANCE_ENABLED", "true").strip().lower() != "false"
+
+
+async def run_maintenance() -> dict:
+    async with AsyncSessionLocal() as db:
+        postgres = db.get_bind().dialect.name == "postgresql"
+        if postgres and not await db.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": MAINTENANCE_LOCK_KEY}):
+            return {"skipped": "outro processo está rodando a manutenção"}
+        try:
+            result = await purge_closed_accounts(db)
+            result["webhook_reminders"] = await notify_expiring_webhook_tokens(db)
+            return result
+        finally:
+            if postgres:
+                await db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": MAINTENANCE_LOCK_KEY})
+                await db.commit()
+
+
+async def _maintenance_loop() -> None:
+    await asyncio.sleep(60)  # deixa o servidor terminar de subir
+    while True:
+        try:
+            await run_maintenance()
+        except Exception:
+            logger.exception("Falha na rotina de manutenção (expurgo de contas encerradas / avisos).")
+        await asyncio.sleep(MAINTENANCE_INTERVAL_HOURS * 3600)
+
 
 # ---------------------------------------------------------------------------
 # Saúde e métricas (MONITORAMENTO)

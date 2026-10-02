@@ -119,6 +119,7 @@ def require_shared_rate_limit(environment: str) -> None:
         logger.critical("SECURITY ALERT: RATE_LIMIT_ENABLED=false não é permitido em produção. Abortando.")
         sys.exit(1)
     if _redis_limiter is not None:
+        require_redis_tls(REDIS_URL)
         return
     workers = int(os.environ.get("WEB_CONCURRENCY", "1") or "1")
     if os.environ.get("RATE_LIMIT_ALLOW_MEMORY", "").strip().lower() == "true" and workers == 1:
@@ -128,6 +129,23 @@ def require_shared_rate_limit(environment: str) -> None:
     logger.critical(
         "SECURITY ALERT: REDIS_URL é obrigatório em produção (rate limit compartilhado entre workers e "
         "instâncias). Com um único processo, defina RATE_LIMIT_ALLOW_MEMORY=true e WEB_CONCURRENCY=1. Abortando.")
+    sys.exit(1)
+
+
+def require_redis_tls(url: str) -> None:
+    """SEGURANÇA (segurança média: TLS no Redis): em produção o Redis precisa
+    de conexão criptografada (rediss://). Antes redis:// era aceito: a senha
+    do Redis e as chaves dos contadores (que incluem e-mails de quem tenta
+    entrar) passavam em texto puro pela rede. Exceção EXPLÍCITA: Redis na
+    mesma máquina ou rede privada isolada, com REDIS_TLS_DISABLED=true."""
+    if url.lower().startswith("rediss://"):
+        return
+    if os.environ.get("REDIS_TLS_DISABLED", "").strip().lower() == "true":
+        logger.warning("Redis SEM TLS por escolha explícita (REDIS_TLS_DISABLED): use só com o Redis na "
+                       "mesma máquina ou numa rede privada isolada.")
+        return
+    logger.critical("SECURITY ALERT: em produção o REDIS_URL precisa usar TLS (rediss://...). Redis na mesma "
+                    "máquina/rede privada isolada: REDIS_TLS_DISABLED=true. Abortando.")
     sys.exit(1)
 
 

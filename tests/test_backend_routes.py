@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import re
@@ -28,15 +29,23 @@ os.environ.setdefault("JWT_SECRET", "route-test-secret-com-pelo-menos-32-caracte
 # Precisa ser uma chave Fernet válida: o servidor agora valida a chave na inicialização.
 TEST_FERNET_KEY = Fernet.generate_key().decode()
 os.environ.setdefault("FERNET_KEY", TEST_FERNET_KEY)
+# Segurança média: os e-mails ficam numa caixa de saída em memória (mailer.outbox).
+os.environ["MAIL_BACKEND"] = "memory"
+# A rotina de manutenção não roda sozinha nos testes (eles chamam as funções direto).
+os.environ["MAINTENANCE_ENABLED"] = "false"
 
 from database import Base, get_db
 import rate_limit
 import rotate_encryption_key
 import server
 import legal
+import mailer
 import observability
+import totp
 from crypto import legacy_key_from_secret
-from models import AuditLog, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession
+from models import (
+    AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession,
+)
 from server import app
 
 
@@ -54,6 +63,24 @@ def patient_data(name="Paciente de Teste", **overrides):
     }
     data.update(overrides)
     return data
+
+
+def link_token(email):
+    """Token do último link enviado a este e-mail (o link leva #token=...)."""
+    for mail in reversed(mailer.outbox):
+        if mail.to == email:
+            match = re.search(r"#token=([A-Za-z0-9_\-]+)", mail.text)
+            if match:
+                return match.group(1)
+    raise AssertionError(f"nenhum link enviado para {email}")
+
+
+async def register_account(client, email, password="Senha-segura-123", name="Profissional de Teste"):
+    """Cadastro completo (segurança média): pedido -> link no e-mail -> senha.
+    Devolve a resposta da confirmação (com a sessão já aberta no cookie)."""
+    response = await client.post("/api/auth/register", json={"name": name, "email": email, "terms_accepted": True})
+    assert response.status_code == 200, response.text
+    return await client.post("/api/auth/register/confirm", json={"token": link_token(email), "password": password})
 
 
 @pytest.fixture
@@ -84,6 +111,7 @@ async def client():
     server.engine = engine
     # Item 9: o limitador é global ao processo; zera entre testes para um não afetar o outro.
     rate_limit.limiter.reset()
+    mailer.outbox.clear()
     transport = httpx.ASGITransport(app=app)
     # Varredura, item 10: como o frontend (lib/api.js), o cliente dos testes
     # envia o cabeçalho anti-CSRF; sem ele as escritas são recusadas (403).
@@ -123,16 +151,11 @@ async def test_all_backend_routes(client):
     assert (await client.post("/api/auth/register", json={
         "name": "Profissional de Teste",
         "email": email,
-        "password": password,
         "terms_accepted": False,
     })).status_code == 400
 
-    response = await client.post("/api/auth/register", json={
-        "name": "Profissional de Teste",
-        "email": email,
-        "password": password,
-        "terms_accepted": True,
-    })
+    # Segurança média: cadastro em dois passos (link no e-mail + senha).
+    response = await register_account(client, email, password)
     assert response.status_code == 200
     assert response.json()["user"]["email"] == email
     # Item 7: o token não vem mais no corpo; a sessão fica no cookie httpOnly,
@@ -140,13 +163,15 @@ async def test_all_backend_routes(client):
     assert "token" not in response.json()
     headers = {}
 
+    # Segurança média: e-mail já cadastrado recebe a MESMA resposta (não revela
+    # quem tem conta); o aviso "você já tem uma conta" vai só para o e-mail.
     duplicate = await client.post("/api/auth/register", json={
         "name": "Outro Nome",
         "email": email,
-        "password": password,
         "terms_accepted": True,
     })
-    assert duplicate.status_code == 400
+    assert duplicate.status_code == 200 and duplicate.json()["status"] == "check_email"
+    assert mailer.outbox[-1].to == email and "já tem uma conta" in mailer.outbox[-1].text
 
     login = await client.post("/api/auth/login", json={"email": email, "password": password})
     assert login.status_code == 200
@@ -159,7 +184,8 @@ async def test_all_backend_routes(client):
     assert "webhook_token" not in me.json()
     webhook_token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
 
-    assert (await client.get("/api/patients", headers=headers)).json() == {"items": [], "next_cursor": None}
+    # Complementares: a lista traz também o total de pacientes.
+    assert (await client.get("/api/patients", headers=headers)).json() == {"items": [], "next_cursor": None, "total": 0}
     patient = await client.post("/api/patients", headers=headers, json=patient_payload)
     assert patient.status_code == 200
     patient_id = patient.json()["id"]
@@ -313,9 +339,7 @@ async def test_google_auth_route_rejects_unverified_email(client, monkeypatch):
 
 
 async def _create_patient(client, email="crypto.test@example.com"):
-    await client.post("/api/auth/register", json={
-        "name": "Crypto Test", "email": email, "password": "Senha-segura-123", "terms_accepted": True,
-    })
+    await register_account(client, email, name="Crypto Test")
     response = await client.post("/api/patients", json=patient_data("Paciente Cripto", address="Rua A, 1"))
     assert response.status_code == 200
     return response.json()["id"]
@@ -325,9 +349,7 @@ async def _create_patient(client, email="crypto.test@example.com"):
 async def test_auth_cookie_is_secure_in_production(client, monkeypatch):
     # Item 1: a versão insegura de set_auth_cookie não pode mais sobrescrever esta.
     monkeypatch.setattr(server, "ENVIRONMENT", "production")
-    response = await client.post("/api/auth/register", json={
-        "name": "Prod", "email": "prod@example.com", "password": "Senha-segura-123", "terms_accepted": True,
-    })
+    response = await register_account(client, "prod@example.com", name="Prod")
 
     cookie = response.headers["set-cookie"].lower()
     assert "secure" in cookie
@@ -455,8 +477,9 @@ async def test_login_is_rate_limited(client):
 @pytest.mark.parametrize("weak_password", ["curta1", "somenteletras", "1234567890", "a1" * 40])
 async def test_register_rejects_weak_passwords(client, weak_password):
     # Item 10: mínimo 8, letras + números, máximo 72 bytes (limite do bcrypt).
-    response = await client.post("/api/auth/register", json={
-        "name": "Fraca", "email": "fraca@example.com", "password": weak_password, "terms_accepted": True,
+    # Segurança média: a senha agora é criada na confirmação do cadastro.
+    response = await client.post("/api/auth/register/confirm", json={
+        "token": "x" * 43, "password": weak_password,
     })
 
     assert response.status_code == 422
@@ -693,7 +716,17 @@ def test_database_url_is_required_in_production(monkeypatch):
     with pytest.raises(SystemExit):
         database.resolve_database_url()
 
+    # Segurança média: em produção a conexão com o banco precisa pedir TLS.
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db/x")
+    monkeypatch.delenv("DATABASE_TLS_DISABLED", raising=False)
+    with pytest.raises(SystemExit):
+        database.resolve_database_url()
+    for mode in ("require", "verify-full"):
+        monkeypatch.setenv("DATABASE_URL", f"postgresql+asyncpg://u:p@db/x?ssl={mode}")
+        assert database.resolve_database_url() == f"postgresql+asyncpg://u:p@db/x?ssl={mode}"
+    # Exceção explícita: banco na mesma máquina/rede privada isolada.
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db/x")
+    monkeypatch.setenv("DATABASE_TLS_DISABLED", "true")
     assert database.resolve_database_url() == "postgresql+asyncpg://u:p@db/x"
 
 
@@ -747,9 +780,7 @@ async def test_consent_keeps_exact_copy_of_the_accepted_term(client, monkeypatch
 # ---------------------------------------------------------------------------
 
 async def _register(client, email):
-    response = await client.post("/api/auth/register", json={
-        "name": "Escala", "email": email, "password": "Senha-segura-123", "terms_accepted": True,
-    })
+    response = await register_account(client, email, name="Escala")
     assert response.status_code == 200
 
 
@@ -775,7 +806,8 @@ async def test_patient_list_is_paginated_by_cursor_without_gaps_or_repeats(clien
     first = (await client.get("/api/patients", params={"limit": 2})).json()
     assert len(first["items"]) == 2 and first["next_cursor"]
     # Item enxuto: a lista não carrega mais termo, CPF, endereço etc.
-    assert set(first["items"][0]) == {"id", "full_name", "birth_date", "last_consultation_date", "anonymized", "archived"}
+    assert set(first["items"][0]) == {"id", "full_name", "birth_date", "last_consultation_date", "anonymized", "archived",
+                                      "next_session"}  # complementares: próxima sessão de cada paciente
 
     # Um cadastro novo ENTRE uma página e outra não faz o cursor repetir nem pular itens.
     await client.post("/api/patients", json=patient_data("Chegou depois"))
@@ -1290,9 +1322,17 @@ def _google(email, sub, name="Pessoa"):
 @pytest.mark.anyio
 async def test_google_login_cannot_hijack_account_precreated_with_password(client, monkeypatch):
     # Item 5: o atacante cadastra o e-mail da vítima com uma senha só dele...
+    # Segurança média: pelo cadastro isso não é mais possível (a conta só nasce
+    # com o link enviado ao e-mail). Fica o caso das contas ANTIGAS, criadas
+    # antes da confirmação por e-mail: simuladas aqui direto no banco.
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+    async with client.session_factory() as db:
+        db.add(User(email="vitima@example.com", name="Atacante", auth_provider="email",
+                    password_hash=server.hash_password("Senha-segura-123"), terms_accepted=True,
+                    terms_version=legal.PRIVACY_POLICY_VERSION))
+        await db.commit()
     async with _second_client() as attacker:
-        await _register(attacker, "vitima@example.com")
+        await attacker.post("/api/auth/login", json={"email": "vitima@example.com", "password": "Senha-segura-123"})
         assert (await attacker.get("/api/auth/me")).status_code == 200
 
         # ...e a vítima entra pelo Google com o e-mail que é dela de verdade.
@@ -1424,7 +1464,10 @@ async def test_sign_out_of_other_devices(client):
     async with _second_client() as phone, _second_client() as laptop:
         for device in (phone, laptop):
             await device.post("/api/auth/login", json={"email": "aparelhos@example.com", "password": "Senha-segura-123"})
-        assert (await client.get("/api/auth/sessions")).json() == {"other_sessions": 2}
+        # Segurança média: cada sessão vem com aparelho e IP; esta aparece primeiro.
+        listed = (await client.get("/api/auth/sessions")).json()
+        assert listed["other_sessions"] == 2 and len(listed["sessions"]) == 3
+        assert listed["sessions"][0]["current"] is True
 
         # Sem corpo JSON (como um formulário montado por outro site): recusado.
         assert (await client.post("/api/auth/sessions/end-others")).status_code == 422
@@ -1432,7 +1475,7 @@ async def test_sign_out_of_other_devices(client):
         assert ended.json() == {"ended_sessions": 2}
         assert (await phone.get("/api/auth/me")).status_code == 401
         assert (await laptop.get("/api/auth/me")).status_code == 401
-    assert (await client.get("/api/auth/sessions")).json() == {"other_sessions": 0}
+    assert (await client.get("/api/auth/sessions")).json()["other_sessions"] == 0
 
     logs = (await client.get("/api/audit")).json()["items"]
     assert any(log["action"] == "encerrar" and "outros dispositivos" in log["detail"] for log in logs)
@@ -1540,9 +1583,7 @@ async def test_request_body_size_is_limited(client):
 @pytest.mark.anyio
 async def test_validation_error_does_not_echo_input(client):
     secret = "senhasomenteletras"  # fora da política (sem números)
-    response = await client.post("/api/auth/register", json={
-        "name": "Eco", "email": "eco@example.com", "password": secret, "terms_accepted": True,
-    })
+    response = await client.post("/api/auth/register/confirm", json={"token": "x" * 43, "password": secret})
     assert response.status_code == 422
     assert secret not in response.text
     error = response.json()["detail"][0]
@@ -1657,12 +1698,16 @@ async def test_simultaneous_registration_with_same_email_is_not_a_500(client, mo
             await other.commit()
         return await real_hash(password)
 
+    # Segurança média: a conta nasce na CONFIRMAÇÃO (link do e-mail + senha).
+    assert (await client.post("/api/auth/register", json={
+        "name": "Corrida", "email": "corrida@example.com", "terms_accepted": True,
+    })).status_code == 200
     monkeypatch.setattr(server, "hash_password_async", hash_while_other_tab_registers)
-    response = await client.post("/api/auth/register", json={
-        "name": "Corrida", "email": "corrida@example.com", "password": "Senha-segura-123", "terms_accepted": True,
+    response = await client.post("/api/auth/register/confirm", json={
+        "token": link_token("corrida@example.com"), "password": "Senha-segura-123",
     })
-    assert response.status_code == 400
-    assert response.json()["detail"] == "E-mail já cadastrado."
+    assert response.status_code == 409
+    assert "já tem uma conta" in response.json()["detail"]
 
 
 @pytest.mark.anyio
@@ -1753,7 +1798,16 @@ def test_production_requires_shared_rate_limit(monkeypatch):
         rate_limit.require_shared_rate_limit("production")
 
     monkeypatch.setattr(rate_limit, "_redis_limiter", rate_limit.RedisFixedWindowLimiter(client=_FakeRedis()))
-    rate_limit.require_shared_rate_limit("production")  # com Redis: ok
+    # Segurança média: o Redis de produção precisa de TLS (rediss://).
+    monkeypatch.delenv("REDIS_TLS_DISABLED", raising=False)
+    monkeypatch.setattr(rate_limit, "REDIS_URL", "redis://cache:6379/0")
+    with pytest.raises(SystemExit):
+        rate_limit.require_shared_rate_limit("production")
+    monkeypatch.setenv("REDIS_TLS_DISABLED", "true")  # exceção explícita (rede privada)
+    rate_limit.require_shared_rate_limit("production")
+    monkeypatch.delenv("REDIS_TLS_DISABLED")
+    monkeypatch.setattr(rate_limit, "REDIS_URL", "rediss://cache:6380/0")
+    rate_limit.require_shared_rate_limit("production")  # com Redis e TLS: ok
     monkeypatch.setattr(rate_limit, "RATE_LIMIT_ENABLED", False)
     with pytest.raises(SystemExit):  # desligar o limite em produção: nunca
         rate_limit.require_shared_rate_limit("production")
@@ -1991,3 +2045,362 @@ async def test_record_version_history_is_visible(client):
     logs = (await client.get("/api/audit")).json()["items"]
     assert any(log["action"] == "visualizar" and "Histórico de versões" in log["detail"] for log in logs)
     assert (await client.get("/api/records/rec_inexistente/versions")).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Segurança média + backlog: e-mail, cadastro confirmado, recuperação de senha,
+# MFA, sessões com aparelho, encerramento de conta, webhook e TLS
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_signup_requires_the_email_link(client):
+    email = "novo.cadastro@example.com"
+    response = await client.post("/api/auth/register", json={"name": "Ana Nova", "email": email, "terms_accepted": True})
+    assert response.json() == {"status": "check_email", "email": email}
+    # Nada de conta nem sessão antes de abrir o link.
+    assert (await client.get("/api/auth/me")).status_code == 401
+    mail = mailer.outbox[-1]
+    assert mail.to == email and "/criar-senha#token=" in mail.text  # token no fragmento (#), fora dos logs
+    token = link_token(email)
+
+    check = await client.post("/api/auth/email-link/check", json={"token": token, "purpose": "signup"})
+    assert check.json() == {"email": email, "name": "Ana Nova"}
+    confirmed = await client.post("/api/auth/register/confirm", json={"token": token, "password": "Senha-segura-123"})
+    assert confirmed.status_code == 200
+    user = confirmed.json()["user"]
+    assert user["email_verified"] is True and user["terms_accepted"] is True
+    # O link vale uma vez só.
+    again = await client.post("/api/auth/register/confirm", json={"token": token, "password": "Senha-segura-123"})
+    assert again.status_code == 400 and again.json()["detail"]["code"] == "invalid_link"
+
+
+@pytest.mark.anyio
+async def test_signup_link_expires_and_new_link_replaces_old(client):
+    email = "link.vencido@example.com"
+    await client.post("/api/auth/register", json={"name": "A", "email": email, "terms_accepted": True})
+    first = link_token(email)
+    await client.post("/api/auth/register", json={"name": "A", "email": email, "terms_accepted": True})
+    second = link_token(email)
+    assert first != second
+    # Pedir um link novo invalida o anterior.
+    assert (await client.post("/api/auth/register/confirm", json={"token": first, "password": "Senha-segura-123"})).status_code == 400
+    async with client.session_factory() as db:
+        await db.execute(update(EmailToken).values(expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+        await db.commit()
+    assert (await client.post("/api/auth/register/confirm", json={"token": second, "password": "Senha-segura-123"})).status_code == 400
+
+
+@pytest.mark.anyio
+async def test_signup_does_not_reveal_existing_accounts(client):
+    await register_account(client, "existe@example.com")
+    async with _second_client() as other:
+        known = await other.post("/api/auth/register", json={"name": "X", "email": "existe@example.com", "terms_accepted": True})
+        unknown = await other.post("/api/auth/register", json={"name": "X", "email": "nao.existe@example.com", "terms_accepted": True})
+    # Mesma resposta (a diferença só aparece no e-mail, que só o dono lê).
+    assert known.status_code == unknown.status_code == 200
+    assert known.json()["status"] == unknown.json()["status"] == "check_email"
+    assert "já tem uma conta" in [m for m in mailer.outbox if m.to == "existe@example.com"][-1].text
+
+
+@pytest.mark.anyio
+async def test_forgot_and_reset_password(client):
+    email = "esqueci@example.com"
+    await register_account(client, email, password="Senha-antiga-1")
+    async with _second_client() as other_device:
+        await other_device.post("/api/auth/login", json={"email": email, "password": "Senha-antiga-1"})
+        mailer.outbox.clear()
+        assert (await client.post("/api/auth/password/forgot", json={"email": email})).json() == {"status": "check_email"}
+        # E-mail sem conta: mesma resposta e nenhum e-mail enviado.
+        assert (await client.post("/api/auth/password/forgot", json={"email": "ninguem@example.com"})).json() == {"status": "check_email"}
+        assert [m.to for m in mailer.outbox] == [email]
+        assert "/redefinir-senha#token=" in mailer.outbox[0].text
+        token = link_token(email)
+
+        reset = await client.post("/api/auth/password/reset", json={"token": token, "new_password": "Senha-nova-2"})
+        assert reset.json() == {"ok": True}
+        # Todas as sessões morrem (inclusive a de quem tinha a senha antiga).
+        assert (await other_device.get("/api/auth/me")).status_code == 401
+        assert (await client.get("/api/auth/me")).status_code == 401
+    assert (await client.post("/api/auth/login", json={"email": email, "password": "Senha-antiga-1"})).status_code == 401
+    assert (await client.post("/api/auth/login", json={"email": email, "password": "Senha-nova-2"})).status_code == 200
+    # Link de uso único; aviso por e-mail; pedido na trilha.
+    assert (await client.post("/api/auth/password/reset", json={"token": token, "new_password": "Outra-senha-3"})).status_code == 400
+    assert any("Senha alterada" in m.subject for m in mailer.outbox)
+    actions = {log["action"] for log in (await client.get("/api/audit")).json()["items"]}
+    assert {"solicitar_senha", "alterar_senha"} <= actions
+
+
+def test_totp_matches_rfc6238_vectors():
+    # Vetores oficiais da RFC 6238 (SHA-1, segredo "12345678901234567890"), 6 últimos dígitos.
+    secret = base64.b32encode(b"12345678901234567890").decode()
+    for unix_time, expected in ((59, "287082"), (1111111109, "081804"), (1234567890, "005924"), (2000000000, "279037")):
+        assert totp.code_at(secret, unix_time // 30) == expected
+    step = totp.current_step()
+    assert totp.verify(secret, totp.code_at(secret, step)) == step
+    assert totp.verify(secret, totp.code_at(secret, step), last_step=step) is None  # código já usado
+    assert totp.verify(secret, "12345") is None and totp.verify(secret, "abcdef") is None
+    uri = totp.provisioning_uri(secret, "ana@example.com")
+    assert uri.startswith("otpauth://totp/") and f"secret={secret}" in uri
+    codes = totp.new_recovery_codes()
+    assert len(codes) == 10 and len(set(codes)) == 10 and all(len(c) == 19 for c in codes)
+
+
+async def _enable_mfa(client):
+    setup = (await client.post("/api/auth/mfa/setup")).json()
+    secret = setup["secret"]
+    enabled = await client.post("/api/auth/mfa/enable", json={"code": totp.code_at(secret, totp.current_step())})
+    assert enabled.status_code == 200
+    return secret, enabled.json()["recovery_codes"]
+
+
+@pytest.mark.anyio
+async def test_mfa_login_requires_the_app_code(client):
+    email = "mfa@example.com"
+    await register_account(client, email)
+    secret, recovery = await _enable_mfa(client)
+    assert (await client.get("/api/auth/me")).json()["mfa_enabled"] is True
+
+    async with _second_client() as browser:
+        step1 = await browser.post("/api/auth/login", json={"email": email, "password": "Senha-segura-123"})
+        body = step1.json()
+        assert body["mfa_required"] is True and "set-cookie" not in step1.headers
+        assert (await browser.get("/api/auth/me")).status_code == 401  # ainda sem sessão
+        # O token do passo 2 não serve como sessão.
+        browser.cookies.set(server.auth_cookie_name(), body["mfa_token"])
+        assert (await browser.get("/api/auth/me")).status_code == 401
+        browser.cookies.clear()
+
+        wrong = await browser.post("/api/auth/login/mfa", json={"mfa_token": body["mfa_token"], "code": "000000"})
+        assert wrong.status_code == 401 and wrong.json()["detail"]["code"] == "mfa_invalid"
+        # O código usado para ATIVAR não vale de novo (antirreplay): usa o próximo intervalo.
+        code = totp.code_at(secret, totp.current_step() + 1)
+        ok = await browser.post("/api/auth/login/mfa", json={"mfa_token": body["mfa_token"], "code": code})
+        assert ok.status_code == 200 and (await browser.get("/api/auth/me")).status_code == 200
+        replay = await browser.post("/api/auth/login/mfa", json={"mfa_token": body["mfa_token"], "code": code})
+        assert replay.status_code == 401
+
+        # Código de recuperação: vale uma vez.
+        token = (await browser.post("/api/auth/login", json={"email": email, "password": "Senha-segura-123"})).json()["mfa_token"]
+        assert (await browser.post("/api/auth/login/mfa", json={"mfa_token": token, "code": recovery[0].upper()})).status_code == 200
+        assert (await browser.post("/api/auth/login/mfa", json={"mfa_token": token, "code": recovery[0]})).status_code == 401
+    assert (await client.get("/api/auth/me")).json()["mfa_recovery_codes_left"] == 9
+    assert any("Código de recuperação usado" in m.subject for m in mailer.outbox)
+
+
+@pytest.mark.anyio
+async def test_mfa_disable_needs_password_and_code(client):
+    await register_account(client, "mfa.off@example.com")
+    secret, _ = await _enable_mfa(client)
+    next_code = lambda offset: totp.code_at(secret, totp.current_step() + offset)
+    assert (await client.post("/api/auth/mfa/disable", json={"password": "errada-123", "code": next_code(1)})).status_code == 403
+    assert (await client.post("/api/auth/mfa/disable", json={"password": "Senha-segura-123", "code": "000000"})).status_code == 403
+    off = await client.post("/api/auth/mfa/disable", json={"password": "Senha-segura-123", "code": next_code(1)})
+    assert off.status_code == 200 and off.json()["user"]["mfa_enabled"] is False
+    logs = {log["action"] for log in (await client.get("/api/audit")).json()["items"]}
+    assert {"mfa_ativar", "mfa_desativar"} <= logs
+
+
+@pytest.mark.anyio
+async def test_mfa_code_attempts_are_limited(client):
+    email = "mfa.forca@example.com"
+    await register_account(client, email)
+    await _enable_mfa(client)
+    token = (await client.post("/api/auth/login", json={"email": email, "password": "Senha-segura-123"})).json()["mfa_token"]
+    statuses = [(await client.post("/api/auth/login/mfa", json={"mfa_token": token, "code": "000000"})).status_code
+                for _ in range(6)]
+    assert statuses == [401] * 5 + [429]
+
+
+@pytest.mark.anyio
+async def test_sessions_list_device_and_end_one(client):
+    email = "aparelho@example.com"
+    await register_account(client, email)
+    async with _second_client() as phone:
+        phone.headers["user-agent"] = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36"
+        await phone.post("/api/auth/login", json={"email": email, "password": "Senha-segura-123"})
+        sessions = (await client.get("/api/auth/sessions")).json()["sessions"]
+        other = next(s for s in sessions if not s["current"])
+        assert other["device"] == "Chrome no Android" and other["ip_address"]
+        current = next(s for s in sessions if s["current"])
+        assert (await client.post(f"/api/auth/sessions/{current['id']}/end", json={"confirm": True})).status_code == 400
+        assert (await client.post(f"/api/auth/sessions/{other['id']}/end", json={"confirm": True})).status_code == 200
+        assert (await phone.get("/api/auth/me")).status_code == 401
+        assert (await client.get("/api/auth/me")).status_code == 200
+        assert (await client.post(f"/api/auth/sessions/{other['id']}/end", json={"confirm": True})).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_account_export_zip(client):
+    import zipfile
+    patient_id = await _create_patient(client, "exporta.tudo@example.com")
+    await client.post(f"/api/patients/{patient_id}/records", json={"session_datetime": "2026-09-10T13:00:00Z", "content": "Evolução"})
+    response = await client.get("/api/account/export")
+    assert response.status_code == 200 and response.headers["content-type"] == "application/zip"
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    names = archive.namelist()
+    assert "psigestao_completo.json" in names and "LEIA-ME.txt" in names
+    assert any(n.startswith("pacientes/Paciente_Cripto_") and n.endswith(".pdf") for n in names)
+    data = json.loads(archive.read("psigestao_completo.json"))
+    assert data["pacientes"][0]["prontuarios"][0]["content"] == "Evolução"
+
+
+@pytest.mark.anyio
+async def test_close_account_keeps_only_what_the_law_requires(client):
+    email = "encerrar@example.com"
+    await register_account(client, email)
+    kept = (await client.post("/api/patients", json=patient_data("Com Prontuário"))).json()["id"]
+    gone = (await client.post("/api/patients", json=patient_data("Sem Prontuário"))).json()["id"]
+    await client.post(f"/api/patients/{kept}/records", json={"session_datetime": "2026-09-10T13:00:00Z", "content": "x"})
+    await _session_for(client, kept, "2026-10-20T13:00:00Z")
+
+    wrong = await client.post("/api/account/close", json={"confirmation": "sim", "password": "Senha-segura-123"})
+    assert wrong.status_code == 400
+    bad_password = await client.post("/api/account/close", json={"confirmation": "ENCERRAR", "password": "errada-123"})
+    assert bad_password.status_code == 403
+    closed = await client.post("/api/account/close", json={"confirmation": "encerrar", "password": "Senha-segura-123"})
+    assert closed.status_code == 200
+    summary = closed.json()
+    assert summary["deleted_patients"] == 1 and summary["retained_patients"] == 1 and summary["retained_until"]
+
+    # Ninguém entra mais; o e-mail fica livre; aviso por e-mail.
+    assert (await client.get("/api/auth/me")).status_code == 401
+    assert (await client.post("/api/auth/login", json={"email": email, "password": "Senha-segura-123"})).status_code == 401
+    assert any(m.to == email and "Conta encerrada" in m.subject for m in mailer.outbox)
+    async with client.session_factory() as db:
+        user = (await db.execute(select(User).where(User.closed_at.is_not(None)))).scalar_one()
+        assert user.email.endswith("@contas-encerradas.invalid") and user.password_hash is None
+        assert await db.get(Patient, gone) is None
+        assert (await db.get(Patient, kept)).archived_at is not None  # sob guarda, fora da lista
+        assert (await db.execute(select(Session).where(Session.owner_id == user.user_id))).first() is None
+        logs = (await db.execute(select(AuditLog).where(AuditLog.owner_id == user.user_id))).scalars().all()
+        assert any(log.action == "encerrar" and log.entity_type == "usuario" for log in logs)
+
+        # Expurgo: antes do fim da guarda, nada sai; depois, sai tudo (inclusive a trilha).
+        assert await server.purge_closed_accounts(db) == {"purged_patients": 0, "purged_accounts": 0}
+        later = datetime.now(timezone.utc) + timedelta(days=365 * 6)
+        assert await server.purge_closed_accounts(db, now=later) == {"purged_patients": 1, "purged_accounts": 1}
+        assert await db.get(User, user.user_id) is None
+        assert (await db.execute(select(AuditLog).where(AuditLog.owner_id == user.user_id))).first() is None
+        # O gatilho "somente inclusão" continua valendo para todo o resto.
+        db.add(AuditLog(owner_id="x", user_email="x@example.com", action="criar", entity_type="t", entity_id="1"))
+        await db.commit()
+        with pytest.raises(Exception):
+            await db.execute(text("DELETE FROM audit_logs"))
+            await db.commit()
+        await db.rollback()
+
+    # O mesmo e-mail pode criar uma conta nova.
+    assert (await register_account(client, email)).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_webhook_limit_is_per_token_and_tokens_expire(client, monkeypatch):
+    monkeypatch.setattr(server, "WEBHOOK_LIMIT_PER_TOKEN", 2)
+    tokens = []
+    for email in ("forms.a@example.com", "forms.b@example.com"):
+        async with _second_client() as browser:
+            await register_account(browser, email)
+            tokens.append((await browser.post("/api/integrations/google-forms/token")).json())
+    assert tokens[0]["expires_at"] and tokens[0]["expired"] is False
+    payload = {"patient_data": {"full_name": "Via Forms"}}
+
+    send = lambda token: client.post("/api/webhook/google-forms", json=payload, headers={"X-Webhook-Token": token})
+    first = [(await send(tokens[0]["token"])).status_code for _ in range(3)]
+    assert first == [200, 200, 429]
+    # Mesmo IP (como os servidores do Google), outro formulário: não é afetado.
+    assert (await send(tokens[1]["token"])).status_code == 200
+
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == "forms.b@example.com")
+                         .values(webhook_token_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
+        await db.commit()
+    expired = await send(tokens[1]["token"])
+    assert expired.status_code == 401 and "vencido" in expired.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_webhook_token_expiry_reminder(client):
+    await register_account(client, "lembrete@example.com")
+    await client.post("/api/integrations/google-forms/token")
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == "lembrete@example.com")
+                         .values(webhook_token_expires_at=datetime.now(timezone.utc) + timedelta(days=10)))
+        await db.commit()
+        mailer.outbox.clear()
+        assert await server.notify_expiring_webhook_tokens(db) == 1
+        assert await server.notify_expiring_webhook_tokens(db) == 0  # um aviso só por token
+    assert [m.to for m in mailer.outbox] == ["lembrete@example.com"]
+
+
+@pytest.mark.anyio
+async def test_audit_filters_and_csv_export(client):
+    await register_account(client, "trilha@example.com")
+    await client.post("/api/auth/logout")
+    await client.post("/api/auth/login", json={"email": "trilha@example.com", "password": "Senha-segura-123"})
+    logins = (await client.get("/api/audit", params={"action": "entrar"})).json()["items"]
+    assert logins and all(log["action"] == "entrar" for log in logins)
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    assert (await client.get("/api/audit", params={"start": future})).json()["items"] == []
+
+    export = await client.get("/api/audit/export", params={"action": "entrar"})
+    assert export.status_code == 200 and export.headers["content-type"].startswith("text/csv")
+    content = export.content.decode("utf-8-sig")
+    header, *rows = content.strip().splitlines()
+    assert header.startswith("Data e hora") and ";Ação;" in header
+    assert rows and all(";Login;" in row for row in rows)
+    assert server._csv_cell("=HYPERLINK(1)") == "'=HYPERLINK(1)"  # sem fórmula no Excel
+    # A própria exportação fica na trilha.
+    assert any(log["action"] == "exportar" and log["entity_type"] == "auditoria"
+               for log in (await client.get("/api/audit")).json()["items"])
+
+
+@pytest.mark.anyio
+async def test_patient_list_sort_total_and_next_session(client):
+    await register_account(client, "ordem@example.com")
+    ids = {}
+    for name in ("Érica Lima", "bruno Alves", "Ana Souza"):
+        ids[name] = (await client.post("/api/patients", json=patient_data(name))).json()["id"]
+    future = (datetime.now(timezone.utc) + timedelta(days=3)).replace(microsecond=0)
+    await _session_for(client, ids["Ana Souza"], future.isoformat())
+    await _session_for(client, ids["Ana Souza"], (future - timedelta(days=10)).isoformat())  # passada: não conta
+
+    by_name = (await client.get("/api/patients", params={"sort": "name", "limit": 2})).json()
+    assert by_name["total"] == 3
+    assert [p["full_name"] for p in by_name["items"]] == ["Ana Souza", "bruno Alves"]  # sem diferenciar acentos/maiúsculas
+    rest = (await client.get("/api/patients", params={"sort": "name", "limit": 2, "cursor": by_name["next_cursor"]})).json()
+    assert [p["full_name"] for p in rest["items"]] == ["Érica Lima"] and rest["next_cursor"] is None
+    ana = by_name["items"][0]
+    assert datetime.fromisoformat(ana["next_session"]) == future
+    assert by_name["items"][1]["next_session"] == ""
+    assert (await client.get("/api/patients", params={"sort": "outra"})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_records_filtered_by_period(client):
+    patient_id = await _create_patient(client, "periodo@example.com")
+    for day in (5, 15, 25):
+        await client.post(f"/api/patients/{patient_id}/records",
+                          json={"session_datetime": f"2026-09-{day:02d}T13:00:00Z", "content": f"dia {day}"})
+    page = (await client.get(f"/api/patients/{patient_id}/records",
+                             params={"start": "2026-09-10T00:00:00Z", "end": "2026-09-20T00:00:00Z"})).json()
+    assert [r["content"] for r in page["items"]] == ["dia 15"] and page["total"] == 1
+
+
+def test_mail_is_required_in_production(monkeypatch):
+    for name in ("MAIL_BACKEND", "SMTP_HOST", "SMTP_FROM", "SMTP_SECURITY"):
+        monkeypatch.delenv(name, raising=False)
+    mailer.check_mail_config("development")  # desenvolvimento: sem SMTP, o e-mail vai para o log
+    with pytest.raises(SystemExit):
+        mailer.check_mail_config("production")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_FROM", "PsiGestão <nao-responda@example.com>")
+    mailer.check_mail_config("production")
+    monkeypatch.setenv("SMTP_SECURITY", "none")  # sem criptografia: nunca em produção
+    with pytest.raises(SystemExit):
+        mailer.check_mail_config("production")
+
+
+def test_email_links_carry_the_token_in_the_fragment(monkeypatch):
+    monkeypatch.setenv("FRONTEND_URL", "https://app.exemplo.com.br/")
+    assert server.frontend_link("/redefinir-senha", "abc") == "https://app.exemplo.com.br/redefinir-senha#token=abc"
+    assert server.frontend_link("/login") == "https://app.exemplo.com.br/login"

@@ -1,0 +1,16 @@
+# Configuração do gitleaks (busca de segredos no CI: .github/workflows/ci.yml).
+# Usa todas as regras padrão; a exceção abaixo é a MÍNIMA necessária.
+
+[extend]
+useDefault = true
+
+# Os testes automatizados usam senhas e segredos FALSOS de propósito
+# ("Senha-segura-123", "route-test-secret-..."). A liberação vale só para a
+# regra genérica e só neste arquivo: um token real de um provedor (AWS,
+# GitHub, Google...) colado nos testes continua sendo barrado pelas regras
+# específicas (conferido: um token no formato do GitHub ainda é apontado).
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "Senhas e segredos falsos dos testes automatizados"
+paths = ['''tests/test_backend_routes\.py$''']

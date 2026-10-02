@@ -11,6 +11,8 @@ import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -59,6 +61,9 @@ export default function PatientDetail() {
   const [recordsCursor, setRecordsCursor] = useState(null);
   const [recordsTotal, setRecordsTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Complementares (evoluções): filtro por período ("De"/"Até", dias locais).
+  const [period, setPeriod] = useState({ from: "", to: "" });
+  const filteredByPeriod = Boolean(period.from || period.to);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingRec, setEditingRec] = useState(null);
   // PRODUTO (rascunho automático): força recalcular os avisos de rascunho
@@ -72,16 +77,25 @@ export default function PatientDetail() {
   const [highlightId, setHighlightId] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const load = useCallback(async () => {
+  // Período em parâmetros da API: "Até 10/03" inclui o dia 10 inteiro (o
+  // servidor recebe o fim exclusivo, 11/03 00:00 no fuso do navegador).
+  const recordsParams = useCallback((extra = {}) => {
+    const params = new URLSearchParams(extra);
+    if (period.from) params.set("start", new Date(`${period.from}T00:00`).toISOString());
+    if (period.to) {
+      const end = new Date(`${period.to}T00:00`);
+      end.setDate(end.getDate() + 1);
+      params.set("end", end.toISOString());
+    }
+    return params;
+  }, [period]);
+
+  // Antes a ficha e as evoluções vinham juntas. Separadas, mudar o período
+  // recarrega só a lista (sem registrar de novo a abertura da ficha na auditoria).
+  const loadPatient = useCallback(async () => {
     try {
-      const [p, r] = await Promise.all([
-        api.get(`/patients/${id}`),
-        api.get(`/patients/${id}/records`),
-      ]);
-      setPatient(p.data);
-      setRecords(r.data.items);
-      setRecordsCursor(r.data.next_cursor);
-      setRecordsTotal(r.data.total);
+      const { data } = await api.get(`/patients/${id}`);
+      setPatient(data);
     } catch (e) {
       // Antes QUALQUER erro dizia "Paciente não encontrado" e voltava para a
       // lista. Com a tela bloqueada (423) ou a sessão expirada (401), isso
@@ -93,7 +107,21 @@ export default function PatientDetail() {
     }
   }, [id, navigate]);
 
-  useEffect(() => { load(); }, [load]);
+  const loadRecords = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/patients/${id}/records?${recordsParams()}`);
+      setRecords(data.items);
+      setRecordsCursor(data.next_cursor);
+      setRecordsTotal(data.total);
+    } catch (e) {
+      // 404 já é tratado por loadPatient; 401/423 pela api.js.
+    }
+  }, [id, recordsParams]);
+
+  const load = useCallback(() => Promise.all([loadPatient(), loadRecords()]), [loadPatient, loadRecords]);
+
+  useEffect(() => { loadPatient(); }, [loadPatient]);
+  useEffect(() => { loadRecords(); }, [loadRecords]);
   useEffect(() => { purgeExpiredDrafts(); }, []); // minimização: rascunhos com mais de 7 dias somem
 
   // Avisos de anotações não salvas neste dispositivo (só metadados, sem descriptografar).
@@ -105,7 +133,7 @@ export default function PatientDetail() {
     if (!recordsCursor) return;
     setLoadingMore(true);
     try {
-      const params = new URLSearchParams({ cursor: recordsCursor, limit: 20 });
+      const params = recordsParams({ cursor: recordsCursor, limit: 20 });
       const { data } = await api.get(`/patients/${id}/records?${params}`);
       setRecords((current) => [...current, ...data.items]);
       setRecordsCursor(data.next_cursor);
@@ -239,7 +267,7 @@ export default function PatientDetail() {
               <div className="mt-3 space-y-3 text-sm">
                 <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
                 <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
-                <InfoRow icon={GraduationCap} label="Escolar." value={patient.education || "—"} />
+                <InfoRow icon={GraduationCap} label="Escolaridade" value={patient.education || "—"} />
                 <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
                 <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
                 <InfoRow icon={Mail} label="E-mail" value={contactLink("mailto", patient.email)} />
@@ -298,11 +326,34 @@ export default function PatientDetail() {
 
         {/* Right: records */}
         <div className="lg:col-span-2">
-          <div className="mb-4 flex items-center gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <FileText className="h-5 w-5 text-[#1E3A8A]" />
             <h2 className="font-head text-xl font-bold text-[#0F172A]">Evolução clínica</h2>
             {/* Total real (contado no servidor), não só os já carregados. */}
             <Badge variant="secondary" className="ml-1">{recordsTotal}</Badge>
+            {filteredByPeriod && <span className="text-xs text-slate-500">no período</span>}
+          </div>
+
+          {/* Complementares (evoluções): achar as sessões de um período sem rolar
+              anos de evoluções. */}
+          <div className="mb-4 flex flex-wrap items-end gap-3" role="group" aria-label="Filtrar evoluções por período"
+            data-testid="records-period">
+            <div>
+              <Label htmlFor="records-from" className="text-xs text-slate-600">De</Label>
+              <Input id="records-from" type="date" value={period.from} max={period.to || undefined}
+                onChange={(e) => setPeriod((current) => ({ ...current, from: e.target.value }))} className="mt-1 h-9 w-40" />
+            </div>
+            <div>
+              <Label htmlFor="records-to" className="text-xs text-slate-600">Até</Label>
+              <Input id="records-to" type="date" value={period.to} min={period.from || undefined}
+                onChange={(e) => setPeriod((current) => ({ ...current, to: e.target.value }))} className="mt-1 h-9 w-40" />
+            </div>
+            {filteredByPeriod && (
+              <Button type="button" variant="ghost" size="sm" className="text-[#1E3A8A]"
+                onClick={() => setPeriod({ from: "", to: "" })}>
+                Ver todas
+              </Button>
+            )}
           </div>
 
           {/* PRODUTO: uma evolução começada e não salva não fica esquecida. */}
@@ -317,7 +368,11 @@ export default function PatientDetail() {
             </div>
           )}
 
-          {records.length === 0 ? (
+          {records.length === 0 && filteredByPeriod ? (
+            <Card className="border-slate-200 py-12 text-center shadow-sm">
+              <p className="text-sm text-slate-500">Nenhuma evolução neste período.</p>
+            </Card>
+          ) : records.length === 0 ? (
             <Card className="border-slate-200 py-16 text-center shadow-sm">
               <p className="text-sm text-slate-500">Nenhuma evolução registrada ainda.</p>
               <Button onClick={openNew} variant="link" className="mt-2 text-[#1E3A8A]">Registrar a primeira evolução</Button>
@@ -414,14 +469,17 @@ function contactLink(scheme, value) {
 }
 
 function InfoRow({ icon: Icon, label, value }) {
+  // Rótulo EM CIMA do valor: o valor usa a largura toda do cartão. Antes, lado
+  // a lado, a coluna do valor era estreita; cortado com "…" sumia metade do
+  // endereço/e-mail, e quebrando a linha o e-mail partia no meio ("…example.co / m").
   return (
     <div className="flex items-start gap-3">
-      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
-      {/* Acessibilidade (varredura de UI): rótulos em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
-      <span className="mt-0.5 w-24 shrink-0 text-xs uppercase tracking-wide text-slate-500">{label}</span>
-      {/* Celular (UX): o valor quebra a linha em vez de ser cortado com "…"
-          (endereço, e-mail e a data do consentimento sumiam pela metade). */}
-      <span className="min-w-0 break-words text-slate-700">{value}</span>
+      <Icon className="mt-1 h-4 w-4 shrink-0 text-slate-400" />
+      <div className="min-w-0">
+        {/* Acessibilidade (varredura de UI): rótulos em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
+        <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+        <p className="break-words text-slate-700">{value}</p>
+      </div>
     </div>
   );
 }

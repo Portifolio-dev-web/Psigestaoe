@@ -13,7 +13,8 @@ import {
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
-import { ageFromBirthDate, formatDateOnly } from "@/lib/datetime";
+import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
+import { countLabel } from "@/lib/utils";
 
 // UI Components
 import { Card } from "@/components/ui/card";
@@ -81,6 +82,14 @@ const SELECT_CLASS = "mt-1.5 flex h-10 w-full rounded-md border border-slate-200
 // ESCALA: tamanho da página da lista de pacientes (o servidor aceita até 100).
 const PAGE_SIZE = 50;
 
+// Complementares (lista de pacientes): ordens oferecidas (o servidor ordena;
+// o nome é criptografado, ver _patients_page em server.py).
+const SORT_OPTIONS = [
+  { id: "recent", label: "Cadastrados por último" },
+  { id: "name", label: "Nome (A a Z)" },
+  { id: "last_consultation", label: "Última consulta" },
+];
+
 // SEGURANÇA (varredura, item 12): endereço do webhook no script do Google Forms.
 // Antes vinha de WEBHOOK_URL, embutida no JavaScript publicado em QUALQUER
 // build: a URL do túnel ngrok do desenvolvimento ia parar no código de produção.
@@ -118,6 +127,9 @@ export default function Patients() {
   const inFlight = useSingleFlight();
   // Item 12: pacientes arquivados ficam fora da lista ativa, em um filtro próprio.
   const [showArchived, setShowArchived] = useState(false);
+  // Complementares: ordem da lista e total de pacientes (com o filtro/busca atual).
+  const [sort, setSort] = useState("recent");
+  const [total, setTotal] = useState(null);
   // Termo atual do profissional (para novos consentimentos).
   const [currentTerm, setCurrentTerm] = useState("");
 
@@ -125,7 +137,7 @@ export default function Patients() {
   // gerado (`newToken`); depois disso não pode ser recuperado, só trocado.
   const [integrationOpen, setIntegrationOpen] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
-  const [integration, setIntegration] = useState(null); // {configured, hint, created_at}
+  const [integration, setIntegration] = useState(null); // {configured, hint, created_at, expires_at, expired}
   const [newToken, setNewToken] = useState("");
   const [tokenBusy, setTokenBusy] = useState(false);
 
@@ -140,9 +152,9 @@ export default function Patients() {
   const fetchPage = (cursor) => {
     const term = debouncedQuery.trim();
     if (term.length >= 2) {
-      return api.post("/patients/search", { q: term, archived: showArchived, cursor, limit: PAGE_SIZE });
+      return api.post("/patients/search", { q: term, archived: showArchived, cursor, limit: PAGE_SIZE, sort });
     }
-    const params = new URLSearchParams({ archived: showArchived, limit: PAGE_SIZE });
+    const params = new URLSearchParams({ archived: showArchived, limit: PAGE_SIZE, sort });
     if (cursor) params.set("cursor", cursor);
     return api.get(`/patients?${params}`);
   };
@@ -154,6 +166,7 @@ export default function Patients() {
       if (seq !== requestSeq.current) return; // chegou uma resposta mais nova
       setPatients(data.items);
       setNextCursor(data.next_cursor);
+      setTotal(data.total ?? null);
       // Item 15: antes este load também buscava /auth/me só para pegar o token
       // do webhook, deixando o token em memória em toda visita à tela.
     } catch (err) {
@@ -198,7 +211,7 @@ export default function Patients() {
   }, [query]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setPatients(null); load(); }, [showArchived, debouncedQuery]);
+  useEffect(() => { setPatients(null); load(); }, [showArchived, debouncedQuery, sort]);
 
   // ========================================================================
   // HANDLERS - DIALOG
@@ -495,8 +508,18 @@ function onFormSubmit(e) {
       <PatientHeader onNew={openNew} onIntegration={openIntegration} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <PatientSearch query={query} onQueryChange={setQuery} />
-        <ArchiveFilter showArchived={showArchived} onChange={setShowArchived} />
+        <div className="flex flex-wrap items-center gap-2">
+          <SortSelect sort={sort} onChange={setSort} />
+          <ArchiveFilter showArchived={showArchived} onChange={setShowArchived} />
+        </div>
       </div>
+      {/* Complementares: total de pacientes (antes a tela não dizia quantos eram). */}
+      {total !== null && patients !== null && (
+        <p className="-mt-2 text-sm text-slate-500" role="status" data-testid="patients-total">
+          {countLabel(total, showArchived ? "paciente arquivado" : "paciente", showArchived ? "pacientes arquivados" : "pacientes")}
+          {debouncedQuery.trim().length >= 2 ? " encontrados na busca" : ""}
+        </p>
+      )}
       <PatientContent patients={patients} filtered={filtered} navigate={navigate} showArchived={showArchived}
         searching={debouncedQuery.trim().length >= 2}
         onEdit={openEdit} onDelete={(p) => setConfirm({ type: "delete", patient: p })}
@@ -566,6 +589,23 @@ function PatientSearch({ query, onQueryChange }) {
   );
 }
 
+// Complementares: ordem da lista. Lista nativa (<select>): leve e com o
+// comportamento de acessibilidade do próprio navegador.
+function SortSelect({ sort, onChange }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Label htmlFor="patients-sort" className="text-sm text-slate-600">Ordem</Label>
+      <select id="patients-sort" value={sort} onChange={(e) => onChange(e.target.value)} data-testid="patients-sort"
+        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+        {SORT_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// Complementares: próxima sessão marcada (não cancelada) de cada paciente.
+const fmtNextSession = (iso) => (iso ? formatDateTime(iso) : "—");
+
 // Item 12: alterna entre a lista ativa e os pacientes arquivados.
 function ArchiveFilter({ showArchived, onChange }) {
   const option = (active) =>
@@ -631,6 +671,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive,
             <TableHead>Nome</TableHead>
             <TableHead>Nascimento</TableHead>
             <TableHead>Última consulta</TableHead>
+            <TableHead>Próxima sessão</TableHead>
             <TableHead className="w-10"></TableHead>
           </TableRow>
         </TableHeader>
@@ -648,6 +689,7 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive,
               </TableCell>
               <TableCell className="text-slate-600">{fmtDate(p.birth_date)}</TableCell>
               <TableCell className="text-slate-600">{fmtDate(p.last_consultation_date)}</TableCell>
+              <TableCell className="text-slate-600">{fmtNextSession(p.next_session)}</TableCell>
               <TableCell onClick={(e) => e.stopPropagation()}>
                 <RowMenu p={p} busy={isBusy?.(`patient:${p.id}`)} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
                   onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
@@ -678,7 +720,10 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
             <RowMenu p={p} busy={isBusy?.(`patient:${p.id}`)} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
               onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
           </div>
-          <p className="mt-2 text-xs text-slate-500">Última consulta: {fmtDate(p.last_consultation_date)}</p>
+          <p className="mt-2 text-xs text-slate-500">
+            Última consulta: {fmtDate(p.last_consultation_date)}
+            {p.next_session && <> · Próxima: {fmtNextSession(p.next_session)}</>}
+          </p>
         </Card>
       ))}
     </div>
@@ -1031,6 +1076,10 @@ function IntegrationDialog({ open, onOpenChange, integration, newToken, tokenBus
   const createdAt = integration?.created_at
     ? new Date(integration.created_at).toLocaleDateString("pt-BR")
     : "";
+  // Backlog (token com validade): o token vence (padrão 1 ano). Perto do fim, e
+  // depois de vencido, a tela avisa; o profissional também recebe um e-mail.
+  const expiresAt = integration?.expires_at ? new Date(integration.expires_at) : null;
+  const daysLeft = expiresAt ? Math.ceil((expiresAt - Date.now()) / 86400000) : null;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
@@ -1051,9 +1100,19 @@ function IntegrationDialog({ open, onOpenChange, integration, newToken, tokenBus
                 <div className="min-w-0 flex-1">
                   <p className="font-medium text-[#0F172A]">
                     {integration.configured
-                      ? `Integração ativa · token terminado em …${integration.hint}${createdAt ? ` · gerado em ${createdAt}` : ""}`
+                      ? `${integration.expired ? "Integração parada" : "Integração ativa"} · token terminado em …${integration.hint}${createdAt ? ` · gerado em ${createdAt}` : ""}`
                       : "Nenhum token de integração ativo"}
                   </p>
+                  {integration.configured && expiresAt && (
+                    <p className={`mt-1 text-xs font-medium ${integration.expired ? "text-red-700" : daysLeft <= 30 ? "text-amber-800" : "text-slate-600"}`}
+                      role={integration.expired || daysLeft <= 30 ? "alert" : undefined} data-testid="integration-expiry">
+                      {integration.expired
+                        ? `Token vencido em ${expiresAt.toLocaleDateString("pt-BR")}: o formulário parou de cadastrar pacientes. Gere um novo token e atualize o script.`
+                        : daysLeft <= 30
+                          ? `Vence em ${expiresAt.toLocaleDateString("pt-BR")} (${daysLeft === 1 ? "amanhã" : `em ${daysLeft} dias`}). Gere um novo token antes disso.`
+                          : `Válido até ${expiresAt.toLocaleDateString("pt-BR")}.`}
+                    </p>
+                  )}
                   <p className="mt-1 text-xs text-slate-500">
                     Por segurança, o token é exibido só no momento em que é gerado. Gerar um novo token desativa o anterior
                     (atualize o script no formulário depois disso).

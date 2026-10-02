@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { formatDateOnly } from "@/lib/datetime";
 import { STATUS, evolutionPath, formatDateParam, formatTimeRange } from "@/components/agenda/agendaUtils";
+import SecurityNudge from "@/components/SecurityNudge";
 
 // Correção (varredura de UI, defeito 1): antes `new Date(s).toLocaleDateString()`,
 // que mostrava o nascimento UM DIA ANTES no Brasil (ver lib/datetime.js).
@@ -173,6 +174,8 @@ export default function Dashboard() {
       </div>
 
       {/* UX: a agenda do dia vem primeiro (no celular, antes dos totais). */}
+      {/* Segurança (backlog: MFA opcional): convite para ativar a verificação em duas etapas. */}
+      <SecurityNudge />
       <TodaySessions />
 
       {!stats ? (

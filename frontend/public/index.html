@@ -2,13 +2,16 @@
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <!-- Complementares: o favicon.ico referenciado não existia (aba sem ícone).
+         SVG para navegadores atuais; ICO e PNG para os demais e para a tela
+         inicial do celular. -->
+    <link rel="icon" href="%PUBLIC_URL%/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" sizes="48x48" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#1E3A8A" />
     <meta name="description" content="PsiGestão — Gestão Clínica e Prontuários de Psicologia" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+    <!-- Fontes: servidas pelo próprio app (src/index.js), não mais pelo Google Fonts. -->
     <title>PsiGestão — Prontuários de Psicologia</title>
   </head>
   <body>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
@@ -7,19 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Stethoscope, Loader2, Mail, Lock } from "lucide-react";
+import { Loader2, Mail, ShieldCheck } from "lucide-react";
 // Importar o componente de Login do Google (necessita de 'npm install @react-oauth/google')
 import { GoogleLogin } from "@react-oauth/google";
-import { GradientWave } from "@/components/ui/gradient-wave";
+import AuthShell from "@/components/auth/AuthShell";
+import PasswordInput from "@/components/auth/PasswordInput";
+import { useGoogleButtonWidth } from "@/components/auth/useGoogleButtonWidth";
 
-// Fundo animado do painel esquerdo, nas cores da marca: o azul-marinho do
-// menu (#0F2C59), o azul primário (#1E3A8A) e dois azuis de apoio. As cores
-// padrão do componente (azul-claro e branco) deixariam o texto branco do
-// painel ilegível. Fica numa constante de MÓDULO para o fundo não ser
-// recriado a cada tecla digitada no formulário.
-// Substitui a foto que vinha do Unsplash: uma requisição a menos para um
-// servidor de terceiros a cada abertura da tela de login.
-const LOGIN_GRADIENT_COLORS = ["#0F2C59", "#1E3A8A", "#0369A1", "#1D4ED8"];
+// O fundo animado do painel esquerdo (antes uma foto do Unsplash) e o layout
+// ficam em components/auth/AuthShell.js, compartilhados pelas telas de entrada.
 
 export default function Login() {
   const { setUser } = useAuth();
@@ -32,33 +28,53 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // Segurança (backlog: MFA): senha certa numa conta com verificação em duas
+  // etapas -> o servidor devolve um mfa_token e pede o código do aplicativo.
+  const [mfaToken, setMfaToken] = useState(null);
+  const [code, setCode] = useState("");
+  const [useRecovery, setUseRecovery] = useState(false);
+  const [googleBoxRef, googleWidth] = useGoogleButtonWidth();
 
-  // Correção (varredura de UI, defeito 8): o botão do Google tinha largura fixa
-  // de 384 px e, no celular, passava das bordas do formulário. O Google só
-  // aceita largura em pixels (entre 200 e 400), não "100%", então medimos a
-  // área do botão e acompanhamos mudanças de tamanho (girar o celular, etc.).
-  const googleBoxRef = useRef(null);
-  const [googleWidth, setGoogleWidth] = useState(384);
-  useEffect(() => {
-    const box = googleBoxRef.current;
-    if (!box) return undefined;
-    const update = () => setGoogleWidth(Math.max(200, Math.min(400, Math.floor(box.clientWidth))));
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(box);
-    return () => observer.disconnect();
-  }, []);
+  const finishLogin = (user) => {
+    setUser(user);
+    toast.success("Bem-vindo(a) de volta!");
+    navigate(afterLogin, { replace: true });
+  };
 
   const handleEmailLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
       const { data } = await api.post("/auth/login", { email, password });
-      setUser(data.user);
-      toast.success("Bem-vindo(a) de volta!");
-      navigate(afterLogin, { replace: true });
+      if (data.mfa_required) {
+        setMfaToken(data.mfa_token);
+        setCode("");
+        setUseRecovery(false);
+        return;
+      }
+      finishLogin(data.user);
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMfa = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code: code.trim() });
+      finishLogin(data.user);
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      // O passo 2 vale 5 minutos: passou disso, volta para a senha.
+      if (detail?.code === "mfa_expired") {
+        setMfaToken(null);
+        setPassword("");
+      }
+      toast.error(formatApiErrorDetail(detail) || err.message);
+      setCode("");
     } finally {
       setLoading(false);
     }
@@ -96,53 +112,59 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen">
-      {/* bg-[#0F2C59]: cor de reserva caso o navegador não tenha WebGL. */}
-      <div className="relative hidden w-1/2 overflow-hidden bg-[#0F2C59] lg:block">
-        <GradientWave colors={LOGIN_GRADIENT_COLORS} />
-        {/* Véu escuro leve: mantém o texto branco legível quando as ondas mais claras passam por trás. */}
-        <div className="absolute inset-0 bg-[#0F2C59]/30" />
-        <div className="relative z-10 flex h-full flex-col justify-between p-12 text-white">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/15">
-              <Stethoscope className="h-5 w-5" />
+    <AuthShell headline="Cuidado clínico com segurança de dados."
+      tagline="Prontuários criptografados, trilha de auditoria e conformidade LGPD para profissionais de psicologia.">
+      {mfaToken ? (
+        // ------------------------------------------------ passo 2 (MFA)
+        <>
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+            <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <h1 className="mt-4 font-head text-2xl font-bold text-[#0F172A]">Verificação em duas etapas</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            {useRecovery
+              ? "Digite um dos códigos de recuperação que você guardou ao ativar a verificação. Cada um vale uma vez."
+              : "Abra o aplicativo autenticador no celular e digite o código de 6 dígitos do PsiGestão."}
+          </p>
+          <form onSubmit={handleMfa} className="mt-6 space-y-4">
+            <div>
+              <Label htmlFor="mfa-code" className="text-slate-700">{useRecovery ? "Código de recuperação" : "Código do aplicativo"}</Label>
+              {/* autoComplete="one-time-code": o celular oferece o código para colar. */}
+              <Input id="mfa-code" value={code} onChange={(e) => setCode(e.target.value)} required autoFocus
+                autoComplete="one-time-code" maxLength={useRecovery ? 32 : 6}
+                inputMode={useRecovery ? "text" : "numeric"} pattern={useRecovery ? undefined : "[0-9]{6}"}
+                placeholder={useRecovery ? "xxxx-xxxx-xxxx-xxxx" : "000000"}
+                className="mt-1.5 text-center font-mono text-lg tracking-[0.3em]" data-testid="login-mfa-input" />
             </div>
-            <span className="font-head text-xl font-bold">PsiGestão</span>
+            <Button type="submit" disabled={loading} className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="login-mfa-submit">
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Confirmar"}
+            </Button>
+          </form>
+          <div className="mt-5 flex flex-col items-center gap-2 text-sm">
+            <button type="button" className="font-medium text-[#1E3A8A] hover:underline"
+              onClick={() => { setUseRecovery((value) => !value); setCode(""); }}>
+              {useRecovery ? "Usar o código do aplicativo" : "Perdi o celular: usar um código de recuperação"}
+            </button>
+            <button type="button" className="text-slate-500 hover:text-[#1E3A8A] hover:underline"
+              onClick={() => { setMfaToken(null); setPassword(""); }}>
+              Voltar
+            </button>
           </div>
-          <div>
-            <h1 className="font-head text-4xl font-extrabold leading-tight">
-              Cuidado clínico com segurança de dados.
-            </h1>
-            <p className="mt-4 max-w-md text-blue-100">
-              Prontuários criptografados, trilha de auditoria e conformidade LGPD para
-              profissionais de psicologia.
-            </p>
-          </div>
-          <p className="text-xs text-blue-200">Dados criptografados · HTTPS/TLS · CFP</p>
-        </div>
-      </div>
-
-      <div className="flex w-full items-center justify-center px-6 lg:w-1/2">
-        <div className="psi-fade-up w-full max-w-sm">
-          <div className="mb-8 lg:hidden">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#1E3A8A]">
-                <Stethoscope className="h-5 w-5 text-white" />
-              </div>
-              <span className="font-head text-xl font-bold text-[#0F172A]">PsiGestão</span>
-            </div>
-          </div>
-          <h2 className="font-head text-2xl font-bold text-[#0F172A]">Entrar</h2>
+        </>
+      ) : (
+        // ------------------------------------------------ passo 1
+        <>
+          <h1 className="font-head text-2xl font-bold text-[#0F172A]">Entrar</h1>
           <p className="mt-1 text-sm text-slate-500">Acesse o painel do profissional</p>
 
           <form onSubmit={handleEmailLogin} className="mt-6 space-y-4">
             <div>
               <Label htmlFor="email" className="text-slate-700">E-mail</Label>
               <div className="relative mt-1.5">
-                <Mail className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                <Mail className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" aria-hidden="true" />
                 {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
                 <Input
-                  id="email" type="email" required maxLength={LIMITS.email} value={email}
+                  id="email" type="email" required maxLength={LIMITS.email} value={email} autoComplete="username"
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="voce@clinica.com" className="pl-9"
                   data-testid="login-email-input"
@@ -150,13 +172,19 @@ export default function Login() {
               </div>
             </div>
             <div>
-              <Label htmlFor="password" className="text-slate-700">Senha</Label>
-              <div className="relative mt-1.5">
-                <Lock className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <Input
-                  id="password" type="password" required maxLength={LIMITS.loginPassword} value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••" className="pl-9"
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password" className="text-slate-700">Senha</Label>
+                {/* Segurança média: antes não havia como recuperar a senha esquecida. */}
+                <Link to="/esqueci-senha" className="text-xs font-medium text-[#1E3A8A] hover:underline" data-testid="forgot-password-link">
+                  Esqueci minha senha
+                </Link>
+              </div>
+              {/* Complementares (login): botão de mostrar a senha. E sem o
+                  "••••••••" de exemplo, que parecia uma senha já preenchida. */}
+              <div className="mt-1.5">
+                <PasswordInput
+                  id="password" required withIcon maxLength={LIMITS.loginPassword} value={password}
+                  autoComplete="current-password" onChange={(e) => setPassword(e.target.value)}
                   data-testid="login-password-input"
                 />
               </div>
@@ -202,8 +230,8 @@ export default function Login() {
               Política de Privacidade
             </Link>
           </p>
-        </div>
-      </div>
-    </div>
+        </>
+      )}
+    </AuthShell>
   );
 }

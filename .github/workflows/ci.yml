@@ -1,0 +1,127 @@
+# CI do PsiGestão (segurança média: "não há CI").
+# Antes nada rodava a cada push: os testes, a auditoria de dependências e a
+# busca de segredos dependiam de alguém lembrar de rodar na própria máquina.
+# Agora, a cada push na main e a cada pull request:
+#   - backend: os testes automatizados;
+#   - dependências: pip-audit (API) e yarn audit (frontend, com o filtro de
+#     .github/scripts/yarn_audit_gate.py);
+#   - frontend: o build de produção, com avisos tratados como erro (CI=true);
+#   - segredos: gitleaks nos arquivos atuais e nos commits novos;
+#   - imagens Docker: as duas imagens de produção continuam montando.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Menor permissão possível: o CI só lê o código.
+permissions:
+  contents: read
+
+# Um push novo cancela a execução anterior do mesmo ramo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (testes)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"  # a mesma da imagem (backend/Dockerfile)
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      # --require-hashes: instala exatamente o que foi revisado (varredura, item 13).
+      - run: pip install --require-hashes -r requirements-dev.txt
+      - run: python -m pytest ../tests -q
+        env:
+          ENVIRONMENT: development
+
+  dependencies:
+    name: Dependências (vulnerabilidades conhecidas)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: API (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit --disable-pip --require-hashes -r backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"  # a mesma da imagem (frontend/Dockerfile)
+      - name: Frontend (yarn audit)
+        working-directory: frontend
+        run: |
+          yarn audit --groups dependencies --json > ../yarn-audit.json || true
+          python ../.github/scripts/yarn_audit_gate.py ../yarn-audit.json
+
+  frontend:
+    name: Frontend (build de produção)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - run: yarn install --frozen-lockfile --network-timeout 600000
+      # CI=true: avisos do lint viram erro e quebram o build.
+      - run: yarn build
+        env:
+          CI: "true"
+          GENERATE_SOURCEMAP: "false"
+          REACT_APP_BACKEND_URL: https://api.exemplo.com.br
+
+  secrets:
+    name: Segredos (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # histórico completo, para ler os commits novos
+      - name: Arquivos atuais
+        run: >
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0
+          dir /repo --config /repo/.gitleaks.toml --redact --no-banner
+      # Só os commits NOVOS: o histórico antigo tem segredos já vazados (e já
+      # trocados), que só somem reescrevendo o histórico (ver README).
+      - name: Commits novos
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            RANGE="origin/$BASE_REF..HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            RANGE="$BEFORE..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          git config --global --add safe.directory "$PWD"
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0 \
+            git /repo --config /repo/.gitleaks.toml --log-opts="$RANGE" --redact --no-banner
+
+  docker:
+    name: Imagens Docker (produção)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t psigestao-api ./backend
+      - run: >
+          docker build --target production
+          --build-arg REACT_APP_BACKEND_URL=https://api.exemplo.com.br
+          -t psigestao-web ./frontend

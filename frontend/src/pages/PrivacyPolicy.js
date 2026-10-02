@@ -14,8 +14,10 @@ export default function PrivacyPolicy() {
   // Aberta em nova aba (a partir do cadastro) não há histórico para voltar.
   const goBack = () => (window.history.length > 1 ? navigate(-1) : navigate("/"));
 
+  // Acessibilidade (complementares): <main> como região principal (antes a
+  // página pública não tinha, e o leitor de tela não tinha como pular para ela).
   return (
-    <div className="min-h-screen bg-[#F8FAFC] px-4 py-8 sm:py-12">
+    <main className="min-h-screen bg-[#F8FAFC] px-4 py-8 sm:py-12">
       <div className="mx-auto max-w-3xl">
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -38,6 +40,6 @@ export default function PrivacyPolicy() {
           </div>
         </Card>
       </div>
-    </div>
+    </main>
   );
 }

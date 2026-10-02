@@ -74,3 +74,19 @@ export function todayISO() {
   const now = new Date();
   return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
 }
+
+// ---------------------------------------------------------------------------
+// Política de senha (mesmas regras do servidor: validate_password_strength em
+// server.py). Aqui só avisa antes de enviar; quem decide é o servidor.
+// Segurança média: antes havia uma cópia desta função em cada tela (cadastro
+// e Configurações); agora o cadastro, "criar senha", "nova senha" e a troca de
+// senha usam esta, e uma mudança de regra vale para todas.
+// ---------------------------------------------------------------------------
+export const PASSWORD_RULE = "Mínimo de 8 caracteres, com letras e números";
+
+export function passwordProblem(password) {
+  if (password.length < 8) return "A senha deve ter pelo menos 8 caracteres.";
+  if (new TextEncoder().encode(password).length > 72) return "A senha é longa demais (máximo de 72 caracteres).";
+  if (!/\p{L}/u.test(password) || !/\d/.test(password)) return "A senha deve conter letras e números.";
+  return "";
+}

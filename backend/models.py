@@ -78,6 +78,13 @@ class User(Base):
     webhook_token_hash = Column(String, unique=True, index=True, nullable=True)
     webhook_token_hint = Column(String, default="")
     webhook_token_created_at = Column(DateTime(timezone=True), nullable=True)
+    # SEGURANÇA (backlog: "token do webhook sem validade"): o token passa a
+    # vencer (WEBHOOK_TOKEN_DAYS, padrão 1 ano). Um token esquecido num
+    # formulário antigo, ou vazado, deixa de funcionar sozinho. O profissional
+    # recebe um e-mail perto do vencimento (`webhook_expiry_notified_at`
+    # evita mandar o aviso mais de uma vez para o mesmo token).
+    webhook_token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    webhook_expiry_notified_at = Column(DateTime(timezone=True), nullable=True)
 
     # PRODUTO (bloqueio por inatividade): minutos sem uso até a tela travar e
     # exigir a senha de novo. Escolhido pelo profissional em Configurações
@@ -104,6 +111,29 @@ class User(Base):
     # Migração: alembic/versions/20261001_account_security.py
     google_sub = Column(String, unique=True, index=True, nullable=True)
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
+
+    # SEGURANÇA (backlog: MFA): verificação em duas etapas por aplicativo
+    # autenticador (TOTP, RFC 6238; ver totp.py). Opcional, ativada pelo
+    # profissional em Configurações > Minha conta.
+    # - mfa_secret: segredo compartilhado com o aplicativo. Gravado ao INICIAR a
+    #   configuração; só vale depois de confirmado com um código
+    #   (mfa_enabled_at preenchido).
+    # - mfa_last_step: último intervalo de 30 s já usado. Impede reaproveitar
+    #   o MESMO código (ex.: alguém que viu o código por cima do ombro).
+    # - mfa_recovery_codes: JSON com o HASH dos códigos de recuperação (para
+    #   quem perder o celular); cada código vale uma vez.
+    mfa_secret = Column(Text, nullable=True)  # [CRIPTOGRAFADO]
+    mfa_enabled_at = Column(DateTime(timezone=True), nullable=True)
+    mfa_last_step = Column(Integer, nullable=True)
+    mfa_recovery_codes = Column(Text, nullable=True)
+
+    # SEGURANÇA (segurança média: encerramento de conta, LGPD art. 18):
+    # - closed_at: quando o profissional encerrou a conta. Daí em diante
+    #   ninguém entra nela, e o que não está sob guarda já foi apagado.
+    # - purge_after: a partir de quando a rotina de manutenção apaga o que
+    #   sobrou (prontuários sob guarda do CFP, trilha de auditoria, esta linha).
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    purge_after = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
@@ -139,7 +169,51 @@ class UserSession(Base):
     locked_at = Column(DateTime(timezone=True), nullable=True)
     unlock_failures = Column(Integer, default=0)
 
+    # SEGURANÇA (segurança média: sessões com aparelho): antes a tela só dizia
+    # QUANTAS sessões estavam abertas, sem como reconhecer um acesso estranho.
+    # Agora cada sessão guarda de onde foi aberta ("Chrome no Windows" e o IP)
+    # e pode ser encerrada sozinha.
+    # - public_id: identificador mostrado ao navegador para encerrar UMA
+    #   sessão. Nunca o token_hash: ele não autentica, mas não há motivo para
+    #   sair do servidor.
+    public_id = Column(String, unique=True, index=True,
+                       default=lambda: f"sess_{uuid.uuid4().hex[:16]}")
+    device = Column(String, default="")
+    ip_address = Column(String, default="")
+
     user = relationship("User", back_populates="sessions")
+
+
+class EmailToken(Base):
+    """Links de uso único enviados por e-mail (segurança média e backlog).
+
+    - purpose "password_reset": "Esqueci minha senha" (vale 1 hora);
+    - purpose "signup": confirmação do cadastro (vale 24 horas). A conta só é
+      criada quando a pessoa abre o link e define a senha: assim ninguém cria
+      uma conta com o e-mail de outra pessoa, e o cadastro deixa de revelar
+      quais e-mails já têm conta (a resposta é sempre "enviamos um link").
+
+    Como os tokens de sessão e do webhook, o banco guarda só o HASH do token:
+    o link verdadeiro existe apenas no e-mail.
+    """
+    __tablename__ = "email_tokens"
+
+    id = Column(String, primary_key=True, default=lambda: f"etk_{uuid.uuid4().hex[:12]}")
+    purpose = Column(String, nullable=False)
+    token_hash = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, nullable=False)
+    # Conta a que o link se refere (recuperação de senha). No cadastro ainda
+    # não existe conta: o nome digitado fica em `payload`.
+    user_id = Column(String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=True, index=True)
+    payload = Column(Text, default="")  # [CRIPTOGRAFADO] JSON (ex.: nome no cadastro)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+
+    __table_args__ = (
+        # Invalidar os links anteriores do mesmo e-mail ao pedir um novo.
+        Index("ix_email_tokens_email_purpose", "email", "purpose"),
+    )
 
 # ---------------------------------------------------------------------------
 # Pacientes
@@ -337,11 +411,19 @@ class AuditLog(Base):
 # create_all() (banco novo). Em banco existente, quem cria é a migração
 # alembic/versions/20260930_compliance.py.
 #
-# Manutenção: expurgar registros antigos (depois do prazo legal) exige que um
-# administrador do banco desative o gatilho de forma deliberada e registrada.
+# Manutenção: a única exclusão permitida é o expurgo de uma conta ENCERRADA
+# depois do prazo legal (purge_closed_accounts em server.py), que liga
+# `psigestao.audit_purge` só dentro da própria transação. Qualquer outro
+# expurgo exige que um administrador do banco desative o gatilho de forma
+# deliberada e registrada.
 _PG_APPEND_ONLY_FUNCTION = DDL(
     "CREATE OR REPLACE FUNCTION audit_logs_append_only() RETURNS trigger AS $$ "
-    "BEGIN RAISE EXCEPTION USING MESSAGE = 'audit_logs e somente inclusao (append-only): ' || TG_OP; END; "
+    "BEGIN "
+    # Segurança média (encerramento de conta): única exceção, o expurgo de uma
+    # conta encerrada depois do prazo legal (purge_closed_accounts em
+    # server.py), que liga esta configuração SÓ na própria transação (SET LOCAL).
+    "IF TG_OP = 'DELETE' AND current_setting('psigestao.audit_purge', true) = 'on' THEN RETURN OLD; END IF; "
+    "RAISE EXCEPTION USING MESSAGE = 'audit_logs e somente inclusao (append-only): ' || TG_OP; END; "
     "$$ LANGUAGE plpgsql"
 )
 _PG_APPEND_ONLY_TRIGGER = DDL(

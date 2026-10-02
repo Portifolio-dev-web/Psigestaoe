@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
+import { GoogleLogin } from "@react-oauth/google";
 import { useAuth } from "@/context/AuthContext";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { LIMITS } from "@/lib/validation";
@@ -8,48 +9,39 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
-import { Stethoscope, Loader2 } from "lucide-react";
+import { Loader2, MailCheck } from "lucide-react";
+import AuthShell from "@/components/auth/AuthShell";
+import { useGoogleButtonWidth } from "@/components/auth/useGoogleButtonWidth";
 
-// Item 10 da auditoria: mesma política de senha do backend (server.py ->
-// validate_password_strength). A checagem aqui é só para dar retorno imediato;
-// quem garante a regra é o servidor, que recusa senhas fracas com erro 422.
-const PASSWORD_RULE = "Mínimo 8 caracteres, com letras e números";
-
-function passwordProblem(password) {
-  if (password.length < 8) return "A senha deve ter pelo menos 8 caracteres.";
-  if (new TextEncoder().encode(password).length > 72) return "A senha é longa demais (máximo de 72 caracteres).";
-  if (!/[A-Za-zÀ-ÿ]/.test(password) || !/\d/.test(password)) return "A senha deve conter letras e números.";
-  return null;
-}
-
-const WAVE = "https://images.unsplash.com/photo-1620121478247-ec786b9be2fa?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODd8MHwxfHNlYXJjaHw0fHxhYnN0cmFjdCUyMHNvZnQlMjBibHVlJTIwd2F2ZXN8ZW58MHx8fHwxNzg3NDA0NDM4fDA&ixlib=rb-4.1.0&q=85";
-
+// ---------------------------------------------------------------------------
+// Cadastro de profissional.
+//
+// SEGURANÇA MÉDIA + backlog (confirmação de e-mail): antes a conta nascia
+// aqui mesmo, com a senha digitada. Qualquer pessoa podia criar uma conta com
+// o e-mail de outra, e a mensagem "E-mail já cadastrado" revelava quem usa o
+// sistema. Agora:
+//   1. aqui: nome, e-mail e o aceite da política;
+//   2. o servidor manda um link para o e-mail (a resposta é a mesma, exista ou
+//      não conta com aquele e-mail);
+//   3. no link (/criar-senha) a pessoa cria a senha, e só então a conta nasce.
+// Complementares: o cadastro também oferece "Cadastrar com Google", como o login.
+// ---------------------------------------------------------------------------
 export default function Register() {
   const { setUser } = useAuth();
   const navigate = useNavigate();
-  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [form, setForm] = useState({ name: "", email: "" });
   const [terms, setTerms] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sentTo, setSentTo] = useState("");
+  const [googleBoxRef, googleWidth] = useGoogleButtonWidth();
 
   const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!terms) {
-      toast.warning("É necessário aceitar os Termos de Privacidade (LGPD).");
-      return;
-    }
-    const problem = passwordProblem(form.password);
-    if (problem) {
-      toast.warning(problem);
-      return;
-    }
+  const requestLink = async () => {
     setLoading(true);
     try {
       const { data } = await api.post("/auth/register", { ...form, terms_accepted: terms });
-      setUser(data.user);
-      toast.success("Conta criada com sucesso!");
-      navigate("/dashboard", { replace: true });
+      setSentTo(data.email);
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     } finally {
@@ -57,37 +49,59 @@ export default function Register() {
     }
   };
 
-  return (
-    <div className="flex min-h-screen">
-      <div className="relative hidden w-1/2 lg:block">
-        <img src={WAVE} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        <div className="absolute inset-0 bg-[#0F2C59]/75" />
-        <div className="relative flex h-full flex-col justify-between p-12 text-white">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/15">
-              <Stethoscope className="h-5 w-5" />
-            </div>
-            <span className="font-head text-xl font-bold">PsiGestão</span>
-          </div>
-          <div>
-            <h1 className="font-head text-4xl font-extrabold leading-tight">
-              Comece a organizar sua clínica hoje.
-            </h1>
-            <p className="mt-4 max-w-md text-blue-100">
-              Cadastro rápido e seguro. Seus prontuários protegidos por criptografia
-              de ponta e conformidade com o CFP.
-            </p>
-          </div>
-          {/* A política descreve o algoritmo real (Fernet: AES-128 + HMAC). O selo
-              antigo dizia "AES-256", que não é o que o sistema usa; afirmação de
-              segurança falsa é um problema de transparência (LGPD, art. 6º, VI). */}
-          <p className="text-xs text-blue-200">Dados criptografados · HTTPS/TLS · CFP</p>
-        </div>
-      </div>
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!terms) {
+      toast.warning("É necessário aceitar os Termos de Privacidade (LGPD).");
+      return;
+    }
+    requestLink();
+  };
 
-      <div className="flex w-full items-center justify-center px-6 py-10 lg:w-1/2">
-        <div className="psi-fade-up w-full max-w-sm">
-          <h2 className="font-head text-2xl font-bold text-[#0F172A]">Criar conta</h2>
+  // Cadastro com Google: o e-mail já vem comprovado pelo Google, sem link. A
+  // política é aceita em seguida, na tela de aceite (TermsGate), com evidência.
+  const handleGoogle = async (credentialResponse) => {
+    setLoading(true);
+    try {
+      const { data } = await api.post("/auth/google", { credential: credentialResponse.credential });
+      setUser(data.user);
+      navigate("/dashboard", { replace: true });
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || "Erro no cadastro com o Google");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <AuthShell headline="Comece a organizar sua clínica hoje."
+      tagline="Cadastro rápido e seguro. Seus prontuários protegidos por criptografia e conformidade com o CFP.">
+      {sentTo ? (
+        <div data-testid="register-check-email">
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+            <MailCheck className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <h1 className="mt-4 font-head text-2xl font-bold text-[#0F172A]">Confira seu e-mail</h1>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600" role="status">
+            Enviamos um link para <b className="text-[#0F172A]">{sentTo}</b>. Abra-o para confirmar o e-mail e criar
+            sua senha. O link vale por 24 horas.
+          </p>
+          <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-slate-500">
+            <li>Não chegou? Veja a caixa de spam ou de promoções.</li>
+            <li>Se este e-mail já tiver uma conta, a mensagem explica como entrar.</li>
+          </ul>
+          <div className="mt-6 flex flex-col gap-2">
+            <Button type="button" variant="outline" disabled={loading} onClick={requestLink} className="border-slate-300">
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Reenviar o link"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setSentTo("")} className="text-[#1E3A8A]">
+              Usar outro e-mail
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <h1 className="font-head text-2xl font-bold text-[#0F172A]">Criar conta</h1>
           <p className="mt-1 text-sm text-slate-500">Cadastro de profissional</p>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
@@ -95,20 +109,14 @@ export default function Register() {
               <Label htmlFor="name" className="text-slate-700">Nome completo</Label>
               {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
               <Input id="name" required maxLength={LIMITS.professionalName} value={form.name} onChange={upd("name")}
-                className="mt-1.5" placeholder="Dra. Maria Silva" data-testid="register-name-input" />
+                autoComplete="name" className="mt-1.5" placeholder="Dra. Maria Silva" data-testid="register-name-input" />
             </div>
             <div>
               <Label htmlFor="email" className="text-slate-700">E-mail</Label>
               <Input id="email" type="email" required maxLength={LIMITS.email} value={form.email} onChange={upd("email")}
+                autoComplete="email" aria-describedby="email-hint"
                 className="mt-1.5" placeholder="voce@clinica.com" data-testid="register-email-input" />
-            </div>
-            <div>
-              <Label htmlFor="password" className="text-slate-700">Senha</Label>
-              <Input id="password" type="password" required minLength={8} maxLength={72}
-                autoComplete="new-password" aria-describedby="password-rule"
-                value={form.password} onChange={upd("password")}
-                className="mt-1.5" placeholder={PASSWORD_RULE} data-testid="register-password-input" />
-              <p id="password-rule" className="mt-1 text-xs text-slate-500">{PASSWORD_RULE}.</p>
+              <p id="email-hint" className="mt-1 text-xs text-slate-500">Você vai receber um link para criar a senha.</p>
             </div>
             <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-3">
               <Checkbox id="terms" checked={terms} onCheckedChange={setTerms}
@@ -130,9 +138,19 @@ export default function Register() {
             </div>
             <Button type="submit" disabled={loading}
               className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="register-submit-btn">
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Criar conta"}
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Continuar"}
             </Button>
           </form>
+
+          <div className="my-5 flex items-center gap-3">
+            <div className="h-px flex-1 bg-slate-200" />
+            <span className="text-xs text-slate-500">ou</span>
+            <div className="h-px flex-1 bg-slate-200" />
+          </div>
+          <div ref={googleBoxRef} className="flex w-full justify-center" data-testid="register-google-btn">
+            <GoogleLogin onSuccess={handleGoogle} text="signup_with" shape="rectangular" size="large"
+              width={String(googleWidth)} onError={() => toast.error("Ocorreu um erro no cadastro com o Google.")} />
+          </div>
 
           <p className="mt-6 text-center text-sm text-slate-500">
             Já tem conta?{" "}
@@ -140,8 +158,8 @@ export default function Register() {
               Entrar
             </Link>
           </p>
-        </div>
-      </div>
-    </div>
+        </>
+      )}
+    </AuthShell>
   );
 }

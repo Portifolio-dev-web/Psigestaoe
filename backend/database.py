@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
@@ -22,11 +23,45 @@ def resolve_database_url() -> str:
     """
     url = os.environ.get("DATABASE_URL", "").strip()
     if url:
+        if get_environment() == PRODUCTION:
+            require_database_tls(url)
         return url
     if get_environment() == PRODUCTION:
         logging.critical("SECURITY ALERT: DATABASE_URL ausente em produção. Abortando inicialização.")
         sys.exit(1)
     return DEV_SQLITE_URL
+
+
+# SEGURANÇA (segurança média: TLS no banco): antes a conexão com o Postgres
+# não exigia criptografia. Num banco gerenciado (ou em outro servidor), os
+# prontuários (já cifrados com a FERNET_KEY), a senha do banco e os metadados
+# (quem acessou o quê, e-mails, horários da agenda) passavam em texto puro
+# pela rede. Agora, em produção, a URL precisa pedir TLS:
+#     postgresql+asyncpg://usuario:senha@host:5432/psigestao?ssl=require
+# (ou ssl=verify-full, que também confere o certificado; o CA vem de
+# PGSSLROOTCERT). Única exceção, por escolha EXPLÍCITA: DATABASE_TLS_DISABLED=true
+# quando o banco está na MESMA máquina ou numa rede privada isolada (ex.: o
+# serviço "db" do mesmo docker compose).
+DATABASE_TLS_MODES = {"require", "verify-ca", "verify-full"}
+
+
+def database_tls_mode(url: str) -> str:
+    """Valor de ?ssl= na URL do banco ("" se ausente)."""
+    return (parse_qs(urlsplit(url).query).get("ssl") or [""])[0].strip().lower()
+
+
+def require_database_tls(url: str) -> None:
+    if url.startswith("sqlite") or database_tls_mode(url) in DATABASE_TLS_MODES:
+        return
+    if os.environ.get("DATABASE_TLS_DISABLED", "").strip().lower() == "true":
+        logging.warning("Conexão com o banco SEM TLS por escolha explícita (DATABASE_TLS_DISABLED): "
+                        "use só com o banco na mesma máquina ou numa rede privada isolada.")
+        return
+    logging.critical(
+        "SECURITY ALERT: em produção a conexão com o banco precisa de TLS. Acrescente ?ssl=require "
+        "(ou ?ssl=verify-full) ao DATABASE_URL. Banco na mesma máquina/rede privada isolada: "
+        "DATABASE_TLS_DISABLED=true. Abortando.")
+    sys.exit(1)
 
 
 DATABASE_URL = resolve_database_url()

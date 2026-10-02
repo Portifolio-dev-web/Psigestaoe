@@ -54,11 +54,31 @@ services:
       # desenvolvimento, então declara "development" explicitamente.
       ENVIRONMENT: ${ENVIRONMENT:-development}
       WATCHFILES_FORCE_POLLING: "true"
+      # Segurança média: e-mails do desenvolvimento (cadastro, "Esqueci minha
+      # senha", avisos) vão para o Mailpit, uma caixa de entrada de mentira:
+      # nada sai para a internet. Veja em http://localhost:8025.
+      MAIL_BACKEND: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURITY: none
+      SMTP_USERNAME: ""
+      SMTP_FROM: "PsiGestão <nao-responda@psigestao.local>"
     volumes:
       - ./backend:/app
     depends_on:
       db:
         condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  # Segurança média: servidor de e-mail SÓ de desenvolvimento. Recebe tudo o
+  # que a API envia e mostra numa página (http://localhost:8025), sem entregar
+  # nada a ninguém. Em produção a API usa um SMTP de verdade (ver .env.example).
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      # Só nesta máquina, como os demais serviços.
+      - "127.0.0.1:8025:8025"
 
   frontend:
     build:

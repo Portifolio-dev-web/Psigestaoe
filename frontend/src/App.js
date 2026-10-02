@@ -1,21 +1,28 @@
-import { useRef } from "react";
+import { Suspense, lazy, useRef } from "react";
 import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
-import Login from "@/pages/Login";
-import Register from "@/pages/Register";
-import Dashboard from "@/pages/Dashboard";
-import Patients from "@/pages/Patients";
-import PatientDetail from "@/pages/PatientDetail";
-import Agenda from "@/pages/Agenda";
-import Settings from "@/pages/Settings";
-import PrivacyPolicy from "@/pages/PrivacyPolicy";
 import AppLayout from "@/components/AppLayout";
 import TermsGate from "@/components/TermsGate";
 import LockScreen from "@/components/LockScreen";
 import { IdleLockProvider } from "@/context/IdleLockContext";
 import { Loader2 } from "lucide-react";
+
+// Complementares (desempenho): cada tela é carregada só quando é aberta
+// (React.lazy). Antes o app inteiro vinha num único arquivo de ~250 KB
+// (compactado), inclusive para quem só abria a tela de login. O que é comum
+// a todas (layout, bloqueio, aceite da política) continua no arquivo principal.
+const Login = lazy(() => import("@/pages/Login"));
+const Register = lazy(() => import("@/pages/Register"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
+const EmailLinkPassword = lazy(() => import("@/pages/EmailLinkPassword"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const Patients = lazy(() => import("@/pages/Patients"));
+const PatientDetail = lazy(() => import("@/pages/PatientDetail"));
+const Agenda = lazy(() => import("@/pages/Agenda"));
+const Settings = lazy(() => import("@/pages/Settings"));
+const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
 
 function LoadingScreen() {
   return (
@@ -77,10 +84,18 @@ function PublicOnly({ children }) {
 
 function AppRouter() {
   // A interceção do location.hash foi removida, o router agora é muito mais limpo.
+  // Suspense: enquanto o arquivo da tela chega, mostra o mesmo carregamento do login.
   return (
+    <Suspense fallback={<LoadingScreen />}>
     <Routes>
       <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
       <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
+      {/* Segurança média: "Esqueci minha senha" e as telas abertas pelos links
+          do e-mail. Os links valem mesmo com alguém logado no navegador (por
+          isso não ficam dentro de PublicOnly, que redirecionaria ao painel). */}
+      <Route path="/esqueci-senha" element={<PublicOnly><ForgotPassword /></PublicOnly>} />
+      <Route path="/criar-senha" element={<EmailLinkPassword purpose="signup" />} />
+      <Route path="/redefinir-senha" element={<EmailLinkPassword purpose="password_reset" />} />
       {/* Pública para todos (logado ou não): a política deve poder ser lida antes do aceite. */}
       <Route path="/privacidade" element={<PrivacyPolicy />} />
       <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
@@ -92,6 +107,7 @@ function AppRouter() {
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </Suspense>
   );
 }
 
