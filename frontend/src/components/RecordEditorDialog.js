@@ -35,16 +35,21 @@ import {
 const sameFields = (a, b) =>
   a.session_datetime === b.session_datetime && a.content === b.content && a.diagnosis === b.diagnosis;
 
-export default function RecordEditorDialog({ open, onOpenChange, patientId, record, userId, onSaved }) {
+// `fromSession` (UX, agenda -> evolução): { sessionId, sessionDatetime } quando a
+// evolução é registrada a partir de uma sessão da agenda (painel "Hoje" ou a
+// própria agenda). A data e a hora já vêm da sessão, e o servidor liga a
+// evolução a ela (e marca a sessão como realizada).
+export default function RecordEditorDialog({ open, onOpenChange, patientId, record, userId, onSaved, fromSession = null }) {
   const slot = userId ? draftSlot(userId, record ? "record-edit" : "record-new", record ? record.id : patientId) : null;
 
-  // Base: o registro como está no servidor (edição) ou uma anotação em branco
-  // com a hora atual (nova). Recalculada a cada abertura.
+  // Base: o registro como está no servidor (edição) ou uma evolução em branco
+  // com a hora da sessão da agenda, ou a hora atual (nova). Recalculada a cada abertura.
+  const sessionStart = fromSession?.sessionDatetime;
   const baseline = useMemo(() => (record
     ? { session_datetime: toLocalInput(record.session_datetime), content: record.content || "", diagnosis: record.diagnosis || "" }
-    : { session_datetime: toLocalInput(new Date()), content: "", diagnosis: "" }),
+    : { session_datetime: toLocalInput(sessionStart ? new Date(sessionStart) : new Date()), content: "", diagnosis: "" }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [open, record]);
+  [open, record, sessionStart]);
 
   const [fields, setFields] = useState(baseline);
   const [restored, setRestored] = useState(null); // { savedAt, baseVersion } do rascunho recuperado
@@ -64,12 +69,15 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
       readDraft(slot).then((draft) => {
         if (cancelled || !draft) return;
         // Só aplica se a pessoa ainda não começou a digitar (a leitura é assíncrona).
-        setFields((current) => (sameFields(current, baseline) ? { ...baseline, ...draft.payload.fields } : current));
+        // Vinda da agenda: o rascunho volta, mas a data/hora continua a da sessão.
+        const keepSessionTime = sessionStart ? { session_datetime: baseline.session_datetime } : {};
+        setFields((current) => (sameFields(current, baseline)
+          ? { ...baseline, ...draft.payload.fields, ...keepSessionTime } : current));
         setRestored({ savedAt: draft.savedAt, baseVersion: draft.payload.baseVersion });
       });
     }
     return () => { cancelled = true; };
-  }, [open, slot, baseline, userId]);
+  }, [open, slot, baseline, userId, sessionStart]);
 
   // Nova anotação: rascunho só quando há texto. Edição: quando difere do original.
   const dirty = record
@@ -110,7 +118,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
   const save = async (expectedVersion = record?.version) => {
     if (saving) return; // varredura, item 9: um envio por vez
     if (!fields.content.trim()) {
-      toast.warning("A anotação clínica não pode estar vazia.");
+      toast.warning("O texto da evolução não pode estar vazio.");
       return;
     }
     const sessionDatetime = localInputToISO(fields.session_datetime);
@@ -125,10 +133,13 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
         // Segurança (varredura, item 9): controle otimista de versão. O
         // servidor recusa (409) se outra edição chegou antes desta.
         await api.put(`/records/${record.id}`, { ...body, expected_version: expectedVersion });
-        toast.success("Prontuário atualizado (nova versão registrada em auditoria).");
+        // Terminologia (UX): "prontuário" é o do paciente; cada registro de sessão é uma evolução.
+        toast.success("Evolução atualizada. A versão anterior ficou guardada no histórico.");
       } else {
-        await api.post(`/patients/${patientId}/records`, body);
-        toast.success("Prontuário registrado.");
+        await api.post(`/patients/${patientId}/records`, { ...body, session_id: fromSession?.sessionId || null });
+        toast.success(fromSession?.sessionId
+          ? "Evolução registrada. A sessão foi marcada como realizada na agenda."
+          : "Evolução registrada.");
       }
       draft.discard(); // salvo no servidor: o rascunho deixa de existir
       setConflict(null);
@@ -160,7 +171,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     setConflict(null);
     onOpenChange(false);
     onSaved(); // recarrega a lista com a versão mais nova
-    toast.info("Seu texto ficou guardado no rascunho. Abra a anotação de novo para continuar de onde parou.");
+    toast.info("Seu texto ficou guardado no rascunho. Abra a evolução de novo para continuar de onde parou.");
   };
 
   const outdatedDraft = record && restored && restored.baseVersion != null && restored.baseVersion !== record.version;
@@ -169,11 +180,13 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="font-head">{record ? "Editar anotação" : "Nova anotação clínica"}</DialogTitle>
+          <DialogTitle className="font-head">{record ? "Editar evolução" : "Nova evolução"}</DialogTitle>
           <DialogDescription>
             {record
-              ? "A versão anterior será arquivada automaticamente na trilha de auditoria."
-              : "O conteúdo é criptografado antes de ser salvo."}
+              ? "A versão anterior fica guardada no histórico de versões."
+              : fromSession?.sessionId
+                ? "Evolução da sessão marcada na agenda. O conteúdo é criptografado antes de ser salvo."
+                : "O conteúdo é criptografado antes de ser salvo."}
           </DialogDescription>
         </DialogHeader>
 
@@ -212,7 +225,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
             </div>
           </div>
           <div>
-            <Label htmlFor="record-content">Anotação clínica</Label>
+            <Label htmlFor="record-content">Texto da evolução</Label>
             {/* Segurança (varredura, item 2): mesmo limite do servidor (50 mil
                 caracteres, ~10 páginas). Perto do limite aparece um contador,
                 para a anotação não ser cortada sem a pessoa perceber. */}
@@ -235,7 +248,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
             <p className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Esta anotação foi alterada em outro lugar enquanto você editava (agora está na v{conflict.currentVersion}).
+                Esta evolução foi alterada em outro lugar enquanto você editava (agora está na v{conflict.currentVersion}).
                 Nada foi salvo, e o seu texto continua aqui. Se salvar mesmo assim, ele vira a versão atual e a outra
                 edição fica guardada no histórico.
               </span>

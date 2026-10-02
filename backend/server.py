@@ -869,6 +869,10 @@ class RecordInput(BaseModel):
     # folga o uso clínico e impedem gravar megabytes por evolução.
     content: str = Field(max_length=RECORD_CONTENT_MAX)
     diagnosis: Optional[str] = Field(default="", max_length=RECORD_DIAGNOSIS_MAX)
+    # PRODUTO (agenda -> evolução): a sessão da agenda a que esta evolução se
+    # refere, quando registrada a partir dela (painel "Hoje" ou agenda). Opcional.
+    # Só vale ao CRIAR; na edição o vínculo não muda (ver update_record).
+    session_id: Optional[str] = Field(default=None, max_length=64)
 
     @field_validator("session_datetime")
     @classmethod
@@ -1062,6 +1066,8 @@ def record_public(r: Record) -> dict:
         "content": decrypt_field(r.content) if r.content else "",
         "diagnosis": decrypt_field(r.diagnosis) if r.diagnosis else "",
         "version": r.version or 1,
+        # Produto (agenda -> evolução): sessão da agenda ligada, se houver.
+        "session_id": r.session_id or "",
         "created_at": r.created_at.isoformat() if r.created_at else "",
         "updated_at": r.updated_at.isoformat() if r.updated_at else "",
     }
@@ -1461,9 +1467,13 @@ def describe_user_agent(user_agent: str) -> str:
     browsers = (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari"))
     systems = (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Windows", "Windows"),
                ("Mac OS X", "macOS"), ("Linux", "Linux"))
-    browser = next((name for token, name in browsers if token in ua), "navegador não identificado")
-    system = next((name for token, name in systems if token in ua), "sistema não identificado")
-    return f"{browser} no {system}"
+    browser = next((name for token, name in browsers if token in ua), None)
+    system = next((name for token, name in systems if token in ua), None)
+    # Sem nenhum dos dois (script, app, cURL): uma frase só, em vez de
+    # "navegador não identificado no sistema não identificado".
+    if not browser and not system:
+        return "dispositivo não identificado"
+    return f"{browser or 'navegador não identificado'} no {system or 'sistema não identificado'}"
 
 
 def count_label(count: int, singular: str, plural: str) -> str:
@@ -1970,6 +1980,25 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def _bump_last_consultation(p: Patient, moment: Optional[datetime]) -> None:
+    """Atualiza a "última consulta" do paciente, mas SÓ para frente.
+
+    CORREÇÃO (varredura de UI): antes era sobrescrita pela data da evolução
+    registrada por último. Registrar hoje a evolução de uma sessão de semanas
+    atrás fazia a "última consulta" voltar no tempo. E uma sessão marcada como
+    realizada na agenda não contava. Agora conta a mais recente das duas.
+    """
+    moment = _as_utc(moment)
+    if moment is None:
+        return
+    try:
+        current = _as_utc(datetime.fromisoformat(p.last_consultation_date)) if p.last_consultation_date else None
+    except ValueError:
+        current = None
+    if current is None or moment > current:
+        p.last_consultation_date = moment.isoformat()
+
+
 def _add_years(value: datetime, years: int) -> datetime:
     try:
         return value.replace(year=value.year + years)
@@ -2238,7 +2267,8 @@ async def update_record(rid: str, data: RecordUpdateInput, user: User = Depends(
     r = result.scalar_one_or_none()
 
     if not r:
-        raise HTTPException(status_code=404, detail="Prontuário não encontrado")
+        # Terminologia (UX): prontuário é o do paciente; cada registro de sessão é uma EVOLUÇÃO.
+        raise HTTPException(status_code=404, detail="Evolução não encontrada")
     if r.version != data.expected_version:
         raise _record_conflict(r.version)
 
@@ -2275,8 +2305,39 @@ async def update_record(rid: str, data: RecordUpdateInput, user: User = Depends(
     await db.commit()
     await db.refresh(r)
 
-    await log_audit(db, user.user_id, user.email, "editar", "prontuario", r.id, f"Nova versão v{r.version}")
+    # Terminologia (UX): cada registro de sessão é uma "evolução" em toda a tela.
+    await log_audit(db, user.user_id, user.email, "editar", "prontuario", r.id, f"Evolução editada (versão {r.version})")
     return record_public(r)
+
+@api_router.get("/records/{rid}/versions")
+async def record_versions(rid: str, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Histórico de versões de uma evolução (UX: antes as versões eram guardadas
+    a cada edição, mas não havia como vê-las na tela).
+
+    Devolve a versão atual e as anteriores, da mais nova para a mais antiga,
+    com a data em que cada uma foi substituída. A consulta entra na trilha de
+    auditoria, como qualquer leitura de prontuário.
+    """
+    r = (await db.execute(select(Record).where(Record.id == rid, Record.owner_id == user.user_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="Evolução não encontrada")
+    stmt = select(RecordVersion).where(
+        RecordVersion.record_id == rid, RecordVersion.owner_id == user.user_id,
+    ).order_by(desc(RecordVersion.version))
+    versions = (await db.execute(stmt)).scalars().all()
+    await log_audit(db, user.user_id, user.email, "visualizar", "prontuario", rid,
+                    f"Histórico de versões da evolução ({count_label(len(versions) + 1, 'versão', 'versões')})")
+    return {
+        "current": record_public(r),
+        "versions": [{
+            "version": v.version,
+            "session_datetime": _iso(v.session_datetime),
+            "content": decrypt_field(v.content),
+            "diagnosis": decrypt_field(v.diagnosis),
+            "replaced_at": _iso(v.archived_at),
+        } for v in versions],
+    }
+
 
 @api_router.delete("/patients/{pid}")
 async def delete_patient(pid: str, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
@@ -2380,12 +2441,34 @@ async def list_records(
     # Item 14: acesso ao conteúdo clínico é o evento mais sensível do sistema.
     # Cada página aberta é um acesso e fica registrada.
     await log_audit(db, user.user_id, user.email, "visualizar", "prontuario", pid,
-                    f"Evolução clínica ({count_label(len(records), 'registro', 'registros')})")
+                    f"Lista de evoluções ({count_label(len(records), 'evolução', 'evoluções')})")
     return {"items": records, "next_cursor": next_cursor, "total": total}
 
 @api_router.post("/patients/{pid}/records")
 async def create_record(pid: str, data: RecordInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     p = await _get_owned_patient(db, pid, user)
+
+    # PRODUTO (agenda -> evolução): evolução registrada a partir de uma sessão.
+    # A sessão precisa ser deste profissional E deste paciente; sessão cancelada
+    # não recebe evolução; e cada sessão tem no máximo uma (para editar, abre-se
+    # a existente). Registrar a evolução confirma que a sessão aconteceu: ela
+    # passa a "realizada" na agenda.
+    session = None
+    if data.session_id:
+        session = (await db.execute(select(Session).where(
+            Session.id == data.session_id, Session.owner_id == user.user_id,
+        ))).scalar_one_or_none()
+        if session is None or session.patient_id != pid:
+            raise HTTPException(status_code=422, detail="Sessão da agenda não encontrada para este paciente.")
+        if (session.status or "agendada") == "cancelada":
+            raise HTTPException(status_code=422, detail="Uma sessão cancelada não recebe evolução.")
+        existing = await db.scalar(select(Record.id).where(Record.session_id == session.id))
+        if existing:
+            raise HTTPException(status_code=409, detail={
+                "code": "session_has_record", "record_id": existing,
+                "msg": "Esta sessão já tem uma evolução registrada. Abra-a para editar.",
+            })
+        session.status = "realizada"
 
     novo_prontuario = Record(
         owner_id=user.user_id,
@@ -2393,11 +2476,12 @@ async def create_record(pid: str, data: RecordInput, user: User = Depends(get_ac
         session_datetime=data.session_datetime, # DateTime nativo do Pydantic
         content=encrypt_field(data.content),
         diagnosis=encrypt_field(data.diagnosis),
-        version=1
+        version=1,
+        session_id=session.id if session else None,
     )
 
-    # Atualiza a data da última consulta no paciente
-    p.last_consultation_date = data.session_datetime.isoformat()
+    # Atualiza a data da última consulta no paciente (só para frente; ver a função).
+    _bump_last_consultation(p, data.session_datetime)
 
     db.add(novo_prontuario)
     await db.commit()
@@ -2405,7 +2489,10 @@ async def create_record(pid: str, data: RecordInput, user: User = Depends(get_ac
 
     # A data fica em ISO/UTC (sem ambiguidade de fuso); a tela de auditoria a
     # converte para a hora local ao exibir (Settings.js, formatAuditDetail).
-    await log_audit(db, user.user_id, user.email, "criar", "prontuario", novo_prontuario.id, f"Sessão {data.session_datetime.isoformat()}")
+    # Terminologia (UX): "Evolução registrada", e se veio de uma sessão da agenda.
+    origin = " (sessão da agenda)" if data.session_id else ""
+    await log_audit(db, user.user_id, user.email, "criar", "prontuario", novo_prontuario.id,
+                    f"Evolução registrada · sessão de {data.session_datetime.isoformat()}{origin}")
     return record_public(novo_prontuario)
 
 def _render_patient_pdf(pat: dict, recs: list, professional_name: str, professional_email: str,
@@ -2678,7 +2765,7 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
 # ---------------------------------------------------------------------------
 # Funções Auxiliares de Serialização (Agenda)
 # ---------------------------------------------------------------------------
-def session_public(s: Session) -> dict:
+def session_public(s: Session, record_id: Optional[str] = None) -> dict:
     return {
         "id": s.id,
         "patient_id": s.patient_id or "",
@@ -2690,7 +2777,30 @@ def session_public(s: Session) -> dict:
         "end": s.end_time.isoformat() if s.end_time else "",
         "status": s.status or "agendada",
         "notes": decrypt_field(s.notes),
+        # PRODUTO (agenda -> evolução): a evolução registrada para esta sessão,
+        # se houver. A agenda e o painel mostram "Evolução registrada" ou
+        # oferecem "Registrar evolução".
+        "record_id": record_id or "",
     }
+
+
+async def _record_ids_for_sessions(db: AsyncSession, session_ids: list[str]) -> dict:
+    """{id da sessão: id da evolução} numa consulta só (pelo índice ix_records_session_id)."""
+    if not session_ids:
+        return {}
+    rows = (await db.execute(select(Record.session_id, Record.id).where(Record.session_id.in_(session_ids)))).all()
+    return {session_id: record_id for session_id, record_id in rows}
+
+
+async def _bump_patient_from_session(db: AsyncSession, user: User, s: Session) -> None:
+    """Sessão REALIZADA (e já ocorrida) conta como "última consulta" do paciente."""
+    if s.status != "realizada" or not s.patient_id or _as_utc(s.start_time) > now_utc():
+        return
+    patient = (await db.execute(select(Patient).where(
+        Patient.id == s.patient_id, Patient.owner_id == user.user_id,
+    ))).scalar_one_or_none()
+    if patient is not None:
+        _bump_last_consultation(patient, s.start_time)
 
 
 async def _apply_session_input(db: AsyncSession, user: User, s: Session, data: SessionInput) -> None:
@@ -2811,7 +2921,8 @@ async def list_sessions(
     stmt = stmt.order_by(Session.start_time.asc()).limit(limit)
     docs = (await db.execute(stmt)).scalars().all()
 
-    return [session_public(s) for s in docs]
+    records = await _record_ids_for_sessions(db, [s.id for s in docs])  # agenda -> evolução
+    return [session_public(s, records.get(s.id)) for s in docs]
 
 @api_router.post("/sessions")
 async def create_session(data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
@@ -2822,12 +2933,13 @@ async def create_session(data: SessionInput, user: User = Depends(get_active_use
     nova_sessao = Session(owner_id=user.user_id)
     await _apply_session_input(db, user, nova_sessao, data)
     db.add(nova_sessao)
+    await _bump_patient_from_session(db, user, nova_sessao)  # produto: "última consulta"
     await db.commit()
     await db.refresh(nova_sessao)
 
     # Item 13: antes o detalhe era o título digitado (costuma conter o nome do paciente).
     await log_audit(db, user.user_id, user.email, "criar", "agenda", nova_sessao.id, "Sessão agendada")
-    return session_public(nova_sessao)
+    return session_public(nova_sessao)  # sessão nova ainda não tem evolução
 
 @api_router.put("/sessions/{sid}")
 async def update_session(sid: str, data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
@@ -2843,13 +2955,14 @@ async def update_session(sid: str, data: SessionInput, user: User = Depends(get_
     # A própria sessão não conta como conflito (remarcar 10 min para frente, por exemplo).
     await _check_conflicts(db, user, data, exclude_id=sid)
     await _apply_session_input(db, user, s, data)
+    await _bump_patient_from_session(db, user, s)  # produto: "última consulta"
 
     await db.commit()
     await db.refresh(s)
 
     # Item 14: alterações na agenda não eram auditadas.
     await log_audit(db, user.user_id, user.email, "editar", "agenda", sid, f"Sessão alterada (status: {data.status})")
-    return session_public(s)
+    return session_public(s, (await _record_ids_for_sessions(db, [s.id])).get(s.id))
 
 @api_router.delete("/sessions/{sid}")
 async def delete_session(sid: str, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):

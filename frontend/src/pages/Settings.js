@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { GoogleLogin } from "@react-oauth/google";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
@@ -189,7 +190,7 @@ function ConsentTermEditor() {
 // PRODUTO: segurança da sessão neste e em outros aparelhos.
 // - Bloqueio por inatividade: tempo até a tela travar e pedir a senha. Vale
 //   no navegador e no servidor (a sessão fica bloqueada de verdade).
-// - Rascunhos: as anotações não salvas ficam criptografadas em cada aparelho.
+// - Rascunhos: as evoluções não salvas ficam criptografadas em cada aparelho.
 //   Se um aparelho for perdido, trocar a chave torna os rascunhos dele
 //   ilegíveis, mesmo para quem conseguir entrar na conta depois.
 const LOCK_OPTIONS = [5, 10, 15, 30];
@@ -215,7 +216,7 @@ function SessionSecurity() {
 
   const invalidateDrafts = () => inFlight.run("drafts", async () => {
     const confirmed = window.confirm(
-      "Isto apaga a chave dos rascunhos: anotações não salvas em QUALQUER aparelho (inclusive este) deixam de poder ser recuperadas. Continuar?",
+      "Isto apaga a chave dos rascunhos: evoluções não salvas em QUALQUER aparelho (inclusive este) deixam de poder ser recuperadas. Continuar?",
     );
     if (!confirmed) return;
     try {
@@ -253,9 +254,10 @@ function SessionSecurity() {
           </p>
         </div>
         <div>
-          <p className="text-sm font-medium text-slate-700">Rascunhos de anotações</p>
+          {/* Terminologia (UX): o rascunho é de uma evolução (antes "anotação"). */}
+          <p className="text-sm font-medium text-slate-700">Rascunhos de evoluções</p>
           <p className="mt-1 text-xs leading-relaxed text-slate-500">
-            Enquanto você escreve, a anotação é guardada criptografada neste aparelho, para não se perder se a
+            Enquanto você escreve, a evolução é guardada criptografada neste aparelho, para não se perder se a
             sessão expirar ou a internet cair. Rascunhos somem ao salvar e vencem em 7 dias.
           </p>
           <Button variant="outline" size="sm" onClick={invalidateDrafts} disabled={inFlight.isBusy("drafts")}
@@ -426,8 +428,13 @@ function AccountSecurity() {
   );
 }
 
-export default function Settings() {
-  const { user } = useAuth();
+// ---------------------------------------------------------------------------
+// Trilha de auditoria (aba "Auditoria").
+// Só é buscada quando a aba é aberta (antes vinha junto com a página inteira,
+// mesmo para quem só queria trocar a senha), e de novo a cada abertura, para
+// mostrar os registros mais recentes.
+// ---------------------------------------------------------------------------
+function AuditTrail() {
   const [logs, setLogs] = useState(null);
   // ESCALA: a trilha é paginada. Antes só os 100 últimos registros apareciam,
   // sem como ver os anteriores (e a trilha só cresce, pois inclui leituras).
@@ -454,112 +461,167 @@ export default function Settings() {
     }
   };
 
-  // Descrições corrigidas para refletir o que o sistema FAZ. A versão anterior
-  // dizia "AES-256-GCM" (o sistema usa Fernet: AES-128-CBC + HMAC-SHA256) e
-  // chamava de "imutável" uma trilha que podia ser apagada em cascata.
-  const items = [
-    { icon: Lock, title: "Criptografia em repouso", desc: "Nome, CPF, RG, contatos, endereço, observações, prontuários e agenda são cifrados (Fernet: AES-128 + HMAC-SHA256) antes de gravar no banco." },
-    { icon: Shield, title: "Criptografia em trânsito", desc: "Toda comunicação ocorre via HTTPS/TLS." },
-    // Varredura de UI (defeito 4): "Imutabilidade" sugeria que nada podia ser editado.
-    { icon: History, title: "Histórico de versões", desc: "Evoluções podem ser corrigidas, mas nada se perde: cada edição guarda a versão anterior." },
-    { icon: KeyRound, title: "Multi-tenancy seguro", desc: "Cada profissional acessa apenas os próprios dados, com sessão isolada." },
-    { icon: FileCheck, title: "Direitos do titular (LGPD)", desc: "Exportação (PDF/JSON), correção, anonimização e registro ou revogação do consentimento, com data." },
-    { icon: Archive, title: "Guarda legal (CFP)", desc: "Prontuários não podem ser excluídos antes de 5 anos do último registro. Até lá, o paciente pode ser arquivado." },
-  ];
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <ScrollText className="h-4 w-4 text-[#1E3A8A]" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Trilha de auditoria</h2>
+        {/* Item 14: agora é de fato somente inclusão (gatilho no banco) e inclui leituras e IP. */}
+        {/* Acessibilidade (varredura de UI): textos da trilha em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
+        <span className="text-xs text-slate-500">(somente inclusão · inclui visualizações e IP)</span>
+      </div>
+      <Separator className="my-4" />
+      {logs === null ? (
+        <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
+      ) : logs.length === 0 ? (
+        <p className="py-8 text-center text-sm text-slate-500">Nenhum registro de auditoria ainda.</p>
+      ) : (
+        // Acessibilidade (varredura de UI): lista com rolagem alcançável pelo teclado.
+        // Com a aba só para ela, a lista pode ser mais alta (antes 420px).
+        <div tabIndex={0} role="region" aria-label="Registros da trilha de auditoria"
+          className="max-h-[560px] space-y-1 overflow-y-auto psi-scroll focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+          data-testid="audit-log">
+          {logs.map((l) => (
+            <div key={l.log_id} className="flex items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-slate-50">
+              <Badge variant="secondary" className="w-28 shrink-0 justify-center text-[11px]">{ACTION_LABEL[l.action] || l.action}</Badge>
+              <span className="text-slate-600">{ENTITY_LABEL[l.entity_type] || l.entity_type}</span>
+              <span className="truncate text-slate-500">{formatAuditDetail(l.detail)}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-3">
+                <span className="hidden font-mono text-[11px] text-slate-500 md:inline" title="Endereço IP da ação">
+                  {l.ip_address || "—"}
+                </span>
+                <span className="text-xs text-slate-500">
+                  {new Date(l.timestamp).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </span>
+            </div>
+          ))}
+          {logsCursor && (
+            <div className="flex justify-center pt-2">
+              <Button variant="outline" size="sm" onClick={loadMoreLogs} disabled={loadingMore}
+                className="gap-2 border-slate-300" data-testid="audit-load-more">
+                {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />} Carregar registros anteriores
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// Descrições corrigidas para refletir o que o sistema FAZ. A versão anterior
+// dizia "AES-256-GCM" (o sistema usa Fernet: AES-128-CBC + HMAC-SHA256) e
+// chamava de "imutável" uma trilha que podia ser apagada em cascata.
+const PRIVACY_FEATURES = [
+  { icon: Lock, title: "Criptografia em repouso", desc: "Nome, CPF, RG, contatos, endereço, observações, prontuários e agenda são cifrados (Fernet: AES-128 + HMAC-SHA256) antes de gravar no banco." },
+  { icon: Shield, title: "Criptografia em trânsito", desc: "Toda comunicação ocorre via HTTPS/TLS." },
+  // Varredura de UI (defeito 4): "Imutabilidade" sugeria que nada podia ser editado.
+  // UX: agora as versões podem ser vistas na ficha ("Ver histórico de versões").
+  { icon: History, title: "Histórico de versões", desc: "Evoluções podem ser corrigidas, mas nada se perde: cada edição guarda a versão anterior, que pode ser consultada na ficha do paciente." },
+  { icon: KeyRound, title: "Multi-tenancy seguro", desc: "Cada profissional acessa apenas os próprios dados, com sessão isolada." },
+  { icon: FileCheck, title: "Direitos do titular (LGPD)", desc: "Exportação (PDF/JSON), correção, anonimização e registro ou revogação do consentimento, com data." },
+  { icon: Archive, title: "Guarda legal (CFP)", desc: "Prontuários não podem ser excluídos antes de 5 anos do último registro. Até lá, o paciente pode ser arquivado." },
+];
+
+// ---------------------------------------------------------------------------
+// UX (Configurações em abas): antes era uma página única e longa, chamada
+// "Privacidade & LGPD", onde trocar a senha exigia rolar por termo,
+// criptografia e auditoria. Agora são quatro abas:
+//   Minha conta   - senha, outros aparelhos, bloqueio, rascunhos (e nome/CRP);
+//   Termo         - termo de consentimento dos pacientes;
+//   Privacidade   - conformidade, política e o que o sistema protege;
+//   Auditoria     - trilha de auditoria (carregada só ao abrir a aba).
+// A aba fica na URL (?aba=termo), para abrir direto por um link.
+// "Minha conta" e "Termo" continuam montadas quando escondidas: um termo em
+// edição ou uma senha digitada não se perdem ao trocar de aba.
+// ---------------------------------------------------------------------------
+const TABS = [
+  { id: "conta", label: "Minha conta", icon: UserRound },
+  { id: "termo", label: "Termo de consentimento", icon: FileSignature },
+  { id: "privacidade", label: "Privacidade", icon: Shield },
+  { id: "auditoria", label: "Auditoria", icon: ScrollText },
+];
+const TAB_IDS = TABS.map((t) => t.id);
+// Aba montada mas escondida (forceMount): o Radix só marca data-state=inactive.
+const KEEP_MOUNTED = "data-[state=inactive]:hidden";
+
+export default function Settings() {
+  const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = TAB_IDS.includes(searchParams.get("aba")) ? searchParams.get("aba") : "conta";
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Privacidade & LGPD</h1>
-        <p className="mt-1 text-sm text-slate-500">Conformidade, criptografia e trilha de auditoria</p>
+        <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Configurações</h1>
+        <p className="mt-1 text-sm text-slate-500">Sua conta, o termo de consentimento, privacidade e auditoria</p>
       </div>
 
-      <Card className="border-slate-200 p-6 shadow-sm">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><CheckCircle2 className="h-5 w-5" /></div>
-            <div className="min-w-0">
-              <p className="font-head font-bold text-[#0F172A]">Conta em conformidade</p>
-              <p className="truncate text-sm text-slate-500">{user?.name} · {user?.email}</p>
-              {/* Item 16: evidência do aceite (versão + data), não um "Termos aceitos" fixo. */}
-              <p className="text-xs text-slate-500">
-                Política de Privacidade versão {user?.terms_version} aceita em {fmtDateTime(user?.terms_accepted_at)}
-              </p>
-            </div>
-          </div>
-          <Link to="/privacidade" className="text-sm font-medium text-[#1E3A8A] hover:underline">Ler a política</Link>
-        </div>
-      </Card>
+      {/* `replace`: trocar de aba não enche o histórico do navegador. */}
+      <Tabs value={tab} onValueChange={(next) => setSearchParams({ aba: next }, { replace: true })}>
+        {/* Celular: as abas quebram em duas linhas em vez de sair da tela. */}
+        <TabsList className="h-auto flex-wrap justify-start gap-1 bg-slate-100 text-slate-600">
+          {TABS.map(({ id, label, icon: Icon }) => (
+            <TabsTrigger key={id} value={id} className="gap-1.5 data-[state=active]:text-[#1E3A8A]" data-testid={`settings-tab-${id}`}>
+              <Icon className="h-4 w-4" aria-hidden="true" /> {label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      {/* PRODUTO (primeira versão): o cadastro de nome/CRP só aparece com a
-          identificação do profissional ligada no servidor. Nesta versão o
-          sistema é usado só pelos profissionais; volta ao abrir para pacientes. */}
-      {user?.features?.professional_identification && <ProfessionalProfile />}
-      <ConsentTermEditor />
-      <SessionSecurity />
-      <AccountSecurity />
+        <TabsContent value="conta" forceMount className={`mt-6 space-y-6 ${KEEP_MOUNTED}`}>
+          {/* PRODUTO (primeira versão): o cadastro de nome/CRP só aparece com a
+              identificação do profissional ligada no servidor. Nesta versão o
+              sistema é usado só pelos profissionais; volta ao abrir para pacientes. */}
+          {user?.features?.professional_identification && <ProfessionalProfile />}
+          <AccountSecurity />
+          <SessionSecurity />
+        </TabsContent>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {items.map((it) => (
-          <Card key={it.title} className="border-slate-200 p-5 shadow-sm">
-            <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F0F4F8] text-[#1E3A8A]"><it.icon className="h-4 w-4" /></div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="font-medium text-[#0F172A]">{it.title}</p>
-                  <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Ativo</Badge>
+        <TabsContent value="termo" forceMount className={`mt-6 ${KEEP_MOUNTED}`}>
+          <ConsentTermEditor />
+        </TabsContent>
+
+        <TabsContent value="privacidade" className="mt-6 space-y-6">
+          <Card className="border-slate-200 p-6 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><CheckCircle2 className="h-5 w-5" /></div>
+                <div className="min-w-0">
+                  <p className="font-head font-bold text-[#0F172A]">Conta em conformidade</p>
+                  <p className="truncate text-sm text-slate-500">{user?.name} · {user?.email}</p>
+                  {/* Item 16: evidência do aceite (versão + data), não um "Termos aceitos" fixo. */}
+                  <p className="text-xs text-slate-500">
+                    Política de Privacidade versão {user?.terms_version} aceita em {fmtDateTime(user?.terms_accepted_at)}
+                  </p>
                 </div>
-                <p className="mt-1 text-sm leading-relaxed text-slate-500">{it.desc}</p>
               </div>
+              <Link to="/privacidade" className="text-sm font-medium text-[#1E3A8A] hover:underline">Ler a política</Link>
             </div>
           </Card>
-        ))}
-      </div>
 
-      <Card className="border-slate-200 p-6 shadow-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          <ScrollText className="h-4 w-4 text-[#1E3A8A]" />
-          <h2 className="font-head text-lg font-bold text-[#0F172A]">Trilha de auditoria</h2>
-          {/* Item 14: agora é de fato somente inclusão (gatilho no banco) e inclui leituras e IP. */}
-          {/* Acessibilidade (varredura de UI): textos da trilha em slate-400 (2,6:1) -> slate-500 (4,8:1). */}
-          <span className="text-xs text-slate-500">(somente inclusão · inclui visualizações e IP)</span>
-        </div>
-        <Separator className="my-4" />
-        {logs === null ? (
-          <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
-        ) : logs.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">Nenhum registro de auditoria ainda.</p>
-        ) : (
-          // Acessibilidade (varredura de UI): lista com rolagem alcançável pelo teclado.
-          <div tabIndex={0} role="region" aria-label="Registros da trilha de auditoria"
-            className="max-h-[420px] space-y-1 overflow-y-auto psi-scroll focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
-            data-testid="audit-log">
-            {logs.map((l) => (
-              <div key={l.log_id} className="flex items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-slate-50">
-                <Badge variant="secondary" className="w-28 shrink-0 justify-center text-[11px]">{ACTION_LABEL[l.action] || l.action}</Badge>
-                <span className="text-slate-600">{ENTITY_LABEL[l.entity_type] || l.entity_type}</span>
-                <span className="truncate text-slate-500">{formatAuditDetail(l.detail)}</span>
-                <span className="ml-auto flex shrink-0 items-center gap-3">
-                  <span className="hidden font-mono text-[11px] text-slate-500 md:inline" title="Endereço IP da ação">
-                    {l.ip_address || "—"}
-                  </span>
-                  <span className="text-xs text-slate-500">
-                    {new Date(l.timestamp).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </span>
-              </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {PRIVACY_FEATURES.map((it) => (
+              <Card key={it.title} className="border-slate-200 p-5 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F0F4F8] text-[#1E3A8A]"><it.icon className="h-4 w-4" /></div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-[#0F172A]">{it.title}</p>
+                      <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Ativo</Badge>
+                    </div>
+                    <p className="mt-1 text-sm leading-relaxed text-slate-500">{it.desc}</p>
+                  </div>
+                </div>
+              </Card>
             ))}
-            {logsCursor && (
-              <div className="flex justify-center pt-2">
-                <Button variant="outline" size="sm" onClick={loadMoreLogs} disabled={loadingMore}
-                  className="gap-2 border-slate-300" data-testid="audit-load-more">
-                  {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />} Carregar registros anteriores
-                </Button>
-              </div>
-            )}
           </div>
-        )}
-      </Card>
+        </TabsContent>
+
+        <TabsContent value="auditoria" className="mt-6">
+          <AuditTrail />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

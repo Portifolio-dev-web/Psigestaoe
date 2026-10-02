@@ -1,6 +1,6 @@
 import { format, isToday, isTomorrow } from "date-fns";
 import { ptBR } from "date-fns/locale";
-import { CalendarDays } from "lucide-react";
+import { CalendarDays, FileCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { STATUS, dayKey, formatTimeRange } from "@/components/agenda/agendaUtils";
 
@@ -55,6 +55,13 @@ export default function ListView({ sessions, onOpenSession }) {
                     </span>
                     <span className="block truncate text-xs text-slate-500">{s.title}</span>
                   </span>
+                  {/* UX (agenda -> evolução): sessão que já tem evolução registrada. */}
+                  {s.record_id && (
+                    <span className="flex items-center text-emerald-700" title="Evolução registrada">
+                      <FileCheck className="h-4 w-4" aria-hidden="true" />
+                      <span className="sr-only">Evolução registrada</span>
+                    </span>
+                  )}
                   <Badge className={`${STATUS[s.status]?.cls} hover:opacity-100`}>{STATUS[s.status]?.label}</Badge>
                 </button>
               </li>

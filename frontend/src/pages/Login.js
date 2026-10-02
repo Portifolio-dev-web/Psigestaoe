@@ -80,7 +80,8 @@ export default function Login() {
         // encerrou as outras sessões. Explicamos, para não parecer um defeito.
         toast.warning(
           "Por segurança, a senha antiga desta conta foi desativada: ela tinha sido criada sem confirmar que o e-mail era seu. "
-          + "Continue entrando com o Google ou defina uma nova senha em Privacidade & LGPD.",
+          // UX: o menu "Privacidade & LGPD" passou a se chamar "Configurações".
+          + "Continue entrando com o Google ou defina uma nova senha em Configurações > Minha conta.",
           { duration: 12000 },
         );
       } else {

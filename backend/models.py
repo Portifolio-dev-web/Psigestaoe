@@ -229,6 +229,14 @@ class Record(Base):
     diagnosis = Column(Text, default="") # [CRIPTOGRAFADO]
     version = Column(Integer, default=1)
 
+    # PRODUTO (ligação agenda -> evolução): a sessão da agenda a que esta
+    # evolução se refere, quando registrada a partir dela. Opcional: evoluções
+    # antigas e as registradas direto na ficha não têm sessão. Excluir a sessão
+    # da agenda não apaga a evolução (SET NULL): o prontuário é guardado por lei.
+    # Migração: alembic/versions/20261002_record_session_link.py
+    # Único: no máximo UMA evolução por sessão (o banco garante, mesmo com dois envios simultâneos).
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True, unique=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 

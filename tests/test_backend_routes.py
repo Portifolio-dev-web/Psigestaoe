@@ -1904,4 +1904,90 @@ def test_describe_user_agent():
     assert server.describe_user_agent(edge) == "Edge no Windows"
     assert server.describe_user_agent(iphone) == "Safari no iPhone"
     assert server.describe_user_agent(android) == "Chrome no Android"
-    assert server.describe_user_agent("") == "navegador não identificado no sistema não identificado"
+    assert server.describe_user_agent("") == "dispositivo não identificado"
+    assert server.describe_user_agent("python-httpx/0.28") == "dispositivo não identificado"
+    assert server.describe_user_agent("Mozilla/5.0 (X11; Linux x86_64) Konqueror/5") == "navegador não identificado no Linux"
+
+
+# ---------------------------------------------------------------------------
+# UX de maior impacto: agenda -> evolução, histórico de versões, última consulta
+# ---------------------------------------------------------------------------
+
+async def _session_for(client, patient_id, start, status="agendada"):
+    begin = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    response = await client.post("/api/sessions", json={
+        "title": "Sessão", "patient_id": patient_id, "start": start,
+        "end": (begin + timedelta(minutes=50)).isoformat(), "status": status, "allow_conflict": True})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.anyio
+async def test_evolution_registered_from_agenda_session(client):
+    patient_id = await _create_patient(client, "agenda.evolucao@example.com")
+    session = await _session_for(client, patient_id, "2026-09-20T13:00:00Z")
+    assert session["record_id"] == ""
+
+    record = await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-20T13:00:00Z", "content": "Evolução da sessão", "session_id": session["id"]})
+    assert record.status_code == 200 and record.json()["session_id"] == session["id"]
+
+    listed = (await client.get("/api/sessions", params={"start": "2026-09-01T00:00:00Z"})).json()
+    linked = next(s for s in listed if s["id"] == session["id"])
+    assert linked["record_id"] == record.json()["id"]
+    assert linked["status"] == "realizada"  # registrar a evolução confirma que a sessão aconteceu
+
+    # Terminologia (UX): a trilha diz "Evolução registrada" e de onde ela veio.
+    details = [log["detail"] for log in (await client.get("/api/audit")).json()["items"]]
+    assert "Evolução registrada · sessão de 2026-09-20T13:00:00+00:00 (sessão da agenda)" in details
+
+    # No máximo uma evolução por sessão: o 409 aponta a existente.
+    again = await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-20T13:00:00Z", "content": "Duplicada", "session_id": session["id"]})
+    assert again.status_code == 409
+    assert again.json()["detail"]["record_id"] == record.json()["id"]
+
+    # Sessão de outro paciente ou cancelada: recusada.
+    other_patient = (await client.post("/api/patients", json=patient_data("Outra Pessoa"))).json()["id"]
+    other_session = await _session_for(client, other_patient, "2026-09-21T13:00:00Z")
+    cancelled = await _session_for(client, patient_id, "2026-09-22T13:00:00Z", status="cancelada")
+    for sid in (other_session["id"], cancelled["id"]):
+        refused = await client.post(f"/api/patients/{patient_id}/records", json={
+            "session_datetime": "2026-09-22T13:00:00Z", "content": "x", "session_id": sid})
+        assert refused.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_last_consultation_only_moves_forward(client):
+    patient_id = await _create_patient(client, "ultima.consulta@example.com")
+
+    async def last():
+        items = (await client.get("/api/patients")).json()["items"]
+        return next(p for p in items if p["id"] == patient_id)["last_consultation_date"][:10]
+
+    await client.post(f"/api/patients/{patient_id}/records", json={"session_datetime": "2026-09-24T13:00:00Z", "content": "a"})
+    # Evolução de uma sessão ANTIGA registrada depois: a última consulta não volta no tempo.
+    await client.post(f"/api/patients/{patient_id}/records", json={"session_datetime": "2026-09-10T13:00:00Z", "content": "b"})
+    assert await last() == "2026-09-24"
+    # Sessão realizada mais recente (e já ocorrida) também conta.
+    await _session_for(client, patient_id, "2026-09-28T13:00:00Z", status="realizada")
+    assert await last() == "2026-09-28"
+
+
+@pytest.mark.anyio
+async def test_record_version_history_is_visible(client):
+    patient_id = await _create_patient(client, "historico@example.com")
+    rid = (await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-15T10:00:00Z", "content": "Texto original"})).json()["id"]
+    for version, text in ((1, "Primeira correção"), (2, "Segunda correção")):
+        await client.put(f"/api/records/{rid}", json={
+            "session_datetime": "2026-09-15T10:00:00Z", "content": text, "expected_version": version})
+
+    history = (await client.get(f"/api/records/{rid}/versions")).json()
+    assert history["current"]["version"] == 3 and history["current"]["content"] == "Segunda correção"
+    assert [v["version"] for v in history["versions"]] == [2, 1]
+    assert [v["content"] for v in history["versions"]] == ["Primeira correção", "Texto original"]
+    assert all(v["replaced_at"] for v in history["versions"])
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["action"] == "visualizar" and "Histórico de versões" in log["detail"] for log in logs)
+    assert (await client.get("/api/records/rec_inexistente/versions")).status_code == 404

@@ -1,11 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
 import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
 import RecordEditorDialog from "@/components/RecordEditorDialog";
+import RecordHistoryDialog from "@/components/RecordHistoryDialog";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,8 @@ import {
 import { toast } from "sonner";
 import {
   ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Phone, Mail,
-  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload
+  CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload,
+  History, CalendarCheck,
 } from "lucide-react";
 
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js;
@@ -60,6 +62,13 @@ export default function PatientDetail() {
   // PRODUTO (rascunho automático): força recalcular os avisos de rascunho
   // depois que o editor fecha (um rascunho pode ter sido criado ou apagado).
   const [, setDraftsVersion] = useState(0);
+  // UX (agenda -> evolução): sessão da agenda de onde a nova evolução foi aberta.
+  const [fromSession, setFromSession] = useState(null);
+  // UX (histórico de versões): evolução cujo histórico está aberto.
+  const [historyOf, setHistoryOf] = useState(null);
+  // Evolução a destacar ao chegar pela agenda/painel ("Ver evolução").
+  const [highlightId, setHighlightId] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const load = useCallback(async () => {
     try {
@@ -108,9 +117,33 @@ export default function PatientDetail() {
 
   // O editor (com rascunho automático) fica em components/RecordEditorDialog.js.
   const openNew = () => {
+    setFromSession(null);
     setEditingRec(null);
     setEditorOpen(true);
   };
+
+  // UX (agenda -> evolução): o painel "Hoje" e a agenda trazem para cá com
+  //   ?evolucao=nova&sessao=<id>&inicio=<ISO>  -> abre o editor já com a data e
+  //                                               a hora da sessão, ligado a ela;
+  //   ?evolucao=<id da evolução>               -> destaca essa evolução na lista.
+  // Os parâmetros saem da URL em seguida, para recarregar a página não reabrir o editor.
+  useEffect(() => {
+    const target = searchParams.get("evolucao");
+    if (!target || !patient) return;
+    if (target === "nova") {
+      setFromSession({ sessionId: searchParams.get("sessao") || null, sessionDatetime: searchParams.get("inicio") || null });
+      setEditingRec(null);
+      setEditorOpen(true);
+    } else {
+      setHighlightId(target);
+    }
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams, patient]);
+
+  useEffect(() => {
+    if (!highlightId || !records.some((r) => r.id === highlightId)) return;
+    document.querySelector(`[data-testid="record-${highlightId}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightId, records]);
   const openEdit = (r) => {
     setEditingRec(r);
     setEditorOpen(true);
@@ -226,7 +259,8 @@ export default function PatientDetail() {
                 </Button>
               )}
               <Button onClick={openNew} className="w-full gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-record-btn">
-                <Plus className="h-4 w-4" /> Nova anotação
+                {/* Terminologia (UX): prontuário = o do paciente; evolução = registro de cada sessão. */}
+                <Plus className="h-4 w-4" /> Nova evolução
               </Button>
               {/* Acessibilidade (varredura de UI): menu não modal (ver RowMenu em Patients.js). */}
               <DropdownMenu modal={false}>
@@ -254,13 +288,13 @@ export default function PatientDetail() {
             <Badge variant="secondary" className="ml-1">{recordsTotal}</Badge>
           </div>
 
-          {/* PRODUTO: uma anotação começada e não salva não fica esquecida. */}
+          {/* PRODUTO: uma evolução começada e não salva não fica esquecida. */}
           {newDraft && (
             <div className="mb-4 flex flex-col gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-[#1E3A8A] sm:flex-row sm:items-center sm:justify-between"
               data-testid="pending-draft-banner">
               <span className="flex items-center gap-2">
                 <HardDriveDownload className="h-4 w-4 shrink-0" />
-                Você tem uma anotação não salva (rascunho de {fmtDateTime(newDraft.savedAt)} neste dispositivo).
+                Você tem uma evolução não salva (rascunho de {fmtDateTime(newDraft.savedAt)} neste dispositivo).
               </span>
               <Button size="sm" onClick={openNew} className="bg-[#1E3A8A] hover:bg-[#0F2C59]">Continuar escrevendo</Button>
             </div>
@@ -268,8 +302,8 @@ export default function PatientDetail() {
 
           {records.length === 0 ? (
             <Card className="border-slate-200 py-16 text-center shadow-sm">
-              <p className="text-sm text-slate-500">Nenhum prontuário registrado ainda.</p>
-              <Button onClick={openNew} variant="link" className="mt-2 text-[#1E3A8A]">Registrar primeira anotação</Button>
+              <p className="text-sm text-slate-500">Nenhuma evolução registrada ainda.</p>
+              <Button onClick={openNew} variant="link" className="mt-2 text-[#1E3A8A]">Registrar a primeira evolução</Button>
             </Card>
           ) : (
             <motion.div initial="hidden" animate="show"
@@ -277,12 +311,19 @@ export default function PatientDetail() {
               className="space-y-4">
               {records.map((r) => (
                 <motion.div key={r.id} variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}>
-                  <Card className="border-slate-200 p-5 shadow-sm" data-testid={`record-${r.id}`}>
+                  <Card className={`border-slate-200 p-5 shadow-sm ${highlightId === r.id ? "ring-2 ring-[#1E3A8A]" : ""}`}
+                    data-testid={`record-${r.id}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-2 text-sm font-medium text-[#0F172A]">
                         <CalendarClock className="h-4 w-4 text-[#0284C7]" />
                         {fmtDateTime(r.session_datetime)}
                         {r.version > 1 && <Badge variant="secondary" className="text-[10px]">v{r.version}</Badge>}
+                        {/* UX (agenda -> evolução): evolução registrada a partir de uma sessão da agenda. */}
+                        {r.session_id && (
+                          <Badge className="gap-1 bg-emerald-50 text-[10px] text-emerald-800 hover:bg-emerald-50">
+                            <CalendarCheck className="h-3 w-3" aria-hidden="true" /> Sessão da agenda
+                          </Badge>
+                        )}
                         {editDraftOf(r.id) && (
                           <Badge className="bg-blue-100 text-[10px] text-[#1E3A8A] hover:bg-blue-100" title="Há uma edição não salva neste dispositivo">
                             Edição não salva
@@ -305,12 +346,21 @@ export default function PatientDetail() {
                     {/* Correção (varredura de UI, defeito 4): dizia "Registro imutável"
                         ao lado do botão de editar. A evolução É editável; o que não se
                         perde são as versões anteriores, guardadas a cada edição. */}
-                    <p className="mt-3 flex items-center gap-1 text-[11px] text-slate-500">
-                      <Lock className="h-3 w-3" /> Criptografado
-                      {(r.version || 1) > 1
-                        ? ` · editado (versão ${r.version}; as anteriores ficam guardadas)`
-                        : " · versão original"}
-                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <p className="flex items-center gap-1 text-[11px] text-slate-500">
+                        <Lock className="h-3 w-3" /> Criptografado
+                        {(r.version || 1) > 1
+                          ? ` · editado (versão ${r.version}; as anteriores ficam guardadas)`
+                          : " · versão original"}
+                      </p>
+                      {/* UX (histórico de versões): antes as versões existiam, mas não havia como vê-las. */}
+                      {(r.version || 1) > 1 && (
+                        <Button type="button" variant="link" size="sm" onClick={() => setHistoryOf(r.id)}
+                          className="h-auto gap-1 px-0 text-[11px] text-[#1E3A8A]" data-testid={`history-${r.id}`}>
+                          <History className="h-3 w-3" aria-hidden="true" /> Ver histórico de versões
+                        </Button>
+                      )}
+                    </div>
                   </Card>
                 </motion.div>
               ))}
@@ -330,7 +380,9 @@ export default function PatientDetail() {
 
       {/* Editor com rascunho automático (components/RecordEditorDialog.js). */}
       <RecordEditorDialog open={editorOpen} onOpenChange={onEditorOpenChange} patientId={id}
-        record={editingRec} userId={userId} onSaved={load} />
+        record={editingRec} userId={userId} onSaved={load} fromSession={editingRec ? null : fromSession} />
+      <RecordHistoryDialog recordId={historyOf} open={Boolean(historyOf)}
+        onOpenChange={(open) => { if (!open) setHistoryOf(null); }} />
     </div>
   );
 }

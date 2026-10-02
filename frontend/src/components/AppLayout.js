@@ -12,7 +12,9 @@ const nav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, id: "dashboard" },
   { to: "/pacientes", label: "Pacientes", icon: Users, id: "pacientes" },
   { to: "/agenda", label: "Agenda", icon: CalendarDays, id: "agenda" },
-  { to: "/configuracoes", label: "Privacidade & LGPD", icon: Shield, id: "config" },
+  // UX (Configurações em abas): a página reúne conta, termo, privacidade e
+  // auditoria; o nome antigo ("Privacidade & LGPD") escondia a troca de senha.
+  { to: "/configuracoes", label: "Configurações", icon: Settings, id: "config" },
 ];
 
 export default function AppLayout() {

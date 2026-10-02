@@ -150,7 +150,9 @@ def privacy_policy() -> dict:
             "dados tratados com base no consentimento; informação sobre com quem os dados são compartilhados; "
             "informação sobre a possibilidade de não consentir e suas consequências; e revogação do "
             "consentimento.",
-            "Profissionais exercem esses direitos pelo próprio sistema (Privacidade & LGPD) ou pelo contato do "
+            # Só o nome do menu mudou (ajuste de redação, sem mudança de conteúdo):
+            # a versão da política continua a mesma e ninguém precisa aceitar de novo.
+            "Profissionais exercem esses direitos pelo próprio sistema (menu Configurações) ou pelo contato do "
             "encarregado indicado no item 11.",
             "Pacientes devem fazer o pedido diretamente ao seu psicólogo ou psicóloga, que é o controlador dos "
             "seus dados. O sistema oferece ao profissional as ferramentas para atender: exportação do "

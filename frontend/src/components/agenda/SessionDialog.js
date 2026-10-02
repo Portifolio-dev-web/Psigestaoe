@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { addMinutes } from "date-fns";
-import { Loader2, Trash2 } from "lucide-react";
+import { FileText, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { localInputToISO, toLocalInput } from "@/lib/datetime";
 import PatientPicker from "@/components/PatientPicker";
@@ -12,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { DEFAULT_SESSION_MINUTES } from "@/components/agenda/agendaUtils";
+import { DEFAULT_SESSION_MINUTES, evolutionPath } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
 // Formulário de sessão da agenda (criar/editar).
@@ -21,7 +22,10 @@ import { DEFAULT_SESSION_MINUTES } from "@/components/agenda/agendaUtils";
 //   - ao mudar o início, o término acompanha mantendo a duração;
 //   - horário enviado com fuso (antes ficava 3 h deslocado no Brasil);
 //   - quem trata conflito de horário é a página (Agenda.js), que pergunta
-//     antes de salvar por cima de outra sessão.
+//     antes de salvar por cima de outra sessão;
+//   - UX (agenda -> evolução): sessão com paciente que já aconteceu (ou foi
+//     marcada como realizada) leva direto a "Registrar evolução"; se a
+//     evolução já existe, a "Ver evolução".
 // ---------------------------------------------------------------------------
 
 const DURATIONS = [30, 50, 60, 90];
@@ -51,8 +55,23 @@ function toForm(initial) {
 
 const durationMinutes = (form) => (new Date(form.end) - new Date(form.start)) / 60000;
 
+// Mesma margem do painel "Hoje": 10 min antes do início já vale registrar.
+const STARTED_MARGIN_MS = 10 * 60 * 1000;
+
+/** A sessão SALVA (não o formulário) pede o atalho para a evolução? */
+function showsEvolution(session) {
+  if (!session?.id || !session.patient_id || session.status === "cancelada") return false;
+  return Boolean(session.record_id) || session.status === "realizada"
+    || new Date(session.start).getTime() <= Date.now() + STARTED_MARGIN_MS;
+}
+
 export default function SessionDialog({ open, initial, saving, deleting, onOpenChange, onSubmit, onDelete }) {
+  const navigate = useNavigate();
   const [form, setForm] = useState(() => toForm(initial));
+  // Alterou algo no formulário? Então o atalho para a evolução espera o
+  // "Salvar" (sair para a ficha agora descartaria as alterações).
+  const saved = useMemo(() => toForm(initial), [initial]);
+  const dirty = JSON.stringify(form) !== JSON.stringify(saved);
 
   useEffect(() => {
     if (open) setForm(toForm(initial));
@@ -155,6 +174,23 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
             <Textarea id="session-notes" value={form.notes} maxLength={5000}
               onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="mt-1.5" />
           </div>
+          {/* UX (agenda -> evolução): antes a evolução era registrada à parte, na ficha,
+              digitando de novo a data e a hora da sessão. */}
+          {showsEvolution(initial) && (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3" data-testid="session-evolution">
+              <p className="text-sm text-slate-700">
+                {initial.record_id ? "Esta sessão já tem uma evolução registrada." : "Esta sessão ainda não tem evolução registrada."}
+              </p>
+              <Button type="button" size="sm" variant={initial.record_id ? "outline" : "default"} disabled={dirty}
+                onClick={() => navigate(evolutionPath(initial))}
+                className={`mt-2 gap-2 ${initial.record_id ? "border-slate-300" : "bg-[#1E3A8A] hover:bg-[#0F2C59]"}`}
+                data-testid="session-evolution-btn">
+                <FileText className="h-4 w-4" aria-hidden="true" />
+                {initial.record_id ? "Ver evolução" : "Registrar evolução"}
+              </Button>
+              {dirty && <p className="mt-1.5 text-xs text-slate-500">Salve as alterações da sessão antes.</p>}
+            </div>
+          )}
         </div>
         <DialogFooter className="flex-row justify-between sm:justify-between">
           {/* Varredura, item 9: "Remover" fica travado enquanto a exclusão está em andamento. */}

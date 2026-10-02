@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -18,7 +18,7 @@ import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 import {
-  STATUS, VIEWS, VIEW_IDS, daysBetween, defaultNewSessionStart, formatDateParam, formatTimeRange,
+  STATUS, VIEWS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
   parseDateParam, sessionInterval, shiftDate, viewRange, viewTitle,
 } from "@/components/agenda/agendaUtils";
 
@@ -59,6 +59,7 @@ const sessionPayload = (session, start, end) => ({
 
 export default function Agenda() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const view = VIEW_IDS.includes(searchParams.get("visao")) ? searchParams.get("visao") : defaultView();
   const dateParam = searchParams.get("data");
   const date = useMemo(() => parseDateParam(dateParam), [dateParam]);
@@ -106,15 +107,20 @@ export default function Agenda() {
   /**
    * Salva (cria ou altera) tratando conflito de horário: se o servidor
    * responder 409, pergunta antes de salvar por cima ("allow_conflict").
-   * Devolve true se salvou.
+   * Devolve a sessão salva (verdadeiro) ou false.
    */
   const attemptSave = useCallback(async (id, payload, { successMessage, undo } = {}) => {
     try {
-      if (id) await api.put(`/sessions/${id}`, payload);
-      else await api.post("/sessions", payload);
-      toast.success(successMessage || "Sessão salva.", undo ? { action: { label: "Desfazer", onClick: undo } } : undefined);
+      const { data: savedSession } = id ? await api.put(`/sessions/${id}`, payload) : await api.post("/sessions", payload);
+      // UX (agenda -> evolução): sessão marcada como realizada, com paciente e
+      // ainda sem evolução: o aviso já oferece "Registrar evolução".
+      const registerPath = savedSession?.status === "realizada" && !savedSession.record_id ? evolutionPath(savedSession) : null;
+      const action = undo
+        ? { action: { label: "Desfazer", onClick: undo } }
+        : registerPath ? { action: { label: "Registrar evolução", onClick: () => navigate(registerPath) }, duration: 10000 } : undefined;
+      toast.success(successMessage || "Sessão salva.", action);
       load();
-      return true;
+      return savedSession || true;
     } catch (err) {
       const detail = err.response?.data?.detail;
       if (err.response?.status === 409 && detail?.code === "schedule_conflict") {
@@ -144,7 +150,7 @@ export default function Agenda() {
       load();
       return false;
     }
-  }, [load]);
+  }, [load, navigate]);
 
   const submitDialog = async (id, payload) => {
     setSaving(true);

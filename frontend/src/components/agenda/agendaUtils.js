@@ -166,3 +166,18 @@ export function layoutDay(sessions, day) {
 // Estado do arrastar-e-soltar (uma sessão por vez). Fica fora do React:
 // o evento "dragover" não deixa ler os dados do arraste, só o "drop".
 export const dragState = { current: null }; // { session, grabMinutes }
+
+// ---------------------------------------------------------------------------
+// UX (agenda -> evolução): para onde levar a partir de uma sessão.
+//   - já tem evolução: a ficha do paciente, com a evolução destacada;
+//   - ainda não tem: a ficha com o editor aberto, já com a data e a hora da
+//     sessão e ligado a ela (o servidor marca a sessão como realizada).
+// Sessão sem paciente vinculado não tem prontuário: null.
+// Usado pelo painel ("Hoje") e pela agenda (diálogo da sessão e aviso ao salvar).
+// ---------------------------------------------------------------------------
+export function evolutionPath(session) {
+  if (!session?.patient_id) return null;
+  if (session.record_id) return `/pacientes/${session.patient_id}?evolucao=${session.record_id}`;
+  const params = new URLSearchParams({ evolucao: "nova", sessao: session.id, inicio: session.start });
+  return `/pacientes/${session.patient_id}?${params}`;
+}
