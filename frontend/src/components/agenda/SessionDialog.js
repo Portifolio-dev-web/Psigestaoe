@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { addMinutes } from "date-fns";
-import { FileText, Loader2, Trash2 } from "lucide-react";
+import { addDays, addMinutes, format } from "date-fns";
+import { FileText, Loader2, Repeat, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { localInputToISO, toLocalInput } from "@/lib/datetime";
 import PatientPicker from "@/components/PatientPicker";
@@ -13,7 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { DEFAULT_SESSION_MINUTES, evolutionPath } from "@/components/agenda/agendaUtils";
+import {
+  DEFAULT_SESSION_MINUTES, RECURRENCE, SERIES_COUNTS, evolutionPath, isNoShow,
+} from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
 // Formulário de sessão da agenda (criar/editar).
@@ -25,7 +27,11 @@ import { DEFAULT_SESSION_MINUTES, evolutionPath } from "@/components/agenda/agen
 //     antes de salvar por cima de outra sessão;
 //   - UX (agenda -> evolução): sessão com paciente que já aconteceu (ou foi
 //     marcada como realizada) leva direto a "Registrar evolução"; se a
-//     evolução já existe, a "Ver evolução".
+//     evolução já existe, a "Ver evolução";
+//   - fluxo clínico (C4): status "Faltou" (o paciente não veio);
+//   - fluxo clínico (P1): sessão nova pode se repetir (toda semana / a cada 2
+//     semanas, N sessões); numa sessão de série, alterar ou remover "só esta"
+//     ou "esta e as próximas".
 // ---------------------------------------------------------------------------
 
 const DURATIONS = [30, 50, 60, 90];
@@ -43,6 +49,8 @@ function toForm(initial) {
       end: toLocalInput(end),
       status: initial.status || "agendada",
       notes: initial.notes || "",
+      // P1: série já existente -> a quem aplicar as alterações.
+      applyTo: "this",
     };
   }
   const start = initial?.start || new Date();
@@ -50,6 +58,8 @@ function toForm(initial) {
     id: null, patient_id: "", patient_name: "", title: "Sessão",
     start: toLocalInput(start), end: toLocalInput(addMinutes(start, DEFAULT_SESSION_MINUTES)),
     status: "agendada", notes: "",
+    // P1: repetição da sessão nova ("" = não repete).
+    repeat: "", repeatCount: 12,
   };
 }
 
@@ -60,7 +70,8 @@ const STARTED_MARGIN_MS = 10 * 60 * 1000;
 
 /** A sessão SALVA (não o formulário) pede o atalho para a evolução? */
 function showsEvolution(session) {
-  if (!session?.id || !session.patient_id || session.status === "cancelada") return false;
+  // C4: falta e cancelada não pedem evolução (falta não liga evolução à sessão).
+  if (!session?.id || !session.patient_id || isNoShow(session.status)) return false;
   return Boolean(session.record_id) || session.status === "realizada"
     || new Date(session.start).getTime() <= Date.now() + STARTED_MARGIN_MS;
 }
@@ -68,13 +79,18 @@ function showsEvolution(session) {
 export default function SessionDialog({ open, initial, saving, deleting, onOpenChange, onSubmit, onDelete }) {
   const navigate = useNavigate();
   const [form, setForm] = useState(() => toForm(initial));
+  // P1: remover uma sessão de série pergunta "só esta" ou "esta e as próximas".
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // Alterou algo no formulário? Então o atalho para a evolução espera o
   // "Salvar" (sair para a ficha agora descartaria as alterações).
   const saved = useMemo(() => toForm(initial), [initial]);
   const dirty = JSON.stringify(form) !== JSON.stringify(saved);
 
   useEffect(() => {
-    if (open) setForm(toForm(initial));
+    if (open) {
+      setForm(toForm(initial));
+      setConfirmDelete(false);
+    }
   }, [open, initial]);
 
   // Mudou o início: o término anda junto, mantendo a duração escolhida.
@@ -111,10 +127,19 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
       end,
       status: form.status,
       notes: form.notes,
+      // P1: só sessão nova e agendada se repete; só sessão de série escolhe o alcance.
+      ...(!form.id && form.repeat && form.status === "agendada"
+        ? { repeat: { frequency: form.repeat, count: Number(form.repeatCount) } } : {}),
+      ...(form.id && initial?.series_id ? { apply_to: form.applyTo } : {}),
     });
   };
 
   const currentDuration = durationMinutes(form);
+  const inSeries = Boolean(form.id && initial?.series_id);
+  // P1: resumo da repetição ("12 sessões, toda semana, até 21/12/2026").
+  const repeating = !form.id && form.repeat && form.status === "agendada";
+  const lastDate = repeating && form.start
+    ? addDays(new Date(form.start), RECURRENCE[form.repeat].days * (Number(form.repeatCount) - 1)) : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -165,10 +190,73 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
               <SelectContent>
                 <SelectItem value="agendada">Agendada</SelectItem>
                 <SelectItem value="realizada">Realizada</SelectItem>
+                {/* C4: o paciente não veio (sem aviso). Libera o horário e não pede evolução. */}
+                <SelectItem value="faltou">Faltou</SelectItem>
                 <SelectItem value="cancelada">Cancelada</SelectItem>
               </SelectContent>
             </Select>
           </div>
+
+          {/* P1: repetir a sessão nova. Antes cada sessão semanal era marcada à mão. */}
+          {!form.id && form.status === "agendada" && (
+            <div className="rounded-md border border-slate-200 p-3" data-testid="session-repeat">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="session-repeat">Repetir</Label>
+                  <Select value={form.repeat || "none"} onValueChange={(v) => setForm({ ...form, repeat: v === "none" ? "" : v })}>
+                    <SelectTrigger id="session-repeat" className="mt-1.5" data-testid="session-repeat-select"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Não repete</SelectItem>
+                      {Object.entries(RECURRENCE).map(([id, rule]) => (
+                        <SelectItem key={id} value={id}>{rule.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {form.repeat && (
+                  <div>
+                    <Label htmlFor="session-repeat-count">Quantas sessões</Label>
+                    <Select value={String(form.repeatCount)} onValueChange={(v) => setForm({ ...form, repeatCount: Number(v) })}>
+                      <SelectTrigger id="session-repeat-count" className="mt-1.5" data-testid="session-repeat-count"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {SERIES_COUNTS.map((count) => (
+                          <SelectItem key={count} value={String(count)}>{count} sessões</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
+              {lastDate && !Number.isNaN(lastDate.getTime()) && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-600" role="status">
+                  <Repeat className="h-3.5 w-3.5" aria-hidden="true" />
+                  {form.repeatCount} sessões, {RECURRENCE[form.repeat].label.toLowerCase()}, até {format(lastDate, "dd/MM/yyyy")}.
+                  Os horários ocupados são conferidos antes de salvar.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* P1: sessão que faz parte de uma série: a quem aplicar as alterações. */}
+          {inSeries && (
+            <fieldset className="rounded-md border border-slate-200 p-3" data-testid="session-apply-to">
+              <legend className="flex items-center gap-1.5 px-1 text-sm font-medium text-slate-700">
+                <Repeat className="h-4 w-4" aria-hidden="true" />
+                Sessão {RECURRENCE[initial.recurrence]?.adjective || "recorrente"}: aplicar as alterações a
+              </legend>
+              {[["this", "Só esta sessão"], ["following", "Esta e as próximas sessões agendadas"]].map(([value, label]) => (
+                <label key={value} className="flex min-h-[32px] items-center gap-2 text-sm text-slate-700">
+                  <input type="radio" name="session-apply-to" value={value} checked={form.applyTo === value}
+                    onChange={() => setForm({ ...form, applyTo: value })} data-testid={`apply-to-${value}`} />
+                  {label}
+                </label>
+              ))}
+              <p className="mt-1 text-xs text-slate-500">
+                O status vale só para esta sessão. As próximas mudam paciente, título, notas, duração e horário
+                (andando o mesmo tanto).
+              </p>
+            </fieldset>
+          )}
           <div>
             <Label htmlFor="session-notes">Notas</Label>
             <Textarea id="session-notes" value={form.notes} maxLength={5000}
@@ -192,10 +280,30 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
             </div>
           )}
         </div>
+        {/* P1: remover uma sessão de série: só esta, ou esta e as próximas (ex.: o
+            paciente encerrou o tratamento). As que já aconteceram ficam. */}
+        {confirmDelete && (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3" role="group" aria-label="Remover sessão da série"
+            data-testid="session-delete-scope">
+            <p className="text-sm text-red-900">Esta sessão faz parte de uma série. O que remover?</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button type="button" size="sm" variant="outline" className="border-red-300 bg-white text-red-700"
+                disabled={deleting} onClick={() => onDelete(form.id, "this")} data-testid="delete-this">
+                Só esta
+              </Button>
+              <Button type="button" size="sm" className="bg-red-600 hover:bg-red-700"
+                disabled={deleting} onClick={() => onDelete(form.id, "following")} data-testid="delete-following">
+                Esta e as próximas agendadas
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmDelete(false)}>Voltar</Button>
+            </div>
+          </div>
+        )}
         <DialogFooter className="flex-row justify-between sm:justify-between">
           {/* Varredura, item 9: "Remover" fica travado enquanto a exclusão está em andamento. */}
           {form.id ? (
-            <Button variant="ghost" onClick={() => onDelete(form.id)} disabled={deleting || saving}
+            <Button variant="ghost" onClick={() => (inSeries ? setConfirmDelete(true) : onDelete(form.id, "this"))}
+              disabled={deleting || saving}
               className="gap-2 text-red-500 hover:bg-red-50 hover:text-red-600" data-testid="delete-session-btn">
               {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Remover
             </Button>

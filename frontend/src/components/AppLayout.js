@@ -1,10 +1,12 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
   LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2,
 } from "lucide-react";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import api from "@/lib/api";
+import { PENDING_EVOLUTIONS_EVENT } from "@/lib/pendingEvolutions";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -18,11 +20,29 @@ const nav = [
   { to: "/configuracoes", label: "Configurações", icon: Settings, id: "config" },
 ];
 
+// Fluxo clínico (C2): quantas sessões já aconteceram e estão sem evolução
+// (inclui as de hoje). Aparece ao lado de "Dashboard", onde está a lista.
+// Recarrega a cada troca de tela e quando algo pode ter mudado (evento).
+function usePendingEvolutionsCount() {
+  const { pathname } = useLocation();
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const load = () => api.get("/sessions/pending-evolutions?limit=1")
+      .then(({ data }) => setCount(data.total || 0))
+      .catch(() => {}); // sem contador não é erro para o usuário
+    load();
+    window.addEventListener(PENDING_EVOLUTIONS_EVENT, load);
+    return () => window.removeEventListener(PENDING_EVOLUTIONS_EVENT, load);
+  }, [pathname]);
+  return count;
+}
+
 export default function AppLayout() {
   const { user, logout } = useAuth();
   const { lockNow } = useIdleLock();
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
+  const pendingEvolutions = usePendingEvolutionsCount();
 
   const initials = (user?.name || user?.email || "P")
     .split(" ").map((s) => s[0]).slice(0, 2).join("").toUpperCase();
@@ -55,6 +75,16 @@ export default function AppLayout() {
           >
             <item.icon className="h-[18px] w-[18px]" strokeWidth={1.6} />
             {item.label}
+            {/* C2: contador de evoluções pendentes. Para o leitor de tela, por extenso. */}
+            {item.id === "dashboard" && pendingEvolutions > 0 && (
+              <span className="ml-auto rounded-full bg-amber-400 px-2 py-0.5 text-xs font-semibold text-[#0F2C59]"
+                data-testid="pending-evolutions-badge">
+                <span aria-hidden="true">{pendingEvolutions}</span>
+                <span className="sr-only">
+                  , {pendingEvolutions === 1 ? "1 evolução pendente" : `${pendingEvolutions} evoluções pendentes`}
+                </span>
+              </span>
+            )}
           </NavLink>
         ))}
       </nav>

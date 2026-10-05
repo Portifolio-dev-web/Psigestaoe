@@ -59,8 +59,42 @@ const REQUIRED_FIELDS = [
   ["emergency_contact", "Contato de emergência", "patient-emergency"],
   ["initial_notes", "Notas iniciais", "patient-notes"],
 ];
+// ---------------------------------------------------------------------------
+// Fluxo clínico (C3): paciente MENOR de 18 anos (mesmas regras do servidor,
+// PATIENT_MINOR_REQUIRED_LABELS). Antes o cadastro exigia de uma criança estado
+// civil, profissão, RG, e-mail e telefone próprios, e não tinha o responsável
+// legal, que é quem consente o atendimento.
+//   - saem: estado civil e profissão;
+//   - ficam opcionais: RG, e-mail e telefone do menor (o contato é o do responsável);
+//   - entram, obrigatórios: nome, CPF, parentesco e telefone do responsável.
+// ---------------------------------------------------------------------------
+const ADULT_AGE = 18;
+const GUARDIAN_FIELDS = [
+  ["guardian_name", "Nome do responsável", "patient-guardian-name"],
+  ["guardian_cpf", "CPF do responsável", "patient-guardian-cpf"],
+  ["guardian_relationship", "Parentesco do responsável", "patient-guardian-relationship"],
+  ["guardian_phone", "Telefone do responsável", "patient-guardian-phone"],
+];
+const OPTIONAL_FOR_MINORS = ["rg", "phone", "email"];
+const HIDDEN_FOR_MINORS = ["marital_status", "profession"];
+const GUARDIAN_RELATIONSHIPS = ["Mãe", "Pai", "Avó", "Avô", "Tutor(a) legal", "Guardião(ã) legal", "Outro"];
+
+/** O paciente do formulário é menor de idade (pela data de nascimento)? */
+const isMinorForm = (form) => {
+  const age = ageFromBirthDate(form.birth_date);
+  return age !== null && age !== undefined && age < ADULT_AGE;
+};
+
+/** Campos obrigatórios na ORDEM DA TELA (o foco vai para o primeiro com problema). */
+function requiredFields(form) {
+  if (!isMinorForm(form)) return REQUIRED_FIELDS;
+  const identification = REQUIRED_FIELDS.filter(([key]) => ["full_name", "cpf", "birth_date", "education"].includes(key));
+  const rest = REQUIRED_FIELDS.filter(([key]) => ["address", "emergency_contact", "initial_notes"].includes(key));
+  return [...identification, ...GUARDIAN_FIELDS, ...rest];
+}
+
 // Espaços em branco contam como vazio (o `required` do navegador aceitaria "   ").
-const missingFields = (form) => REQUIRED_FIELDS.filter(([key]) => !String(form[key] ?? "").trim());
+const missingFields = (form) => requiredFields(form).filter(([key]) => !String(form[key] ?? "").trim());
 
 // ---------------------------------------------------------------------------
 // Acessibilidade (análise de UI, A4): erros do cadastro NO PRÓPRIO FORMULÁRIO.
@@ -76,8 +110,8 @@ const missingFields = (form) => REQUIRED_FIELDS.filter(([key]) => !String(form[k
 // para o leitor de tela anunciar "obrigatório". Quem decide é sempre o servidor.
 // ---------------------------------------------------------------------------
 const CONSENT_FIELD = ["consent_terms", "Termo de consentimento", "patient-consent-yes"];
-// Ordem da tela: o foco vai para o primeiro campo com problema.
-const ERROR_FIELDS = [...REQUIRED_FIELDS, CONSENT_FIELD];
+// Ordem da tela: o foco vai para o primeiro campo com problema (C3: muda para menores).
+const errorFields = (form) => [...requiredFields(form), CONSENT_FIELD];
 const EMPTY_MESSAGE = "Preencha este campo.";
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -87,8 +121,13 @@ function validatePatientForm(form) {
   missingFields(form).forEach(([key]) => { errors[key] = EMPTY_MESSAGE; });
   if (!errors.cpf && cpfProblem(form.cpf)) errors.cpf = cpfProblem(form.cpf);
   if (!errors.phone && phoneProblem(form.phone)) errors.phone = phoneProblem(form.phone);
+  // C3: documentos e telefone do responsável seguem as mesmas regras.
+  if (!errors.guardian_cpf && cpfProblem(form.guardian_cpf)) errors.guardian_cpf = cpfProblem(form.guardian_cpf);
+  if (!errors.guardian_phone && phoneProblem(form.guardian_phone)) errors.guardian_phone = phoneProblem(form.guardian_phone);
   // Antes conferidos pelo navegador (type="email", min/max da data), que agora não valida sozinho.
-  if (!errors.email && !EMAIL_PATTERN.test(String(form.email || "").trim())) errors.email = "E-mail inválido. Ex.: nome@exemplo.com.";
+  // C3: e-mail é opcional para menores; preenchido, precisa ser válido.
+  const email = String(form.email || "").trim();
+  if (!errors.email && email && !EMAIL_PATTERN.test(email)) errors.email = "E-mail inválido. Ex.: nome@exemplo.com.";
   if (!errors.birth_date && (form.birth_date < "1900-01-01" || form.birth_date > todayISO())) {
     errors.birth_date = "Data de nascimento inválida.";
   }
@@ -102,7 +141,9 @@ function validatePatientForm(form) {
 const EMPTY_FORM = {
   full_name: "", cpf: "", rg: "", birth_date: "", age: "",
   education: "", marital_status: "", profession: "", phone: "", email: "",
-  address: "", emergency_contact: "", initial_notes: "", consent_terms: null
+  address: "", emergency_contact: "", initial_notes: "", consent_terms: null,
+  // C3: responsável legal (menores de 18 anos).
+  guardian_name: "", guardian_cpf: "", guardian_relationship: "", guardian_phone: "",
 };
 
 // Listas de seleção com a mesma aparência dos campos de texto.
@@ -282,7 +323,8 @@ export default function Patients() {
 
   // Segurança (varredura, item 2): CPF e telefone ganham máscara enquanto a
   // pessoa digita (ver lib/validation.js).
-  const MASKS = { cpf: maskCPF, phone: maskPhone };
+  // C3: CPF e telefone do responsável com as mesmas máscaras.
+  const MASKS = { cpf: maskCPF, phone: maskPhone, guardian_cpf: maskCPF, guardian_phone: maskPhone };
   const upd = (k) => (e) => {
     setForm({
       ...form,
@@ -313,18 +355,20 @@ export default function Patients() {
     const errors = validatePatientForm(form);
     setFormErrors(errors);
     setSubmitError("");
-    const firstInvalid = ERROR_FIELDS.find(([key]) => errors[key]);
+    const firstInvalid = errorFields(form).find(([key]) => errors[key]);
     if (firstInvalid) {
       document.getElementById(firstInvalid[2])?.focus();
       return;
     }
     setSaving(true);
+    // C3: para menores, estado civil e profissão não se aplicam (campos escondidos).
+    const payload = isMinorForm(form) ? { ...form, ...Object.fromEntries(HIDDEN_FOR_MINORS.map((key) => [key, ""])) } : form;
     try {
       if (editing) {
-        await api.put(`/patients/${editing.id}`, form);
+        await api.put(`/patients/${editing.id}`, payload);
         toast.success("Paciente atualizado.");
       } else {
-        await api.post("/patients", form);
+        await api.post("/patients", payload);
         toast.success("Paciente cadastrado.");
       }
       setDialogOpen(false);
@@ -803,8 +847,8 @@ function FieldError({ id, message }) {
 
 // A4: resumo dos erros no topo do formulário. role="alert": o leitor de tela lê
 // o resumo assim que ele aparece. Cada item leva o foco ao campo correspondente.
-function FormErrorSummary({ errors, submitError }) {
-  const entries = ERROR_FIELDS.filter(([key]) => errors[key]);
+function FormErrorSummary({ errors, submitError, fields }) {
+  const entries = fields.filter(([key]) => errors[key]);
   if (!entries.length && !submitError) return null;
   return (
     <div id="patient-form-errors" role="alert" tabIndex={-1}
@@ -849,6 +893,12 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
   const phoneError = phoneProblem(form.phone) || errors.phone;
   // A4: atributos de um campo com erro: marcado como inválido e com a mensagem
   // ligada a ele. `hintId`: um texto de ajuda que já descreve o campo (ex.: a idade).
+  // C3: paciente menor de 18 anos (pela data de nascimento digitada).
+  const minor = isMinorForm(form);
+  const guardianCpfError = cpfProblem(form.guardian_cpf) || errors.guardian_cpf;
+  const guardianPhoneError = phoneProblem(form.guardian_phone) || errors.guardian_phone;
+  // "*" nos obrigatórios; "(opcional)" no que o menor pode não ter.
+  const mark = (key) => (minor && OPTIONAL_FOR_MINORS.includes(key) ? " (opcional)" : " *");
   const fieldA11y = (key, id, hintId) => ({
     "aria-invalid": errors[key] ? true : undefined,
     "aria-describedby": [hintId, errors[key] ? `${id}-error` : null].filter(Boolean).join(" ") || undefined,
@@ -862,8 +912,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
           <DialogTitle className="font-head">{editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
           {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
           <DialogDescription>
-            {/* Produto: todos os campos são obrigatórios (marcados com *). */}
-            Todos os campos são obrigatórios. Nome, documentos, contatos e observações são criptografados antes de serem salvos.
+            {/* Produto: campos com * são obrigatórios. C3: para menores, alguns ficam opcionais. */}
+            Campos com * são obrigatórios. Nome, documentos, contatos e observações são criptografados antes de serem salvos.
           </DialogDescription>
         </DialogHeader>
         {/* Acessibilidade (varredura de UI): cada rótulo agora aponta para o seu campo
@@ -876,7 +926,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             (nome, e-mail, endereço) nos campos do paciente. */}
         {/* noValidate (A4): os erros são mostrados pelo próprio formulário (ver validatePatientForm). */}
         <form onSubmit={onSubmit} className="space-y-6" autoComplete="off" noValidate>
-          <FormErrorSummary errors={errors} submitError={submitError} />
+          <FormErrorSummary errors={errors} submitError={submitError} fields={errorFields(form)} />
           <FormSection title="Identificação">
             <div className="sm:col-span-2">
               <Label htmlFor="patient-name">Nome completo *</Label>
@@ -912,11 +962,11 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             </div>
 
             <div>
-              <Label htmlFor="patient-rg">RG *</Label>
+              <Label htmlFor="patient-rg">RG{mark("rg")}</Label>
               <Input
                 id="patient-rg"
                 {...fieldA11y("rg", "patient-rg")}
-                required
+                required={!minor}
                 maxLength={LIMITS.rg}
                 value={form.rg}
                 onChange={onFormChange("rg")}
@@ -949,6 +999,8 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </p>
             </div>
 
+            {/* C3: estado civil e profissão não se aplicam a menores de 18 anos. */}
+            {!minor && (
             <div>
               <Label htmlFor="patient-marital-status">Estado civil *</Label>
               <select
@@ -968,6 +1020,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </select>
               <FieldError id="patient-marital-status" message={errors.marital_status} />
             </div>
+            )}
 
             <div>
               {/* Correção (varredura de UI, defeito 5): o "*" aparecia sem o campo ser
@@ -993,6 +1046,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               <FieldError id="patient-education" message={errors.education} />
             </div>
 
+            {!minor && (
             <div>
               <Label htmlFor="patient-profession">Profissão *</Label>
               <Input
@@ -1007,14 +1061,59 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               />
               <FieldError id="patient-profession" message={errors.profession} />
             </div>
+            )}
           </FormSection>
+
+          {/* C3: responsável legal, obrigatório para menores de 18 anos. */}
+          {minor && (
+            <FormSection title="Responsável legal">
+              <p className="rounded-md bg-blue-50 px-3 py-2 text-sm text-[#0F2C59] sm:col-span-2" data-testid="patient-minor-note">
+                Paciente menor de 18 anos: o responsável legal é o contato de referência e quem consente o atendimento.
+              </p>
+              <div className="sm:col-span-2">
+                <Label htmlFor="patient-guardian-name">Nome do responsável *</Label>
+                <Input id="patient-guardian-name" {...fieldA11y("guardian_name", "patient-guardian-name")} required
+                  maxLength={LIMITS.patientName} value={form.guardian_name} onChange={onFormChange("guardian_name")}
+                  className={`mt-1.5 ${invalidClass("guardian_name")}`} data-testid="patient-guardian-name-input" />
+                <FieldError id="patient-guardian-name" message={errors.guardian_name} />
+              </div>
+              <div>
+                <Label htmlFor="patient-guardian-cpf">CPF do responsável *</Label>
+                <Input id="patient-guardian-cpf" required inputMode="numeric" maxLength={LIMITS.cpf}
+                  value={form.guardian_cpf} onChange={onFormChange("guardian_cpf")} placeholder="000.000.000-00"
+                  aria-invalid={Boolean(guardianCpfError)} aria-describedby={guardianCpfError ? "patient-guardian-cpf-error" : undefined}
+                  className={`mt-1.5 ${guardianCpfError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
+                  data-testid="patient-guardian-cpf-input" />
+                <FieldError id="patient-guardian-cpf" message={guardianCpfError} />
+              </div>
+              <div>
+                <Label htmlFor="patient-guardian-relationship">Parentesco *</Label>
+                <select id="patient-guardian-relationship" {...fieldA11y("guardian_relationship", "patient-guardian-relationship")}
+                  required value={form.guardian_relationship} onChange={onFormChange("guardian_relationship")}
+                  className={`${SELECT_CLASS} ${invalidClass("guardian_relationship")}`}>
+                  <option value="">Selecione...</option>
+                  {GUARDIAN_RELATIONSHIPS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+                <FieldError id="patient-guardian-relationship" message={errors.guardian_relationship} />
+              </div>
+              <div>
+                <Label htmlFor="patient-guardian-phone">Telefone do responsável *</Label>
+                <Input id="patient-guardian-phone" required type="tel" inputMode="tel" maxLength={LIMITS.phone}
+                  value={form.guardian_phone} onChange={onFormChange("guardian_phone")} placeholder="(11) 91234-5678"
+                  aria-invalid={Boolean(guardianPhoneError)} aria-describedby={guardianPhoneError ? "patient-guardian-phone-error" : undefined}
+                  className={`mt-1.5 ${guardianPhoneError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
+                  data-testid="patient-guardian-phone-input" />
+                <FieldError id="patient-guardian-phone" message={guardianPhoneError} />
+              </div>
+            </FormSection>
+          )}
 
           <FormSection title="Contato">
             <div>
-              <Label htmlFor="patient-phone">Telefone *</Label>
+              <Label htmlFor="patient-phone">Telefone{mark("phone")}</Label>
               <Input
                 id="patient-phone"
-                required
+                required={!minor}
                 type="tel"
                 inputMode="tel"
                 maxLength={LIMITS.phone}
@@ -1030,11 +1129,11 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             </div>
 
             <div>
-              <Label htmlFor="patient-email">E-mail *</Label>
+              <Label htmlFor="patient-email">E-mail{mark("email")}</Label>
               <Input
                 id="patient-email"
                 {...fieldA11y("email", "patient-email")}
-                required
+                required={!minor}
                 type="email"
                 inputMode="email"
                 maxLength={LIMITS.email}
@@ -1118,7 +1217,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                   vinha marcado, e a ficha podia ser salva sem a pergunta ser respondida.
                   Celular: opções com área de toque maior (linha inteira, 44 px). */}
               <fieldset className="space-y-1">
-                <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
+                {/* C3: para menores, quem concorda é o responsável legal. */}
+                <legend className="text-sm font-medium text-[#0F172A]">
+                  {minor ? "O responsável legal concorda com o termo? *" : "O paciente concorda com o termo? *"}
+                </legend>
                 <FieldError id="patient-consent" message={errors.consent_terms} />
                 <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
                   <input

@@ -1,6 +1,6 @@
 import { format, isToday, isTomorrow } from "date-fns";
 import { ptBR } from "date-fns/locale";
-import { CalendarDays, FileCheck } from "lucide-react";
+import { CalendarDays, FileCheck, Repeat } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { STATUS, dayKey, formatTimeRange } from "@/components/agenda/agendaUtils";
 
@@ -55,6 +55,13 @@ export default function ListView({ sessions, onOpenSession }) {
                     </span>
                     <span className="block truncate text-xs text-slate-500">{s.title}</span>
                   </span>
+                  {/* Fluxo clínico (P1): sessão de uma série (toda semana / a cada 2 semanas). */}
+                  {s.series_id && (
+                    <span className="flex items-center text-slate-500" title="Sessão recorrente">
+                      <Repeat className="h-4 w-4" aria-hidden="true" />
+                      <span className="sr-only">Sessão recorrente</span>
+                    </span>
+                  )}
                   {/* UX (agenda -> evolução): sessão que já tem evolução registrada. */}
                   {s.record_id && (
                     <span className="flex items-center text-emerald-700" title="Evolução registrada">

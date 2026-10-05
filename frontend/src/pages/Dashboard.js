@@ -11,8 +11,9 @@ import {
   Users, CalendarCheck, FileText, Clock, UserPlus, ArrowRight, Activity, CalendarDays,
 } from "lucide-react";
 import { formatDateOnly } from "@/lib/datetime";
-import { STATUS, evolutionPath, formatDateParam, formatTimeRange } from "@/components/agenda/agendaUtils";
+import { STATUS, evolutionPath, formatDateParam, formatTimeRange, isNoShow } from "@/components/agenda/agendaUtils";
 import SecurityNudge from "@/components/SecurityNudge";
+import PendingEvolutions from "@/components/PendingEvolutions";
 
 // Correção (varredura de UI, defeito 1): antes `new Date(s).toLocaleDateString()`,
 // que mostrava o nascimento UM DIA ANTES no Brasil (ver lib/datetime.js).
@@ -71,7 +72,8 @@ function TodaySessions() {
 
   const action = (s) => {
     const name = s.patient_name || s.title;
-    if (s.status === "cancelada" || !s.patient_id) return null;
+    // Fluxo clínico (C4): falta e cancelada não pedem evolução (só o selo do status).
+    if (isNoShow(s.status) || !s.patient_id) return null;
     if (s.record_id) {
       return (
         <Button variant="outline" size="sm" className="border-slate-300" onClick={() => navigate(evolutionPath(s))}
@@ -177,6 +179,8 @@ export default function Dashboard() {
       {/* Segurança (backlog: MFA opcional): convite para ativar a verificação em duas etapas. */}
       <SecurityNudge />
       <TodaySessions />
+      {/* Fluxo clínico (C2): sessões de dias anteriores ainda sem evolução. */}
+      <PendingEvolutions />
 
       {!stats ? (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 md:gap-6">

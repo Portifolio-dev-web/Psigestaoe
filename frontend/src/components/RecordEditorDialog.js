@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { LIMITS } from "@/lib/validation";
 import { RECORD_TEMPLATES, applyTemplate } from "@/lib/recordTemplates";
+import { notifyPendingEvolutionsChanged } from "@/lib/pendingEvolutions";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -163,6 +164,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
       setConflict(null);
       onOpenChange(false);
       onSaved();
+      notifyPendingEvolutionsChanged(); // C2: uma pendência pode ter sido resolvida (contador do menu)
     } catch (err) {
       const status = err.response?.status;
       const detail = err.response?.data?.detail;

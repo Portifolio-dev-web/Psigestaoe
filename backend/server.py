@@ -12,6 +12,7 @@ import secrets
 import sys
 import threading
 import time
+import uuid  # fluxo clínico (P1): identificador da série de sessões
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
@@ -688,6 +689,36 @@ PATIENT_REQUIRED_LABELS = {
     "initial_notes": "Notas iniciais",
 }
 
+# PRODUTO (fluxo clínico, C3): paciente MENOR de 18 anos.
+# Antes o cadastro exigia de uma criança estado civil, profissão, RG, e-mail e
+# telefone próprios, e não tinha onde registrar o responsável legal, que é
+# quem consente o atendimento (ECA; Código de Ética do Psicólogo, art. 8º).
+# Para menores (idade calculada pela data de nascimento):
+#   - saem: estado civil e profissão (não se aplicam);
+#   - ficam opcionais: RG, e-mail e telefone do próprio menor (o contato é o
+#     do responsável);
+#   - entram, obrigatórios: nome, CPF, parentesco e telefone do responsável.
+# CPF do menor continua obrigatório: desde 2017 ele consta na certidão de
+# nascimento (Provimento CNJ nº 63/2017).
+ADULT_AGE = 18
+GUARDIAN_REQUIRED_LABELS = {
+    "guardian_name": "Nome do responsável",
+    "guardian_cpf": "CPF do responsável",
+    "guardian_relationship": "Parentesco do responsável",
+    "guardian_phone": "Telefone do responsável",
+}
+_NOT_REQUIRED_FOR_MINORS = ("rg", "marital_status", "profession", "phone", "email")
+PATIENT_MINOR_REQUIRED_LABELS = {
+    **{field: label for field, label in PATIENT_REQUIRED_LABELS.items() if field not in _NOT_REQUIRED_FOR_MINORS},
+    **GUARDIAN_REQUIRED_LABELS,
+}
+
+
+def is_minor(birth_date: Optional[date], on: Optional[date] = None) -> bool:
+    """Menor de 18 anos na data `on` (hoje, se omitida). Sem data: não se sabe (False)."""
+    age = age_from_birth_date(birth_date, on)
+    return age is not None and age < ADULT_AGE
+
 
 def age_from_birth_date(birth_date: Optional[date], today: Optional[date] = None) -> Optional[int]:
     """Idade em anos completos. PRODUTO: a idade não é mais digitada; sai da data
@@ -713,6 +744,11 @@ class PatientInput(BaseModel):
     emergency_contact: Optional[str] = Field(default="", max_length=200)
     initial_notes: Optional[str] = Field(default="", max_length=PATIENT_NOTES_MAX)
     consent_terms: bool = False
+    # Fluxo clínico (C3): responsável legal (obrigatório para menores de 18 anos).
+    guardian_name: Optional[str] = Field(default="", max_length=PATIENT_NAME_MAX)
+    guardian_cpf: Optional[str] = Field(default="", max_length=20)
+    guardian_relationship: Optional[str] = Field(default="", max_length=60)
+    guardian_phone: Optional[str] = Field(default="", max_length=30)
 
     @field_validator("*")
     @classmethod
@@ -731,7 +767,7 @@ class PatientInput(BaseModel):
             raise ValueError("Informe o nome completo do paciente.")
         return value
 
-    @field_validator("cpf")
+    @field_validator("cpf", "guardian_cpf")  # C3: o CPF do responsável segue a mesma regra
     @classmethod
     def validate_cpf(cls, value: Optional[str]) -> str:
         value = (value or "").strip()
@@ -742,7 +778,7 @@ class PatientInput(BaseModel):
             raise ValueError("CPF inválido. Confira os 11 números.")
         return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"  # sempre no mesmo formato
 
-    @field_validator("phone")
+    @field_validator("phone", "guardian_phone")  # C3: telefone do responsável também
     @classmethod
     def validate_phone(cls, value: Optional[str]) -> str:
         value = (value or "").strip()
@@ -801,7 +837,9 @@ class PatientInput(BaseModel):
         Espaços em branco contam como vazio. O frontend faz a mesma checagem antes
         de enviar (frontend/src/pages/Patients.js); quem decide é o servidor.
         """
-        missing = [label for field, label in PATIENT_REQUIRED_LABELS.items()
+        # C3: menor de 18 anos tem outra lista (sem estado civil/profissão, com o responsável).
+        labels = PATIENT_MINOR_REQUIRED_LABELS if is_minor(self.birth_date) else PATIENT_REQUIRED_LABELS
+        missing = [label for field, label in labels.items()
                    if not str(getattr(self, field) or "").strip()]
         if missing:
             raise ValueError("Preencha todos os campos do cadastro. Faltando: " + ", ".join(missing) + ".")
@@ -977,11 +1015,28 @@ class RecordUpdateInput(RecordInput):
 
 
 # PRODUTO (visões da agenda): regras que o servidor passa a garantir.
-SESSION_STATUSES = ("agendada", "realizada", "cancelada")
+# Fluxo clínico (C4): "faltou" (o paciente não veio, sem avisar). Antes só havia
+# "cancelada", e a falta se perdia: ela importa para o registro clínico, para
+# acompanhar a adesão ao tratamento e para a cobrança.
+SESSION_STATUSES = ("agendada", "realizada", "faltou", "cancelada")
+# Sessões SEM atendimento: não contam como consulta, não ocupam o horário
+# (não geram conflito) e não pedem evolução.
+NO_SHOW_STATUSES = ("faltou", "cancelada")
+SessionStatus = Literal["agendada", "realizada", "faltou", "cancelada"]
+# Fluxo clínico (P1): sessões recorrentes. Até 52 de uma vez (um ano semanal).
+RECURRENCE_DAYS = {"weekly": 7, "biweekly": 14}
+RECURRENCE_LABELS = {"weekly": "semanal", "biweekly": "quinzenal"}
+MAX_SERIES_SESSIONS = 52
 # Duração padrão de uma sessão de psicoterapia, usada quando não há horário de
 # término (inclusive na detecção de conflito). O frontend usa o mesmo valor.
 DEFAULT_SESSION_MINUTES = 50
 MAX_SESSION_DURATION = timedelta(hours=12)
+
+
+class RepeatInput(BaseModel):
+    """Fluxo clínico (P1): repetir a sessão nova. `count` inclui a primeira."""
+    frequency: Literal["weekly", "biweekly"]
+    count: int = Field(ge=2, le=MAX_SERIES_SESSIONS)
 
 
 class SessionInput(BaseModel):
@@ -991,12 +1046,18 @@ class SessionInput(BaseModel):
     title: str = Field(max_length=200)
     start: datetime # Tipagem alterada para datetime nativo
     end: Optional[datetime] = None # Tipagem alterada para datetime nativo
-    # Antes aceitava qualquer texto (item 17 da auditoria); a agenda só conhece estes três.
-    status: Literal["agendada", "realizada", "cancelada"] = "agendada"
+    # Antes aceitava qualquer texto (item 17 da auditoria); a agenda só conhece estes
+    # (fluxo clínico, C4: + "faltou").
+    status: SessionStatus = "agendada"
     notes: Optional[str] = Field(default="", max_length=5000)
     # Conflito de horário: o servidor recusa (409) uma sessão que se sobrepõe a
     # outra, a menos que o profissional confirme ("salvar mesmo assim").
     allow_conflict: bool = False
+    # Fluxo clínico (P1): só na CRIAÇÃO, repetir a sessão (toda semana / a cada 2).
+    repeat: Optional[RepeatInput] = None
+    # Fluxo clínico (P1): só na EDIÇÃO de uma sessão de série: "this" (só esta)
+    # ou "following" (esta e as próximas sessões AGENDADAS da série).
+    apply_to: Literal["this", "following"] = "this"
 
     @field_validator("title")
     @classmethod
@@ -1019,6 +1080,9 @@ class SessionInput(BaseModel):
                 raise ValueError("O horário de término deve ser depois do início.")
             if self.end - self.start > MAX_SESSION_DURATION:
                 raise ValueError("Uma sessão não pode durar mais de 12 horas.")
+        # P1: só se repete sessão AGENDADA (as próximas ainda não aconteceram).
+        if self.repeat is not None and self.status != "agendada":
+            raise ValueError("Só uma sessão agendada pode se repetir.")
         return self
 
 
@@ -1082,6 +1146,16 @@ def _iso(value) -> str:
     return value.isoformat() if value else ""
 
 
+def consent_by_guardian(p: Patient) -> bool:
+    """C3: o consentimento foi dado pelo responsável legal? Sim quando o paciente
+    era menor NA DATA do consentimento e há responsável cadastrado. Calculado
+    (não gravado): a data de nascimento e a do consentimento já são a evidência."""
+    if not p.consent_terms or not p.guardian_name:
+        return False
+    on = _as_utc(p.consent_given_at).date() if p.consent_given_at else None
+    return is_minor(p.birth_date, on)
+
+
 def patient_public(p: Patient, owner: User) -> dict:
     # Item 13: nome, telefone, e-mail, contato de emergência e observações
     # agora também são descriptografados aqui (antes ficavam em texto puro).
@@ -1104,7 +1178,17 @@ def patient_public(p: Patient, owner: User) -> dict:
         "emergency_contact": decrypt_field(p.emergency_contact),
         "initial_notes": decrypt_field(p.initial_notes),
         "consent_terms": p.consent_terms or False,
-        "consent_terms_status": "Concordo" if p.consent_terms else "Não concordo",
+        "consent_terms_status": (
+            ("Concordo (pelo responsável legal)" if consent_by_guardian(p) else "Concordo")
+            if p.consent_terms else "Não concordo"
+        ),
+        # Fluxo clínico (C3): menor de idade e responsável legal.
+        "is_minor": is_minor(p.birth_date),
+        "guardian_name": decrypt_field(p.guardian_name),
+        "guardian_cpf": decrypt_field(p.guardian_cpf),
+        "guardian_relationship": p.guardian_relationship or "",
+        "guardian_phone": decrypt_field(p.guardian_phone),
+        "consent_by_guardian": consent_by_guardian(p),
         # Termo por profissional: se o paciente consentiu, mostramos a CÓPIA do
         # texto que ele aceitou; senão, o texto atual do profissional (item 6).
         "consent_terms_text": (
@@ -1145,6 +1229,11 @@ def _apply_patient_input(p: Patient, data: PatientInput) -> None:
     p.address = encrypt_field(data.address)
     p.emergency_contact = encrypt_field(data.emergency_contact)
     p.initial_notes = encrypt_field(data.initial_notes)
+    # Fluxo clínico (C3): responsável legal (nome, CPF e telefone criptografados).
+    p.guardian_name = encrypt_field((data.guardian_name or "").strip())
+    p.guardian_cpf = encrypt_field(data.guardian_cpf)
+    p.guardian_relationship = (data.guardian_relationship or "").strip()
+    p.guardian_phone = encrypt_field(data.guardian_phone)
 
 def record_public(r: Record) -> dict:
     return {
@@ -2682,7 +2771,7 @@ async def _next_sessions(db: AsyncSession, user: User, patient_ids: list) -> dic
     rows = await db.execute(
         select(Session.patient_id, func.min(Session.start_time)).where(
             Session.owner_id == user.user_id, Session.patient_id.in_(patient_ids),
-            Session.start_time >= now_utc(), func.coalesce(Session.status, "agendada") != "cancelada",
+            Session.start_time >= now_utc(), _occupies_slot,  # C4: nem cancelada nem falta
         ).group_by(Session.patient_id)
     )
     return {pid: _iso(_as_utc(start)) for pid, start in rows.all()}
@@ -3064,6 +3153,12 @@ async def create_record(pid: str, data: RecordInput, user: User = Depends(get_ac
             raise HTTPException(status_code=422, detail="Sessão da agenda não encontrada para este paciente.")
         if (session.status or "agendada") == "cancelada":
             raise HTTPException(status_code=422, detail="Uma sessão cancelada não recebe evolução.")
+        # Fluxo clínico (C4): ligar a evolução marcaria a sessão como realizada,
+        # contradizendo a falta. Uma observação sobre a falta pode ser registrada
+        # na ficha, como evolução avulsa.
+        if session.status == "faltou":
+            raise HTTPException(status_code=422, detail=(
+                "Sessão marcada como falta. Para registrar uma observação, use “Nova evolução” na ficha do paciente."))
         existing = await db.scalar(select(Record.id).where(Record.session_id == session.id))
         if existing:
             raise HTTPException(status_code=409, detail={
@@ -3140,6 +3235,12 @@ def _render_patient_pdf(pat: dict, recs: list, professional_name: str, professio
     elems.append(Paragraph(f"<b>Nascimento:</b> {pdf_text(pat['birth_date'] or '—')}", body))
     elems.append(Paragraph(f"<b>Telefone:</b> {pdf_text(pat['phone'] or '—')}", body))
     elems.append(Paragraph(f"<b>E-mail:</b> {pdf_text(pat['email'] or '—')}", body))
+    # Fluxo clínico (C3): responsável legal de paciente menor de idade.
+    if pat.get("guardian_name"):
+        relationship = f" ({pdf_text(pat['guardian_relationship'])})" if pat.get("guardian_relationship") else ""
+        elems.append(Paragraph(
+            f"<b>Responsável legal:</b> {pdf_text(pat['guardian_name'])}{relationship} · "
+            f"CPF {pdf_text(pat.get('guardian_cpf') or '—')} · Telefone {pdf_text(pat.get('guardian_phone') or '—')}", body))
     elems.append(Paragraph(f"<b>Termo de consentimento:</b> {pdf_text(pat['consent_terms_status'])}", body))
     # Termo por profissional: o documento exportado leva a EVIDÊNCIA do
     # consentimento (quando foi dado / revogado), não só o "Concordo".
@@ -3429,7 +3530,8 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
     # (o painel mostrava 4 consultas quando uma das quatro tinha sido cancelada).
     # coalesce: sessões antigas podem ter status vazio (NULL), que vale como
     # "agendada"; sem ele, o SQL descartaria essas sessões da contagem.
-    not_cancelled = func.coalesce(Session.status, "agendada") != "cancelada"
+    # Fluxo clínico (C4): falta também não é consulta (nem sessão futura).
+    not_cancelled = _occupies_slot
 
     # Como start_time agora é DateTime nativo, comparamos diretamente com month_start (removida a função iso())
     stmt_sessoes = select(func.count()).select_from(Session).where(
@@ -3493,15 +3595,20 @@ def session_public(s: Session, record_id: Optional[str] = None) -> dict:
         # Item 13: título, nome do paciente e notas da agenda são criptografados.
         "patient_name": decrypt_field(s.patient_name),
         "title": decrypt_field(s.title),
-        # O Frontend espera "start" e "end", mas no banco chamamos de start_time e end_time
-        "start": s.start_time.isoformat() if s.start_time else "",
-        "end": s.end_time.isoformat() if s.end_time else "",
+        # O Frontend espera "start" e "end", mas no banco chamamos de start_time e end_time.
+        # Sempre com fuso (_as_utc): o SQLite devolve a data sem fuso, e a mesma
+        # data enviada de volta (ex.: remarcar, marcar falta) era recusada.
+        "start": _as_utc(s.start_time).isoformat() if s.start_time else "",
+        "end": _as_utc(s.end_time).isoformat() if s.end_time else "",
         "status": s.status or "agendada",
         "notes": decrypt_field(s.notes),
         # PRODUTO (agenda -> evolução): a evolução registrada para esta sessão,
         # se houver. A agenda e o painel mostram "Evolução registrada" ou
         # oferecem "Registrar evolução".
         "record_id": record_id or "",
+        # Fluxo clínico (P1): série a que a sessão pertence ("" = avulsa).
+        "series_id": s.series_id or "",
+        "recurrence": s.recurrence or "",
     }
 
 
@@ -3524,6 +3631,19 @@ async def _bump_patient_from_session(db: AsyncSession, user: User, s: Session) -
         _bump_last_consultation(patient, s.start_time)
 
 
+async def _session_patient_name(db: AsyncSession, user: User, data: SessionInput) -> str:
+    """Nome do paciente da sessão, vindo do CADASTRO (ver _apply_session_input).
+    Separado para a série (P1) consultar o paciente uma vez, e não por sessão."""
+    if not data.patient_id:
+        return data.patient_name or ""
+    patient = (await db.execute(select(Patient).where(
+        Patient.id == data.patient_id, Patient.owner_id == user.user_id,
+    ))).scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=422, detail="Paciente não encontrado para este profissional.")
+    return decrypt_field(patient.full_name)
+
+
 async def _apply_session_input(db: AsyncSession, user: User, s: Session, data: SessionInput) -> None:
     """Item 13: grava os campos livres da agenda criptografados (criar e editar).
 
@@ -3531,15 +3651,7 @@ async def _apply_session_input(db: AsyncSession, user: User, s: Session, data: S
     profissional, e o nome gravado vem do cadastro (não do que o navegador
     mandou), para a agenda nunca mostrar um nome que não bate com o paciente.
     """
-    patient_name = data.patient_name or ""
-    if data.patient_id:
-        patient = (await db.execute(select(Patient).where(
-            Patient.id == data.patient_id, Patient.owner_id == user.user_id,
-        ))).scalar_one_or_none()
-        if not patient:
-            raise HTTPException(status_code=422, detail="Paciente não encontrado para este profissional.")
-        patient_name = decrypt_field(patient.full_name)
-
+    patient_name = await _session_patient_name(db, user, data)
     s.patient_id = data.patient_id or None
     s.patient_name = encrypt_field(patient_name)
     s.title = encrypt_field(data.title)
@@ -3579,33 +3691,64 @@ async def _lock_owner_schedule(db: AsyncSession, owner_id: str) -> None:
     await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
+# Fluxo clínico: sessões que OCUPAM o horário. Sem atendimento (cancelada,
+# faltou) não ocupam. coalesce: sessões antigas com status vazio valem como
+# "agendada" (antes `status != "cancelada"` descartava essas no SQL, e elas
+# nunca geravam conflito).
+_occupies_slot = func.coalesce(Session.status, "agendada").not_in(NO_SHOW_STATUSES)
+
+
+async def _find_conflicts(db: AsyncSession, user: User, start: datetime, end: datetime,
+                          exclude_ids: frozenset = frozenset()) -> list:
+    """Sessões deste profissional que se sobrepõem a [start, end).
+
+    A busca usa o índice (owner_id, start_time) e uma janela limitada pela
+    duração máxima de uma sessão; a sobreposição exata é calculada aqui,
+    igual no SQLite e no Postgres.
+    """
+    stmt = select(Session).where(
+        Session.owner_id == user.user_id,
+        _occupies_slot,
+        Session.start_time < end,
+        Session.start_time >= start - MAX_SESSION_DURATION,
+    )
+    if exclude_ids:
+        stmt = stmt.where(Session.id.not_in(exclude_ids))
+    candidates = (await db.execute(stmt)).scalars().all()
+    return [c for c in candidates if _session_end(c.start_time, c.end_time) > _as_utc(start)]
+
+
+def _conflict_error(conflicts: list) -> HTTPException:
+    unique = list({c.id: c for c in conflicts}.values())  # a mesma sessão pode bater com várias datas da série
+    unique.sort(key=lambda c: c.start_time)
+    return HTTPException(status_code=409, detail={
+        "code": "schedule_conflict",
+        "msg": "Já existe sessão neste horário." if len(unique) == 1 else "Já existem sessões nestes horários.",
+        "conflicts": [session_public(c) for c in unique],
+    })
+
+
 async def _check_conflicts(db: AsyncSession, user: User, data: SessionInput, exclude_id: Optional[str] = None) -> None:
     """PRODUTO: detecção de conflito de horário (antes era possível marcar
     dois pacientes no mesmo horário sem nenhum aviso).
 
-    Sessões canceladas não contam. A busca usa o índice (owner_id,
-    start_time) e uma janela limitada pela duração máxima de uma sessão; a
-    sobreposição exata é calculada aqui, igual no SQLite e no Postgres.
+    Sessões sem atendimento (canceladas e, desde o C4, faltas) não contam.
     """
-    if data.status == "cancelada" or data.allow_conflict:
+    if data.status in NO_SHOW_STATUSES or data.allow_conflict:
         return
-    start, end = data.start, _session_end(data.start, data.end)
-    stmt = select(Session).where(
-        Session.owner_id == user.user_id,
-        Session.status != "cancelada",
-        Session.start_time < end,
-        Session.start_time >= start - MAX_SESSION_DURATION,
-    )
-    if exclude_id:
-        stmt = stmt.where(Session.id != exclude_id)
-    candidates = (await db.execute(stmt)).scalars().all()
-    conflicts = [c for c in candidates if _session_end(c.start_time, c.end_time) > start]
+    conflicts = await _find_conflicts(db, user, data.start, _session_end(data.start, data.end),
+                                      frozenset({exclude_id}) if exclude_id else frozenset())
     if conflicts:
-        raise HTTPException(status_code=409, detail={
-            "code": "schedule_conflict",
-            "msg": "Já existe sessão neste horário.",
-            "conflicts": [session_public(c) for c in conflicts],
-        })
+        raise _conflict_error(conflicts)
+
+
+def _series_dates(data: SessionInput) -> list:
+    """P1: (início, término) de cada sessão a criar. Sem repetição, só a informada.
+    O término acompanha a duração da primeira (ou fica vazio, como ela)."""
+    count = data.repeat.count if data.repeat else 1
+    step = timedelta(days=RECURRENCE_DAYS[data.repeat.frequency]) if data.repeat else timedelta(0)
+    duration = (data.end - data.start) if data.end else None
+    return [(data.start + step * i, (data.start + step * i + duration) if duration else None) for i in range(count)]
 
 # ---------------------------------------------------------------------------
 # Rotas da Agenda (Sessions)
@@ -3650,17 +3793,45 @@ async def create_session(data: SessionInput, user: User = Depends(get_active_use
     # Varredura, item 9: trava ANTES de checar; liberada no commit abaixo
     # (não pode haver commit entre a checagem e a gravação).
     await _lock_owner_schedule(db, user.user_id)
-    await _check_conflicts(db, user, data)
-    nova_sessao = Session(owner_id=user.user_id)
-    await _apply_session_input(db, user, nova_sessao, data)
-    db.add(nova_sessao)
-    await _bump_patient_from_session(db, user, nova_sessao)  # produto: "última consulta"
+
+    # Fluxo clínico (P1): com `repeat`, cria a série inteira ("toda semana",
+    # 12 sessões...). Antes cada sessão semanal era marcada à mão. O conflito é
+    # conferido em TODAS as datas antes de gravar qualquer uma: ou a série
+    # inteira entra, ou nada entra (com "salvar mesmo assim", entra mesmo com conflito).
+    dates = _series_dates(data)
+    if data.status not in NO_SHOW_STATUSES and not data.allow_conflict:
+        conflicts = []
+        for start, end in dates:
+            conflicts += await _find_conflicts(db, user, start, _session_end(start, end))
+        if conflicts:
+            raise _conflict_error(conflicts)
+
+    series_id = f"ser_{uuid.uuid4().hex[:12]}" if data.repeat else None
+    patient_name = await _session_patient_name(db, user, data)
+    created = []
+    for start, end in dates:
+        nova_sessao = Session(owner_id=user.user_id, series_id=series_id,
+                              recurrence=data.repeat.frequency if data.repeat else None)
+        nova_sessao.patient_id = data.patient_id or None
+        nova_sessao.patient_name = encrypt_field(patient_name)
+        nova_sessao.title = encrypt_field(data.title)
+        nova_sessao.start_time, nova_sessao.end_time = start, end
+        nova_sessao.status = data.status
+        nova_sessao.notes = encrypt_field(data.notes)
+        db.add(nova_sessao)
+        created.append(nova_sessao)
+    await _bump_patient_from_session(db, user, created[0])  # produto: "última consulta"
     await db.commit()
-    await db.refresh(nova_sessao)
+    await db.refresh(created[0])
 
     # Item 13: antes o detalhe era o título digitado (costuma conter o nome do paciente).
-    await log_audit(db, user.user_id, user.email, "criar", "agenda", nova_sessao.id, "Sessão agendada")
-    return session_public(nova_sessao)  # sessão nova ainda não tem evolução
+    detail = "Sessão agendada"
+    if data.repeat:
+        detail = (f"Série {RECURRENCE_LABELS[data.repeat.frequency]} agendada: "
+                  f"{count_label(len(created), 'sessão', 'sessões')}")
+    await log_audit(db, user.user_id, user.email, "criar", "agenda", created[0].id, detail)
+    # Sessão nova ainda não tem evolução. `series_count`: quantas foram criadas (P1).
+    return {**session_public(created[0]), "series_count": len(created)}
 
 @api_router.put("/sessions/{sid}")
 async def update_session(sid: str, data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
@@ -3673,20 +3844,60 @@ async def update_session(sid: str, data: SessionInput, user: User = Depends(get_
     if not s:
         raise HTTPException(status_code=404, detail="Sessão não encontrada")
 
-    # A própria sessão não conta como conflito (remarcar 10 min para frente, por exemplo).
-    await _check_conflicts(db, user, data, exclude_id=sid)
+    record_id = (await _record_ids_for_sessions(db, [s.id])).get(s.id)
+    # Fluxo clínico (C4): sessão com evolução registrada ACONTECEU; marcar como
+    # falta ou cancelada contradiria o prontuário.
+    if record_id and data.status in NO_SHOW_STATUSES:
+        raise HTTPException(status_code=409, detail=(
+            "Esta sessão tem evolução registrada, então aconteceu: não pode ser marcada como falta ou cancelada."))
+
+    # Fluxo clínico (P1): "esta e as próximas" de uma série. As próximas são as
+    # sessões AGENDADAS da mesma série depois desta (as realizadas, faltas e
+    # canceladas são histórico e ficam como estão). Elas recebem o mesmo
+    # paciente, título, notas e duração, e andam o mesmo tanto no tempo (mudar
+    # esta de terça 14h para quarta 15h leva as próximas para quarta 15h).
+    following = []
+    if data.apply_to == "following" and s.series_id:
+        following = (await db.execute(select(Session).where(
+            Session.owner_id == user.user_id, Session.series_id == s.series_id,
+            Session.start_time > s.start_time, func.coalesce(Session.status, "agendada") == "agendada",
+        ).order_by(Session.start_time))).scalars().all()
+    shift = data.start - _as_utc(s.start_time)
+    duration = (data.end - data.start) if data.end else None
+    moved = [(f, _as_utc(f.start_time) + shift) for f in following]
+
+    # A própria sessão (e as da série que vão mudar) não contam como conflito
+    # (remarcar 10 min para frente, por exemplo).
+    if data.status not in NO_SHOW_STATUSES and not data.allow_conflict:
+        own = frozenset({sid, *(f.id for f in following)})
+        conflicts = await _find_conflicts(db, user, data.start, _session_end(data.start, data.end), own)
+        for _f, start in moved:
+            conflicts += await _find_conflicts(db, user, start, _session_end(start, start + duration if duration else None), own)
+        if conflicts:
+            raise _conflict_error(conflicts)
+
     await _apply_session_input(db, user, s, data)
+    for f, start in moved:
+        f.patient_id, f.patient_name, f.title, f.notes = s.patient_id, s.patient_name, s.title, s.notes
+        f.start_time, f.end_time = start, (start + duration if duration else None)
     await _bump_patient_from_session(db, user, s)  # produto: "última consulta"
 
     await db.commit()
     await db.refresh(s)
 
     # Item 14: alterações na agenda não eram auditadas.
-    await log_audit(db, user.user_id, user.email, "editar", "agenda", sid, f"Sessão alterada (status: {data.status})")
-    return session_public(s, (await _record_ids_for_sessions(db, [s.id])).get(s.id))
+    detail = f"Sessão alterada (status: {data.status})"
+    if moved:
+        detail += f"; {count_label(len(moved), 'próxima sessão da série alterada', 'próximas sessões da série alteradas')}"
+    await log_audit(db, user.user_id, user.email, "editar", "agenda", sid, detail)
+    return {**session_public(s, record_id), "updated_following": len(moved)}
 
 @api_router.delete("/sessions/{sid}")
-async def delete_session(sid: str, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def delete_session(sid: str,
+                         # Fluxo clínico (P1): "this" (só esta) ou "following" (esta e as
+                         # próximas AGENDADAS da série; ex.: o paciente encerrou o tratamento).
+                         scope: Literal["this", "following"] = Query("this"),
+                         user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Session).where(Session.id == sid, Session.owner_id == user.user_id)
     result = await db.execute(stmt)
     s = result.scalar_one_or_none()
@@ -3694,12 +3905,66 @@ async def delete_session(sid: str, user: User = Depends(get_active_user), db: As
     if not s:
         raise HTTPException(status_code=404, detail="Sessão não encontrada")
 
-    await db.delete(s)
+    following = []
+    if scope == "following" and s.series_id:
+        # Só as AGENDADAS e sem evolução: o que já aconteceu (realizada, falta,
+        # cancelada) é histórico e fica.
+        following = (await db.execute(select(Session).where(
+            Session.owner_id == user.user_id, Session.series_id == s.series_id,
+            Session.start_time > s.start_time, func.coalesce(Session.status, "agendada") == "agendada",
+            ~select(Record.id).where(Record.session_id == Session.id).exists(),
+        ))).scalars().all()
+    for session in [s, *following]:
+        await db.delete(session)
     await db.commit()
 
     # Item 14: exclusões na agenda também não eram auditadas.
-    await log_audit(db, user.user_id, user.email, "excluir", "agenda", sid, "Sessão removida")
-    return {"ok": True}
+    detail = "Sessão removida"
+    if following:
+        detail += f" e {count_label(len(following), 'próxima sessão da série', 'próximas sessões da série')}"
+    await log_audit(db, user.user_id, user.email, "excluir", "agenda", sid, detail)
+    return {"ok": True, "deleted": 1 + len(following)}
+
+
+# ---------------------------------------------------------------------------
+# Fluxo clínico (C2): evoluções pendentes
+# ---------------------------------------------------------------------------
+# O painel mostrava só as sessões de HOJE; uma sessão de ontem sem evolução
+# sumia de vista e era esquecida. O registro documental de cada atendimento é
+# obrigação do psicólogo (Resolução CFP nº 001/2009). Pendente = sessão:
+#   - com paciente (sem paciente não há prontuário);
+#   - que já começou (antes de `before`, padrão: agora);
+#   - agendada ou realizada (falta e cancelada não pedem evolução);
+#   - sem evolução registrada;
+#   - dos últimos PENDING_EVOLUTIONS_DAYS dias (pendências mais antigas que
+#     isso viram histórico; o limite também mantém a consulta leve).
+# Para resolver: registrar a evolução ou marcar a sessão como falta/cancelada.
+PENDING_EVOLUTIONS_DAYS = 90
+
+
+@api_router.get("/sessions/pending-evolutions")
+async def pending_evolutions(
+    before: Optional[datetime] = Query(None, description="só sessões que começaram antes disto (ISO com fuso)"),
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = now_utc()
+    before = min(_as_utc(before), now) if before else now
+    conditions = (
+        Session.owner_id == user.user_id,
+        Session.patient_id.is_not(None), Session.patient_id != "",
+        Session.start_time >= now - timedelta(days=PENDING_EVOLUTIONS_DAYS),
+        Session.start_time < before,
+        func.coalesce(Session.status, "agendada").in_(("agendada", "realizada")),
+        ~select(Record.id).where(Record.session_id == Session.id).exists(),
+        # O paciente ainda existe (sessões guardam o id solto, sem chave estrangeira).
+        select(Patient.id).where(Patient.id == Session.patient_id, Patient.owner_id == user.user_id).exists(),
+    )
+    total = await db.scalar(select(func.count()).select_from(Session).where(*conditions))
+    rows = (await db.execute(select(Session).where(*conditions)
+                             .order_by(desc(Session.start_time)).limit(limit))).scalars().all()
+    return {"items": [session_public(r) for r in rows], "total": total, "window_days": PENDING_EVOLUTIONS_DAYS}
 
 # ---------------------------------------------------------------------------
 # SEGURANÇA MÉDIA: encerramento da conta do profissional (LGPD art. 18)

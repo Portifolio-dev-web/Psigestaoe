@@ -44,7 +44,9 @@ from models import EmailToken, Patient, Record, RecordVersion, Session, User
 # --apply UMA vez: os valores antigos em texto puro são criptografados (o
 # servidor continua lendo texto puro legado até lá, então nada quebra no meio).
 ENCRYPTED_COLUMNS = {
-    Patient: ("full_name", "cpf", "rg", "phone", "email", "address", "emergency_contact", "initial_notes"),
+    Patient: ("full_name", "cpf", "rg", "phone", "email", "address", "emergency_contact", "initial_notes",
+              # Fluxo clínico (C3): responsável legal do paciente menor de idade.
+              "guardian_name", "guardian_cpf", "guardian_phone"),
     Record: ("content", "diagnosis"),
     RecordVersion: ("content", "diagnosis"),
     Session: ("title", "patient_name", "notes"),

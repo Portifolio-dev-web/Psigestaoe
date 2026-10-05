@@ -17,9 +17,11 @@ import MonthView from "@/components/agenda/MonthView";
 import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { notifyPendingEvolutionsChanged } from "@/lib/pendingEvolutions";
 import { WIDE_SCREEN, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
-  STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
+  RECURRENCE, STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
+  sessionPayload,
   parseDateParam, sessionInterval, shiftDate, viewForScreen, viewRange, viewTitle, viewsForScreen,
 } from "@/components/agenda/agendaUtils";
 
@@ -44,16 +46,8 @@ import {
 //     mesmo assim (ex.: um horário propositalmente encaixado).
 // ---------------------------------------------------------------------------
 
-// Dados completos de uma sessão para o PUT, com novos horários.
-const sessionPayload = (session, start, end) => ({
-  patient_id: session.patient_id || "",
-  patient_name: session.patient_name || "",
-  title: session.title,
-  start: start.toISOString(),
-  end: end ? end.toISOString() : null,
-  status: session.status,
-  notes: session.notes || "",
-});
+// Dados completos de uma sessão para o PUT: sessionPayload (agendaUtils.js),
+// compartilhado com o painel ("Marcar falta", fluxo clínico C2/C4).
 
 export default function Agenda() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -119,8 +113,17 @@ export default function Agenda() {
       const action = undo
         ? { action: { label: "Desfazer", onClick: undo } }
         : registerPath ? { action: { label: "Registrar evolução", onClick: () => navigate(registerPath) }, duration: 10000 } : undefined;
-      toast.success(successMessage || "Sessão salva.", action);
+      // Fluxo clínico (P1): quantas sessões a série criou ou alterou.
+      let message = successMessage || "Sessão salva.";
+      if (!successMessage && savedSession?.series_count > 1) {
+        message = `${savedSession.series_count} sessões agendadas (${RECURRENCE[savedSession.recurrence]?.label.toLowerCase() || "recorrentes"}).`;
+      } else if (!successMessage && savedSession?.updated_following > 0) {
+        message = `Sessão salva. ${savedSession.updated_following === 1 ? "A próxima sessão da série também foi alterada."
+          : `As ${savedSession.updated_following} próximas sessões da série também foram alteradas.`}`;
+      }
+      toast.success(message, action);
       load();
+      notifyPendingEvolutionsChanged(); // C2: status/horário mudou (ex.: virou falta)
       return savedSession || true;
     } catch (err) {
       const detail = err.response?.data?.detail;
@@ -160,12 +163,19 @@ export default function Agenda() {
     if (saved) setDialog({ open: false, initial: null });
   };
 
-  const deleteSession = (id) => inFlight.run(`delete:${id}`, async () => {
+  // Fluxo clínico (P1): scope "following" remove esta e as próximas sessões
+  // agendadas da série (sem "Desfazer": são várias; o diálogo pergunta antes).
+  const deleteSession = (id, scope = "this") => inFlight.run(`delete:${id}`, async () => {
     const session = sessions.find((s) => s.id === id) || dialog.initial;
     try {
-      await api.delete(`/sessions/${id}`);
+      const { data } = await api.delete(`/sessions/${id}?${new URLSearchParams({ scope })}`);
       setDialog({ open: false, initial: null });
       load();
+      notifyPendingEvolutionsChanged(); // C2: sessão removida deixa de ser pendência
+      if (data?.deleted > 1) {
+        toast.success(`${data.deleted} sessões removidas (esta e as próximas da série).`);
+        return;
+      }
       toast.success("Sessão removida.", {
         // Recria a sessão com os mesmos dados (pode ganhar um novo id).
         action: session ? {
@@ -282,7 +292,8 @@ export default function Agenda() {
             <AlertDialogTitle>Conflito de horário</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div>
-                <p>Já existe sessão neste horário:</p>
+                {/* P1: uma série pode bater com várias sessões já marcadas. */}
+                <p>{conflict?.conflicts.length > 1 ? "Já existem sessões nestes horários:" : "Já existe sessão neste horário:"}</p>
                 <ul className="mt-2 space-y-1" data-testid="conflict-list">
                   {conflict?.conflicts.map((c) => (
                     <li key={c.id} className="rounded-md bg-slate-50 px-2 py-1 text-sm text-slate-700">

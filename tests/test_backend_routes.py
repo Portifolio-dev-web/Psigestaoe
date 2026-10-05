@@ -283,7 +283,8 @@ async def test_all_backend_routes(client):
     assert anonymized.json()["anonymized"] is True
     assert anonymized.json()["full_name"] == "Paciente Anonimizado"
 
-    assert (await client.delete(f"/api/sessions/{session_id}", headers=headers)).json() == {"ok": True}
+    # Fluxo clínico (P1): a resposta informa quantas sessões saíram (série: mais de uma).
+    assert (await client.delete(f"/api/sessions/{session_id}", headers=headers)).json() == {"ok": True, "deleted": 1}
     assert (await client.delete("/api/sessions/inexistente", headers=headers)).status_code == 404
     # Item 12: o paciente tem prontuário dentro da guarda do CFP -> não pode ser excluído.
     assert (await client.delete(f"/api/patients/{patient_id}", headers=headers)).status_code == 409
@@ -2404,3 +2405,174 @@ def test_email_links_carry_the_token_in_the_fragment(monkeypatch):
     monkeypatch.setenv("FRONTEND_URL", "https://app.exemplo.com.br/")
     assert server.frontend_link("/redefinir-senha", "abc") == "https://app.exemplo.com.br/redefinir-senha#token=abc"
     assert server.frontend_link("/login") == "https://app.exemplo.com.br/login"
+
+
+# ---------------------------------------------------------------------------
+# Fluxo clínico: C4 (faltou), C2 (evoluções pendentes), P1 (séries), C3 (menores)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_no_show_status(client):
+    patient_id = await _create_patient(client, "faltou@example.com")
+    missed = await _session_for(client, patient_id, "2026-09-20T13:00:00Z", status="faltou")
+    assert missed["status"] == "faltou"
+    # Falta não ocupa o horário: marcar outra sessão no mesmo horário não dá conflito.
+    same_slot = await client.post("/api/sessions", json={
+        "title": "Encaixe", "patient_id": patient_id, "start": "2026-09-20T13:00:00Z",
+        "end": "2026-09-20T13:50:00Z", "status": "agendada"})
+    assert same_slot.status_code == 200
+    # Falta não recebe evolução ligada (a ligação marcaria a sessão como realizada).
+    linked = await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-20T13:00:00Z", "content": "x", "session_id": missed["id"]})
+    assert linked.status_code == 422 and "falta" in linked.json()["detail"]
+    # Sessão com evolução não vira falta.
+    done = await _session_for(client, patient_id, "2026-09-21T13:00:00Z")
+    await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": "2026-09-21T13:00:00Z", "content": "x", "session_id": done["id"]})
+    payload = {"title": "Sessão", "patient_id": patient_id, "start": "2026-09-21T13:00:00Z", "status": "faltou"}
+    assert (await client.put(f"/api/sessions/{done['id']}", json=payload)).status_code == 409
+
+
+@pytest.mark.anyio
+async def test_no_show_is_not_counted_as_consultation(client):
+    patient_id = await _create_patient(client, "faltou.painel@example.com")
+    future = datetime.now(timezone.utc) + timedelta(days=2)
+    await _session_for(client, patient_id, future.isoformat(), status="agendada")
+    await _session_for(client, patient_id, (future + timedelta(hours=2)).isoformat(), status="faltou")
+    stats = (await client.get("/api/dashboard/stats")).json()
+    assert stats["upcoming_sessions"] == 1
+
+
+@pytest.mark.anyio
+async def test_pending_evolutions(client):
+    patient_id = await _create_patient(client, "pendentes@example.com")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pending_old = await _session_for(client, patient_id, (now - timedelta(days=3)).isoformat())
+    pending_done = await _session_for(client, patient_id, (now - timedelta(days=2)).isoformat(), status="realizada")
+    with_record = await _session_for(client, patient_id, (now - timedelta(days=1)).isoformat())
+    await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": (now - timedelta(days=1)).isoformat(), "content": "x", "session_id": with_record["id"]})
+    await _session_for(client, patient_id, (now - timedelta(days=4)).isoformat(), status="faltou")      # falta: não pede
+    await _session_for(client, patient_id, (now - timedelta(days=5)).isoformat(), status="cancelada")   # cancelada: não pede
+    await _session_for(client, patient_id, (now + timedelta(days=1)).isoformat())                       # futura: ainda não
+    await _session_for(client, patient_id, (now - timedelta(days=120)).isoformat())                     # fora da janela
+    no_patient = await client.post("/api/sessions", json={
+        "title": "Reunião", "start": (now - timedelta(days=1, hours=3)).isoformat(), "status": "agendada", "allow_conflict": True})
+    assert no_patient.status_code == 200
+
+    page = (await client.get("/api/sessions/pending-evolutions")).json()
+    assert page["total"] == 2 and page["window_days"] == 90
+    assert [item["id"] for item in page["items"]] == [pending_done["id"], pending_old["id"]]  # mais recente primeiro
+    # `before`: o painel pede só os dias anteriores a hoje.
+    before = (now - timedelta(days=2, hours=12)).isoformat()
+    only_old = (await client.get("/api/sessions/pending-evolutions", params={"before": before})).json()["items"]
+    assert [i["id"] for i in only_old] == [pending_old["id"]]
+    # Registrar a evolução resolve a pendência.
+    await client.post(f"/api/patients/{patient_id}/records", json={
+        "session_datetime": pending_old["start"], "content": "x", "session_id": pending_old["id"]})
+    assert (await client.get("/api/sessions/pending-evolutions")).json()["total"] == 1
+
+
+@pytest.mark.anyio
+async def test_recurring_sessions_create_and_conflicts(client):
+    patient_id = await _create_patient(client, "serie@example.com")
+    body = {"title": "Terapia", "patient_id": patient_id, "start": "2026-11-03T13:00:00Z",
+            "end": "2026-11-03T13:50:00Z", "status": "agendada", "repeat": {"frequency": "weekly", "count": 4}}
+    created = await client.post("/api/sessions", json=body)
+    assert created.status_code == 200 and created.json()["series_count"] == 4
+    assert created.json()["series_id"].startswith("ser_") and created.json()["recurrence"] == "weekly"
+    window = {"start": "2026-11-01T00:00:00Z", "end": "2026-12-31T00:00:00Z"}
+    listed = (await client.get("/api/sessions", params=window)).json()
+    assert [s["start"][:10] for s in listed] == ["2026-11-03", "2026-11-10", "2026-11-17", "2026-11-24"]
+    assert all(s["end"][11:16] == "13:50" for s in listed)
+
+    # Quinzenal que bate em 03/11 e 17/11 da série semanal: nada é criado.
+    biweekly = {**body, "start": "2026-11-03T13:30:00Z", "end": "2026-11-03T14:20:00Z",
+                "repeat": {"frequency": "biweekly", "count": 3}}
+    conflict = await client.post("/api/sessions", json=biweekly)
+    assert conflict.status_code == 409 and len(conflict.json()["detail"]["conflicts"]) == 2
+    assert len((await client.get("/api/sessions", params=window)).json()) == 4
+    # Com "salvar mesmo assim" a série entra inteira.
+    forced = await client.post("/api/sessions", json={**biweekly, "allow_conflict": True})
+    assert forced.json()["series_count"] == 3
+    # Só sessão agendada se repete; e no máximo 52.
+    assert (await client.post("/api/sessions", json={**body, "status": "realizada"})).status_code == 422
+    assert (await client.post("/api/sessions", json={**body, "repeat": {"frequency": "weekly", "count": 53}})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_recurring_sessions_edit_and_delete_following(client):
+    patient_id = await _create_patient(client, "serie.edicao@example.com")
+    body = {"title": "Terapia", "patient_id": patient_id, "start": "2026-11-03T13:00:00Z",
+            "end": "2026-11-03T13:50:00Z", "status": "agendada", "repeat": {"frequency": "weekly", "count": 5}}
+    await client.post("/api/sessions", json=body)
+    window = {"start": "2026-11-01T00:00:00Z", "end": "2026-12-31T00:00:00Z"}
+    series = (await client.get("/api/sessions", params=window)).json()
+    # A 4ª virou falta: é histórico e não deve mudar com a série.
+    fourth = series[3]
+    await client.put(f"/api/sessions/{fourth['id']}", json={**body, "repeat": None, "start": fourth["start"],
+                                                            "end": fourth["end"], "status": "faltou"})
+
+    # Mover a 2ª e as próximas uma hora para frente, com 60 min de duração.
+    second = series[1]
+    moved = await client.put(f"/api/sessions/{second['id']}", json={
+        **body, "repeat": None, "start": "2026-11-10T14:00:00Z", "end": "2026-11-10T15:00:00Z", "apply_to": "following"})
+    assert moved.status_code == 200 and moved.json()["updated_following"] == 2  # 3ª e 5ª (a 4ª é falta)
+    after = {s["id"]: s for s in (await client.get("/api/sessions", params=window)).json()}
+    assert after[series[0]["id"]]["start"][11:16] == "13:00"                       # anterior: igual
+    assert after[series[2]["id"]]["start"][11:16] == "14:00" and after[series[2]["id"]]["end"][11:16] == "15:00"
+    assert after[series[3]["id"]]["start"][11:16] == "13:00"                       # falta: igual
+    assert after[series[4]["id"]]["start"][11:16] == "14:00"
+
+    # "Só esta" não mexe nas outras.
+    only = await client.put(f"/api/sessions/{series[2]['id']}", json={
+        **body, "repeat": None, "start": "2026-11-17T16:00:00Z", "end": "2026-11-17T17:00:00Z"})
+    assert only.json()["updated_following"] == 0
+    assert after[series[4]["id"]]["start"] == (await client.get("/api/sessions", params=window)).json()[4]["start"]
+
+    # Remover a 3ª e as próximas: sai a 3ª e a 5ª; a 1ª, a 2ª e a falta ficam.
+    deleted = await client.delete(f"/api/sessions/{series[2]['id']}", params={"scope": "following"})
+    assert deleted.json() == {"ok": True, "deleted": 2}
+    remaining = [s["id"] for s in (await client.get("/api/sessions", params=window)).json()]
+    assert remaining == [series[0]["id"], series[1]["id"], series[3]["id"]]
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any("próxima sessão da série" in log["detail"] for log in logs)
+
+
+@pytest.mark.anyio
+async def test_minor_patient_requires_guardian(client):
+    await register_account(client, "menor@example.com")
+    birth = (date.today() - timedelta(days=365 * 10)).isoformat()
+    minor = patient_data("Criança Teste", birth_date=birth, rg="", marital_status="", profession="", phone="", email="")
+    missing = await client.post("/api/patients", json=minor)
+    assert missing.status_code == 422
+    message = missing.json()["detail"][0]["msg"]
+    assert "Nome do responsável" in message and "Estado civil" not in message and "RG" not in message
+
+    guardian = {"guardian_name": "Maria Souza", "guardian_cpf": "529.982.247-25",
+                "guardian_relationship": "Mãe", "guardian_phone": "(11) 91234-5678"}
+    bad_cpf = await client.post("/api/patients", json={**minor, **guardian, "guardian_cpf": "111.111.111-11"})
+    assert bad_cpf.status_code == 422
+    ok = await client.post("/api/patients", json={**minor, **guardian, "consent_terms": True})
+    assert ok.status_code == 200, ok.text
+    data = ok.json()
+    assert data["is_minor"] is True and data["guardian_name"] == "Maria Souza" and data["guardian_relationship"] == "Mãe"
+    assert data["consent_by_guardian"] is True and data["consent_terms_status"] == "Concordo (pelo responsável legal)"
+    # Nome, CPF e telefone do responsável ficam criptografados no banco.
+    async with client.session_factory() as db:
+        row = await db.get(Patient, data["id"])
+        assert "Maria" not in row.guardian_name and "529" not in row.guardian_cpf and row.guardian_relationship == "Mãe"
+    # Adulto continua exigindo tudo (estado civil, profissão...).
+    adult = await client.post("/api/patients", json=patient_data("Adulto", marital_status=""))
+    assert adult.status_code == 422 and "Estado civil" in adult.json()["detail"][0]["msg"]
+    exported = await client.get(f"/api/patients/{data['id']}/export", params={"format": "json"})
+    assert exported.json()["paciente"]["guardian_name"] == "Maria Souza"
+    pdf = await client.get(f"/api/patients/{data['id']}/export", params={"format": "pdf"})
+    assert pdf.status_code == 200
+
+
+def test_minor_age_rule():
+    today = date(2026, 10, 5)
+    assert server.is_minor(date(2008, 10, 6), today) is True    # faz 18 amanhã
+    assert server.is_minor(date(2008, 10, 5), today) is False   # fez 18 hoje
+    assert server.is_minor(None, today) is False

@@ -88,7 +88,7 @@ export default function MonthView({ date, sessions, onCreateAt, onOpenSession, o
               {list.length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-0.5 sm:hidden" aria-label={countLabel(list.length, "sessão", "sessões")}>
                   {list.slice(0, 4).map((s) => (
-                    <span key={s.id} className={`h-1.5 w-1.5 rounded-full ${s.status === "cancelada" ? "bg-red-300" : s.status === "realizada" ? "bg-emerald-500" : "bg-[#1E3A8A]"}`} />
+                    <span key={s.id} className={`h-1.5 w-1.5 rounded-full ${s.status === "cancelada" ? "bg-red-300" : s.status === "realizada" ? "bg-emerald-500" : s.status === "faltou" ? "bg-amber-500" : "bg-[#1E3A8A]"}`} />
                   ))}
                 </div>
               )}

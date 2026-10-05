@@ -235,6 +235,15 @@ class Patient(Base):
     email = Column(String, default="")          # [CRIPTOGRAFADO] item 13
     address = Column(Text, default="")          # [CRIPTOGRAFADO]
     emergency_contact = Column(String, default="")  # [CRIPTOGRAFADO] item 13
+    # PRODUTO (fluxo clínico, C3): responsável legal do paciente MENOR de 18 anos.
+    # Obrigatório para menores (é quem consente o atendimento e o contato de
+    # referência); opcional para adultos (ex.: curatela). Nome, CPF e telefone
+    # identificam uma pessoa: criptografados como os do paciente.
+    # Migração: alembic/versions/20261005_clinical_flow.py
+    guardian_name = Column(String, default="")          # [CRIPTOGRAFADO]
+    guardian_cpf = Column(Text, default="")             # [CRIPTOGRAFADO]
+    guardian_relationship = Column(String, default="")  # "Mãe", "Pai", "Tutor(a) legal"...
+    guardian_phone = Column(String, default="")         # [CRIPTOGRAFADO]
     initial_notes = Column(Text, default="")    # [CRIPTOGRAFADO] item 13 (conteúdo clínico)
     consent_terms = Column(Boolean, default=False)
     last_consultation_date = Column(String, default="")
@@ -360,8 +369,16 @@ class Session(Base):
     title = Column(String, nullable=False)     # [CRIPTOGRAFADO] item 13
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True), default=None)       # Renomeado de 'end' para 'end_time'
+    # Status: agendada, realizada, faltou (fluxo clínico, C4) ou cancelada.
     status = Column(String, default="agendada")
     notes = Column(Text, default="")           # [CRIPTOGRAFADO] item 13
+    # PRODUTO (fluxo clínico, P1): sessões recorrentes. As sessões criadas juntas
+    # ("toda semana", "a cada 2 semanas") têm o mesmo series_id e a mesma regra
+    # (recurrence: "weekly" ou "biweekly"). Cada uma continua independente
+    # (status, evolução, remarcação); a série serve para alterar ou remover
+    # "esta e as próximas" de uma vez. NULL = sessão avulsa.
+    series_id = Column(String, nullable=True, index=True)
+    recurrence = Column(String, nullable=True)
 
     __table_args__ = (
         # Agenda por período (mês visível, próximas sessões) e contagens do painel.

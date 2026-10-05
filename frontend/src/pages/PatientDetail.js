@@ -20,7 +20,7 @@ import { toast } from "sonner";
 import {
   ArrowLeft, Plus, FileText, Download, Loader2, Lock, Pencil, Phone, Mail,
   CalendarClock, ShieldCheck, MapPin, Briefcase, GraduationCap, IdCard, Archive, HardDriveDownload,
-  History, CalendarCheck, ChevronDown,
+  History, CalendarCheck, ChevronDown, UserRound,
 } from "lucide-react";
 
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js;
@@ -43,7 +43,9 @@ const birthLabel = (p) => {
 // (quando foi dado ou revogado), não só "Concordo"/"Não concordo".
 const consentLabel = (p) => {
   if (p.consent_terms) {
-    return p.consent_given_at ? `Concordo (em ${fmtDateTime(p.consent_given_at)})` : "Concordo (data não registrada)";
+    // C3: menor de idade -> quem consentiu foi o responsável legal.
+    const who = p.consent_by_guardian ? "pelo responsável, " : "";
+    return p.consent_given_at ? `Concordo (${who}em ${fmtDateTime(p.consent_given_at)})` : `Concordo (${who || ""}data não registrada)`;
   }
   return p.consent_revoked_at ? `Revogado em ${fmtDateTime(p.consent_revoked_at)}` : "Não concordo";
 };
@@ -244,6 +246,8 @@ export default function PatientDetail() {
                 <h1 className="font-head text-xl font-bold text-[#0F172A]">{patient.full_name}</h1>
                 <div className="mt-1 flex flex-wrap gap-1.5">
                   {patient.anonymized && <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">Anonimizado</Badge>}
+                  {/* C3: paciente menor de 18 anos (o contato é o responsável legal). */}
+                  {patient.is_minor && <Badge className="bg-blue-100 text-[#1E3A8A] hover:bg-blue-100">Menor de idade</Badge>}
                   {patient.archived && <Badge className="bg-slate-200 text-slate-700 hover:bg-slate-200">Arquivado</Badge>}
                 </div>
               </div>
@@ -256,6 +260,14 @@ export default function PatientDetail() {
               <InfoRow icon={CalendarClock} label="Nascimento" value={birthLabel(patient)} />
               {/* Celular (UX): um toque no telefone liga; no e-mail, abre o aplicativo de e-mail. */}
               <InfoRow icon={Phone} label="Telefone" value={contactLink("tel", patient.phone)} />
+              {/* C3: o responsável legal fica sempre à vista (é o contato de referência do menor). */}
+              {patient.guardian_name && (
+                <>
+                  <InfoRow icon={UserRound} label="Responsável"
+                    value={`${patient.guardian_name}${patient.guardian_relationship ? ` (${patient.guardian_relationship})` : ""}`} />
+                  <InfoRow icon={Phone} label="Tel. do responsável" value={contactLink("tel", patient.guardian_phone)} />
+                </>
+              )}
             </div>
             <button type="button" onClick={() => setShowDetails((open) => !open)}
               aria-expanded={showDetails} aria-controls="patient-details"
@@ -266,10 +278,16 @@ export default function PatientDetail() {
             <div id="patient-details" className={showDetails ? "" : "hidden lg:block"}>
               <div className="mt-3 space-y-3 text-sm">
                 <InfoRow icon={Lock} label="CPF" value={patient.cpf || "—"} />
+                {patient.guardian_cpf && <InfoRow icon={Lock} label="CPF do responsável" value={patient.guardian_cpf} />}
                 <InfoRow icon={IdCard} label="RG" value={patient.rg || "—"} />
                 <InfoRow icon={GraduationCap} label="Escolaridade" value={patient.education || "—"} />
-                <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
-                <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
+                {/* C3: estado civil e profissão não se aplicam a menores de 18 anos. */}
+                {!patient.is_minor && (
+                  <>
+                    <InfoRow icon={IdCard} label="Estado civil" value={patient.marital_status || "—"} />
+                    <InfoRow icon={Briefcase} label="Profissão" value={patient.profession || "—"} />
+                  </>
+                )}
                 <InfoRow icon={Mail} label="E-mail" value={contactLink("mailto", patient.email)} />
                 <InfoRow icon={MapPin} label="Endereço" value={patient.address || "—"} />
                 <InfoRow icon={ShieldCheck} label="Emergência" value={patient.emergency_contact || "—"} />

@@ -47,9 +47,36 @@ const WEEK = { weekStartsOn: 0 };  // domingo, como o cabeçalho que a agenda j�
 export const STATUS = {
   agendada: { label: "Agendada", cls: "bg-blue-100 text-[#1E3A8A]", block: "border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]" },
   realizada: { label: "Realizada", cls: "bg-emerald-100 text-emerald-700", block: "border-emerald-600 bg-emerald-50 text-emerald-800" },
+  // Fluxo clínico (C4): o paciente não veio. Âmbar: diferente de cancelada (vermelho).
+  faltou: { label: "Faltou", cls: "bg-amber-100 text-amber-800", block: "border-amber-500 bg-amber-50 text-amber-900" },
   // Acessibilidade (varredura de UI): vermelho-600 sobre rosa = 3,9:1; o 700 passa de 4,5:1.
   cancelada: { label: "Cancelada", cls: "bg-red-100 text-red-700", block: "border-red-300 bg-red-50/70 text-red-700 line-through" },
 };
+
+// Fluxo clínico (C4): status SEM atendimento. Não pedem evolução, não contam
+// como consulta e liberam o horário (mesma regra do servidor, NO_SHOW_STATUSES).
+export const NO_SHOW_STATUSES = ["faltou", "cancelada"];
+export const isNoShow = (status) => NO_SHOW_STATUSES.includes(status);
+
+// Fluxo clínico (P1): sessões recorrentes (mesmas opções do servidor).
+export const RECURRENCE = {
+  weekly: { label: "Toda semana", adjective: "semanal", days: 7 },
+  biweekly: { label: "A cada 2 semanas", adjective: "quinzenal", days: 14 },
+};
+export const SERIES_COUNTS = [4, 8, 12, 16, 24, 52];
+
+// Dados completos de uma sessão para o PUT, com novos horários.
+// Era local da Agenda.js; o painel também usa (C2: "Marcar falta").
+export const sessionPayload = (session, start, end, overrides = {}) => ({
+  patient_id: session.patient_id || "",
+  patient_name: session.patient_name || "",
+  title: session.title,
+  start: start.toISOString(),
+  end: end ? end.toISOString() : null,
+  status: session.status,
+  notes: session.notes || "",
+  ...overrides,
+});
 
 /** "2026-10-01" (parâmetro da URL) -> Date local; inválido ou ausente -> hoje. */
 export function parseDateParam(value) {
