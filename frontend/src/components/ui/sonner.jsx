@@ -10,7 +10,12 @@ const Toaster = ({
     <Sonner
       theme={theme}
       className="toaster group"
+      // Acessibilidade (análise de UI, A6): a área dos avisos era anunciada pelo
+      // leitor de tela como "Notifications alt+T" (em inglês). Alt+T continua
+      // levando o foco aos avisos.
+      containerAriaLabel="Avisos"
       toastOptions={{
+        closeButtonAriaLabel: "Fechar aviso",
         classNames: {
           toast:
             "group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg",

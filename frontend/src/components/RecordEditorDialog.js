@@ -40,7 +40,9 @@ const sameFields = (a, b) =>
 // evolução é registrada a partir de uma sessão da agenda (painel "Hoje" ou a
 // própria agenda). A data e a hora já vêm da sessão, e o servidor liga a
 // evolução a ela (e marca a sessão como realizada).
-export default function RecordEditorDialog({ open, onOpenChange, patientId, record, userId, onSaved, fromSession = null }) {
+// `patientName` (análise de UI, C1): nome do paciente, mostrado no topo do editor.
+export default function RecordEditorDialog({ open, onOpenChange, patientId, patientName = "", record, userId, onSaved,
+  fromSession = null }) {
   const slot = userId ? draftSlot(userId, record ? "record-edit" : "record-new", record ? record.id : patientId) : null;
 
   // Base: o registro como está no servidor (edição) ou uma evolução em branco
@@ -196,7 +198,26 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, reco
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="font-head">{record ? "Editar evolução" : "Nova evolução"}</DialogTitle>
+          {/* Segurança do prontuário (análise de UI, C1): o editor não dizia de QUAL
+              paciente era a evolução ("Nova evolução", só isso). Registrar no prontuário
+              errado é o erro clássico em sistemas clínicos (duas fichas abertas, uma
+              troca de aba). Agora o nome do paciente fica no topo, em destaque, e faz
+              parte do título: o leitor de tela anuncia "Nova evolução, paciente: ...". */}
+          <DialogTitle className="font-head">
+            {record ? "Editar evolução" : "Nova evolução"}
+            {patientName && (
+              <span className="mt-2 flex items-center gap-2 rounded-md bg-[#F0F4F8] px-2.5 py-1.5 text-sm font-normal text-slate-700"
+                data-testid="record-editor-patient">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#1E3A8A] text-[11px] font-semibold text-white"
+                  aria-hidden="true">
+                  {patientName.trim()[0]?.toUpperCase()}
+                </span>
+                <span className="min-w-0">
+                  <span className="sr-only">, </span>Paciente: <b className="font-semibold text-[#0F172A]">{patientName}</b>
+                </span>
+              </span>
+            )}
+          </DialogTitle>
           <DialogDescription>
             {record
               ? "A versão anterior fica guardada no histórico de versões."

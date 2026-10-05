@@ -2,11 +2,12 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, X, Stethoscope, Lock, Loader2,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2,
 } from "lucide-react";
 import { Suspense, useState } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const nav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, id: "dashboard" },
@@ -86,41 +87,42 @@ export default function AppLayout() {
     </div>
   );
 
+  // Acessibilidade (análise de UI, A3): o menu do celular era uma gaveta feita
+  // à mão. O foco ficava no botão de abrir, o Tab ia para a tela ESCONDIDA atrás
+  // da gaveta, Esc não fechava e o botão não dizia se o menu estava aberto.
+  // Agora é a gaveta do Radix (components/ui/sheet.jsx), que é um diálogo de
+  // verdade: o foco entra no menu e fica nele, Esc e o toque fora fecham, o
+  // foco volta ao botão ao fechar e o botão informa "expandido/recolhido".
   return (
+    <Sheet open={open} onOpenChange={setOpen}>
     <div className="flex min-h-screen bg-[#F8FAFC]">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 hidden w-64 bg-[#0F2C59] lg:block">
         <SidebarContent />
       </aside>
 
-      {/* Mobile drawer */}
-      {open && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setOpen(false)} />
-          <aside className="absolute inset-y-0 left-0 w-64 bg-[#0F2C59]">
-            <button
-              className="absolute right-3 top-4 text-white/70"
-              onClick={() => setOpen(false)}
-              aria-label="Fechar menu"
-              data-testid="close-sidebar"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            <SidebarContent />
-          </aside>
-        </div>
-      )}
+      {/* Mobile drawer. aria-describedby={undefined}: o menu não precisa de descrição longa. */}
+      <SheetContent side="left" closeLabel="Fechar menu" aria-describedby={undefined}
+        className="w-64 border-none bg-[#0F2C59] p-0 text-white sm:max-w-none lg:hidden" data-testid="mobile-menu">
+        {/* Nome do diálogo para o leitor de tela ("Menu"); não aparece na tela. */}
+        <SheetTitle className="sr-only">Menu</SheetTitle>
+        <SheetDescription className="sr-only">Navegação do PsiGestão</SheetDescription>
+        <SidebarContent />
+      </SheetContent>
 
       <div className="flex min-w-0 flex-1 flex-col lg:pl-64">
         <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-slate-200 bg-white/95 px-4 backdrop-blur lg:px-8">
-          <button
-            className="lg:hidden text-slate-600"
-            onClick={() => setOpen(true)}
-            aria-label="Abrir menu"
-            data-testid="open-sidebar"
-          >
-            <Menu className="h-5 w-5" />
-          </button>
+          {/* SheetTrigger: o botão anuncia se o menu está aberto (aria-expanded) e
+              recebe o foco de volta ao fechar. Área de toque de 40 px (antes 20 px). */}
+          <SheetTrigger asChild>
+            <button
+              className="-ml-2 flex h-10 w-10 items-center justify-center rounded-md text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A] lg:hidden"
+              aria-label="Abrir menu"
+              data-testid="open-sidebar"
+            >
+              <Menu className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </SheetTrigger>
           <div className="flex-1" />
           <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
             {/* Antes: "(AES-256)", algoritmo que o sistema não usa. Ver legal.py, item 7. */}
@@ -132,7 +134,9 @@ export default function AppLayout() {
             <Lock className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Bloquear</span>
           </Button>
         </header>
-        <main className="flex-1 px-4 py-6 lg:px-8">
+        {/* tabIndex -1 + sem contorno: recebe o foco ao trocar de tela (análise de UI, A1,
+            components/RouteAnnouncer.js) sem desenhar uma moldura em volta da tela inteira. */}
+        <main tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none lg:px-8">
           {/* Complementares (desempenho): as telas são carregadas sob demanda
               (App.js). Este Suspense deixa o menu e o topo na tela enquanto só
               o conteúdo carrega, em vez de piscar a página inteira. */}
@@ -146,5 +150,6 @@ export default function AppLayout() {
         </main>
       </div>
     </div>
+    </Sheet>
   );
 }

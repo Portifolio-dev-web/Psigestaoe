@@ -6,6 +6,7 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 import AppLayout from "@/components/AppLayout";
 import TermsGate from "@/components/TermsGate";
 import LockScreen from "@/components/LockScreen";
+import RouteAnnouncer from "@/components/RouteAnnouncer";
 import { IdleLockProvider } from "@/context/IdleLockContext";
 import { Loader2 } from "lucide-react";
 
@@ -116,6 +117,8 @@ function App() {
     <div className="App">
       <BrowserRouter>
         <AuthProvider>
+          {/* Acessibilidade (análise de UI, A1): título, foco e anúncio a cada troca de tela. */}
+          <RouteAnnouncer />
           <AppRouter />
           <Toaster position="top-right" richColors />
         </AuthProvider>

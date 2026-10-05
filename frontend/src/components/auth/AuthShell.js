@@ -40,7 +40,9 @@ export default function AuthShell({ headline, tagline, children }) {
         </div>
       </aside>
 
-      <main className="flex w-full items-center justify-center px-6 py-10 lg:w-1/2">
+      {/* tabIndex -1 + sem contorno: recebe o foco ao trocar de tela (análise de UI, A1,
+          components/RouteAnnouncer.js) sem desenhar uma moldura em volta da tela inteira. */}
+      <main tabIndex={-1} className="flex w-full items-center justify-center px-6 py-10 focus:outline-none lg:w-1/2">
         <div className="psi-fade-up w-full max-w-sm">
           <div className="mb-8 lg:hidden">
             <div className="flex items-center gap-2.5">

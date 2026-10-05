@@ -451,8 +451,10 @@ export default function PatientDetail() {
       </div>
 
       {/* Editor com rascunho automático (components/RecordEditorDialog.js). */}
+      {/* C1 (análise de UI): o editor mostra de qual paciente é a evolução. */}
       <RecordEditorDialog open={editorOpen} onOpenChange={onEditorOpenChange} patientId={id}
-        record={editingRec} userId={userId} onSaved={load} fromSession={editingRec ? null : fromSession} />
+        patientName={patient.full_name} record={editingRec} userId={userId} onSaved={load}
+        fromSession={editingRec ? null : fromSession} />
       <RecordHistoryDialog recordId={historyOf} open={Boolean(historyOf)}
         onOpenChange={(open) => { if (!open) setHistoryOf(null); }} />
     </div>

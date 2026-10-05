@@ -17,7 +17,8 @@ export default function PrivacyPolicy() {
   // Acessibilidade (complementares): <main> como região principal (antes a
   // página pública não tinha, e o leitor de tela não tinha como pular para ela).
   return (
-    <main className="min-h-screen bg-[#F8FAFC] px-4 py-8 sm:py-12">
+    // tabIndex -1: recebe o foco ao trocar de tela (análise de UI, A1, RouteAnnouncer).
+    <main tabIndex={-1} className="min-h-screen bg-[#F8FAFC] px-4 py-8 focus:outline-none sm:py-12">
       <div className="mx-auto max-w-3xl">
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2.5">

@@ -62,6 +62,41 @@ const REQUIRED_FIELDS = [
 // Espaços em branco contam como vazio (o `required` do navegador aceitaria "   ").
 const missingFields = (form) => REQUIRED_FIELDS.filter(([key]) => !String(form[key] ?? "").trim());
 
+// ---------------------------------------------------------------------------
+// Acessibilidade (análise de UI, A4): erros do cadastro NO PRÓPRIO FORMULÁRIO.
+// Antes os erros apareciam só num aviso que sumia em 4 s ("Faltando: Nome,
+// CPF, RG..."), e os campos não ficavam marcados. Agora:
+//   - um resumo fixo no topo do formulário lista o que corrigir, com atalho
+//     para cada campo (e é lido pelo leitor de tela ao aparecer);
+//   - cada campo com problema fica marcado (borda vermelha + aria-invalid) e
+//     tem a própria mensagem, ligada a ele (aria-describedby);
+//   - a mensagem some assim que a pessoa mexe no campo.
+// A validação do navegador fica desligada (noValidate): ela mostrava um balão
+// só para o PRIMEIRO campo vazio, que some sozinho. Os `required` continuam,
+// para o leitor de tela anunciar "obrigatório". Quem decide é sempre o servidor.
+// ---------------------------------------------------------------------------
+const CONSENT_FIELD = ["consent_terms", "Termo de consentimento", "patient-consent-yes"];
+// Ordem da tela: o foco vai para o primeiro campo com problema.
+const ERROR_FIELDS = [...REQUIRED_FIELDS, CONSENT_FIELD];
+const EMPTY_MESSAGE = "Preencha este campo.";
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** { campo: mensagem } com TODOS os problemas do formulário (vazio = nenhum). */
+function validatePatientForm(form) {
+  const errors = {};
+  missingFields(form).forEach(([key]) => { errors[key] = EMPTY_MESSAGE; });
+  if (!errors.cpf && cpfProblem(form.cpf)) errors.cpf = cpfProblem(form.cpf);
+  if (!errors.phone && phoneProblem(form.phone)) errors.phone = phoneProblem(form.phone);
+  // Antes conferidos pelo navegador (type="email", min/max da data), que agora não valida sozinho.
+  if (!errors.email && !EMAIL_PATTERN.test(String(form.email || "").trim())) errors.email = "E-mail inválido. Ex.: nome@exemplo.com.";
+  if (!errors.birth_date && (form.birth_date < "1900-01-01" || form.birth_date > todayISO())) {
+    errors.birth_date = "Data de nascimento inválida.";
+  }
+  // PRODUTO: a pergunta sobre o termo precisa de resposta (não há opção pré-marcada).
+  if (typeof form.consent_terms !== "boolean") errors.consent_terms = "Escolha “Concordo” ou “Não concordo”.";
+  return errors;
+}
+
 // consent_terms começa SEM resposta (null): a pessoa precisa escolher
 // "Concordo" ou "Não concordo" (antes "Não concordo" já vinha marcado).
 const EMPTY_FORM = {
@@ -120,6 +155,9 @@ export default function Patients() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  // A4: erros por campo ({ cpf: "CPF inválido..." }) e erro devolvido pelo servidor.
+  const [formErrors, setFormErrors] = useState({});
+  const [submitError, setSubmitError] = useState("");
   const [confirm, setConfirm] = useState(null); // {type, patient}
   // Segurança (varredura, item 9): arquivar, anonimizar e excluir não travavam
   // durante o envio; um clique repetido mandava a ação de novo. Agora cada
@@ -219,6 +257,8 @@ export default function Patients() {
   const openNew = () => {
     setEditing(null);
     setForm(EMPTY_FORM);
+    setFormErrors({}); // A4: formulário novo começa sem erros
+    setSubmitError("");
     loadCurrentTerm(); // sempre o texto mais recente (nome/CRP/modelo podem ter mudado)
     setDialogOpen(true);
   };
@@ -230,6 +270,8 @@ export default function Patients() {
     try {
       const { data } = await api.get(`/patients/${p.id}`);
       setEditing(data);
+      setFormErrors({}); // A4
+      setSubmitError("");
       setForm({ ...EMPTY_FORM, ...data });
       loadCurrentTerm();
       setDialogOpen(true);
@@ -241,12 +283,22 @@ export default function Patients() {
   // Segurança (varredura, item 2): CPF e telefone ganham máscara enquanto a
   // pessoa digita (ver lib/validation.js).
   const MASKS = { cpf: maskCPF, phone: maskPhone };
-  const upd = (k) => (e) => setForm({
-    ...form,
-    [k]: k === "consent_terms" ? e.target.value === "true" : (MASKS[k] ? MASKS[k](e.target.value) : e.target.value),
-    // PRODUTO: a idade acompanha a data de nascimento (não é mais digitada).
-    ...(k === "birth_date" ? { age: String(ageFromBirthDate(e.target.value) ?? "") } : {}),
-  });
+  const upd = (k) => (e) => {
+    setForm({
+      ...form,
+      [k]: k === "consent_terms" ? e.target.value === "true" : (MASKS[k] ? MASKS[k](e.target.value) : e.target.value),
+      // PRODUTO: a idade acompanha a data de nascimento (não é mais digitada).
+      ...(k === "birth_date" ? { age: String(ageFromBirthDate(e.target.value) ?? "") } : {}),
+    });
+    // A4: a pessoa mexeu no campo, a mensagem de erro dele sai (volta a ser
+    // conferido no próximo "Salvar"). CPF e telefone continuam com o aviso ao vivo.
+    setFormErrors((current) => {
+      if (!current[k]) return current;
+      const next = { ...current };
+      delete next[k];
+      return next;
+    });
+  };
 
   // ========================================================================
   // HANDLERS - FORM SUBMISSION
@@ -256,22 +308,14 @@ export default function Patients() {
     // Segurança (varredura, item 2): avisa antes de enviar. O servidor confere
     // de novo (e é ele quem decide), mas assim a pessoa corrige sem esperar.
     // PRODUTO: nenhum campo em branco. Lista tudo o que falta e leva o foco ao
-    // primeiro campo vazio, em vez de a pessoa descobrir um erro de cada vez.
-    const missing = missingFields(form);
-    if (missing.length) {
-      toast.error(`Preencha todos os campos. Faltando: ${missing.map(([, label]) => label).join(", ")}.`);
-      document.getElementById(missing[0][2])?.focus();
-      return;
-    }
-    // PRODUTO: a pergunta sobre o termo precisa de resposta (não há mais opção pré-marcada).
-    if (typeof form.consent_terms !== "boolean") {
-      toast.error("Responda se o paciente concorda com o termo de consentimento.");
-      document.getElementById("patient-consent-yes")?.focus();
-      return;
-    }
-    const problem = cpfProblem(form.cpf) || phoneProblem(form.phone);
-    if (problem) {
-      toast.error(problem);
+    // primeiro campo com problema, em vez de a pessoa descobrir um erro de cada vez.
+    // A4: os erros ficam no formulário (resumo + mensagem em cada campo), não num aviso que some.
+    const errors = validatePatientForm(form);
+    setFormErrors(errors);
+    setSubmitError("");
+    const firstInvalid = ERROR_FIELDS.find(([key]) => errors[key]);
+    if (firstInvalid) {
+      document.getElementById(firstInvalid[2])?.focus();
       return;
     }
     setSaving(true);
@@ -286,7 +330,10 @@ export default function Patients() {
       setDialogOpen(false);
       load();
     } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+      // A4: o erro do servidor (ex.: dado recusado) também fica no formulário, no
+      // resumo do topo, que recebe o foco para ser lido; antes era um aviso que sumia.
+      setSubmitError(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+      requestAnimationFrame(() => document.getElementById("patient-form-errors")?.focus());
     } finally {
       setSaving(false);
     }
@@ -534,7 +581,8 @@ function onFormSubmit(e) {
       )}
 
       <PatientFormDialog open={dialogOpen} onOpenChange={setDialogOpen} editing={editing}
-        form={form} onFormChange={upd} saving={saving} onSubmit={save} currentTerm={currentTerm} />
+        form={form} onFormChange={upd} saving={saving} onSubmit={save} currentTerm={currentTerm}
+        errors={formErrors} submitError={submitError} />
 
       <PatientConfirmDialog confirm={confirm} onConfirm={doAction} onOpenChange={(o) => !o && setConfirm(null)} />
 
@@ -557,7 +605,10 @@ function PatientHeader({ onNew, onIntegration }) {
         <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Pacientes</h1>
         <p className="mt-1 text-sm text-slate-500">Gerencie cadastros e acesse prontuários</p>
       </div>
-      <div className="flex gap-2">
+      {/* Acessibilidade (análise de UI, A5): flex-wrap. Em 320 px (celular pequeno ou
+          zoom de 400%) os dois botões não cabem lado a lado, e "Novo paciente", a ação
+          principal da tela, ficava cortado para fora. Agora ele desce para a linha de baixo. */}
+      <div className="flex flex-wrap gap-2">
         <Button onClick={onIntegration} variant="outline" className="gap-2 border-slate-300">
           <FileText className="h-4 w-4" /> Integrar Google Forms
         </Button>
@@ -744,7 +795,47 @@ function FormSection({ title, children }) {
   );
 }
 
-function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm }) {
+// A4: mensagem de erro de um campo. O id ("<campo>-error") é o que o campo
+// aponta em aria-describedby, para o leitor de tela ler a mensagem junto.
+function FieldError({ id, message }) {
+  return message ? <p id={`${id}-error`} className="mt-1 text-xs text-red-600">{message}</p> : null;
+}
+
+// A4: resumo dos erros no topo do formulário. role="alert": o leitor de tela lê
+// o resumo assim que ele aparece. Cada item leva o foco ao campo correspondente.
+function FormErrorSummary({ errors, submitError }) {
+  const entries = ERROR_FIELDS.filter(([key]) => errors[key]);
+  if (!entries.length && !submitError) return null;
+  return (
+    <div id="patient-form-errors" role="alert" tabIndex={-1}
+      className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+      data-testid="patient-form-errors">
+      {submitError ? (
+        <p>{submitError}</p>
+      ) : (
+        <>
+          <p className="font-medium">
+            {entries.length === 1 ? "Corrija 1 campo para salvar:" : `Corrija ${entries.length} campos para salvar:`}
+          </p>
+          <ul className="mt-1.5 grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+            {entries.map(([key, label, id]) => (
+              <li key={key}>
+                <a href={`#${id}`} className="underline underline-offset-2 hover:text-red-950"
+                  onClick={(e) => { e.preventDefault(); document.getElementById(id)?.focus(); }}>
+                  {label}
+                </a>
+                {errors[key] !== EMPTY_MESSAGE && <span>: {errors[key]}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm,
+  errors = {}, submitError = "" }) {
   // Quem já consentiu vê a cópia do texto que aceitou; os demais, o termo atual.
   const consentText = editing?.consent_terms ? editing.consent_terms_text : currentTerm;
   const consentDate = editing?.consent_terms && editing.consent_given_at
@@ -753,8 +844,16 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
   // Segurança (varredura, item 2): limites iguais aos do servidor e aviso de
   // CPF/telefone inválido já no campo. Um paciente vindo do Google Forms pode
   // ter CPF digitado errado pelo próprio paciente: o aviso aparece ao editar.
-  const cpfError = cpfProblem(form.cpf);
-  const phoneError = phoneProblem(form.phone);
+  // A4: o aviso ao vivo (enquanto digita) ou o erro do "Salvar" (ex.: campo vazio).
+  const cpfError = cpfProblem(form.cpf) || errors.cpf;
+  const phoneError = phoneProblem(form.phone) || errors.phone;
+  // A4: atributos de um campo com erro: marcado como inválido e com a mensagem
+  // ligada a ele. `hintId`: um texto de ajuda que já descreve o campo (ex.: a idade).
+  const fieldA11y = (key, id, hintId) => ({
+    "aria-invalid": errors[key] ? true : undefined,
+    "aria-describedby": [hintId, errors[key] ? `${id}-error` : null].filter(Boolean).join(" ") || undefined,
+  });
+  const invalidClass = (key) => (errors[key] ? "border-red-500 focus-visible:ring-red-500" : "");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* UX (cadastro de paciente): mais largo no computador (duas colunas). */}
@@ -775,19 +874,23 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             duas colunas no computador e uma no celular.
             autoComplete="off": o navegador sugeria os dados do PRÓPRIO profissional
             (nome, e-mail, endereço) nos campos do paciente. */}
-        <form onSubmit={onSubmit} className="space-y-6" autoComplete="off">
+        {/* noValidate (A4): os erros são mostrados pelo próprio formulário (ver validatePatientForm). */}
+        <form onSubmit={onSubmit} className="space-y-6" autoComplete="off" noValidate>
+          <FormErrorSummary errors={errors} submitError={submitError} />
           <FormSection title="Identificação">
             <div className="sm:col-span-2">
               <Label htmlFor="patient-name">Nome completo *</Label>
               <Input
                 id="patient-name"
+                {...fieldA11y("full_name", "patient-name")}
                 required
                 maxLength={LIMITS.patientName}
                 value={form.full_name}
                 onChange={onFormChange("full_name")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("full_name")}`}
                 data-testid="patient-name-input"
               />
+              <FieldError id="patient-name" message={errors.full_name} />
             </div>
 
             <div>
@@ -799,42 +902,45 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 maxLength={LIMITS.cpf}
                 value={form.cpf}
                 onChange={onFormChange("cpf")}
-                className="mt-1.5"
+                className={`mt-1.5 ${cpfError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
                 aria-invalid={Boolean(cpfError)}
                 aria-describedby={cpfError ? "patient-cpf-error" : undefined}
                 data-testid="patient-cpf-input"
                 placeholder="000.000.000-00"
               />
-              {cpfError && <p id="patient-cpf-error" className="mt-1 text-xs text-red-600">{cpfError}</p>}
+              <FieldError id="patient-cpf" message={cpfError} />
             </div>
 
             <div>
               <Label htmlFor="patient-rg">RG *</Label>
               <Input
                 id="patient-rg"
+                {...fieldA11y("rg", "patient-rg")}
                 required
                 maxLength={LIMITS.rg}
                 value={form.rg}
                 onChange={onFormChange("rg")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("rg")}`}
                 data-testid="patient-rg-input"
               />
+              <FieldError id="patient-rg" message={errors.rg} />
             </div>
 
             <div>
               <Label htmlFor="patient-birth-date">Data de nascimento *</Label>
               <Input
                 id="patient-birth-date"
+                {...fieldA11y("birth_date", "patient-birth-date", "patient-age-hint")}
                 required
                 type="date"
                 min="1900-01-01"
                 max={todayISO()}
                 value={form.birth_date}
                 onChange={onFormChange("birth_date")}
-                className="mt-1.5"
-                aria-describedby="patient-age-hint"
+                className={`mt-1.5 ${invalidClass("birth_date")}`}
                 data-testid="patient-birthdate-input"
               />
+              <FieldError id="patient-birth-date" message={errors.birth_date} />
               {/* PRODUTO: a idade é calculada pela data de nascimento. Antes havia um
                   campo "Idade" (primeiro digitado, depois só de leitura) que ocupava
                   uma linha inteira para repetir a data; agora ela aparece aqui. */}
@@ -847,10 +953,11 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               <Label htmlFor="patient-marital-status">Estado civil *</Label>
               <select
                 id="patient-marital-status"
+                {...fieldA11y("marital_status", "patient-marital-status")}
                 required
                 value={form.marital_status}
                 onChange={onFormChange("marital_status")}
-                className={SELECT_CLASS}
+                className={`${SELECT_CLASS} ${invalidClass("marital_status")}`}
               >
                 <option value="">Selecione...</option>
                 <option value="Solteiro(a)">Solteiro(a)</option>
@@ -859,6 +966,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 <option value="Viúvo(a)">Viúvo(a)</option>
                 <option value="União estável">União estável</option>
               </select>
+              <FieldError id="patient-marital-status" message={errors.marital_status} />
             </div>
 
             <div>
@@ -867,10 +975,11 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               <Label htmlFor="patient-education">Escolaridade *</Label>
               <select
                 id="patient-education"
+                {...fieldA11y("education", "patient-education")}
                 required
                 value={form.education}
                 onChange={onFormChange("education")}
-                className={SELECT_CLASS}
+                className={`${SELECT_CLASS} ${invalidClass("education")}`}
               >
                 <option value="">Selecione...</option>
                 <option value="Fundamental - Incompleto">Fundamental - Incompleto</option>
@@ -881,19 +990,22 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 <option value="Superior - Completo">Superior - Completo</option>
                 <option value="Pós Graduação - Completo">Pós Graduação - Completo</option>
               </select>
+              <FieldError id="patient-education" message={errors.education} />
             </div>
 
             <div>
               <Label htmlFor="patient-profession">Profissão *</Label>
               <Input
                 id="patient-profession"
+                {...fieldA11y("profession", "patient-profession")}
                 required
                 maxLength={LIMITS.profession}
                 value={form.profession}
                 onChange={onFormChange("profession")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("profession")}`}
                 data-testid="patient-profession-input"
               />
+              <FieldError id="patient-profession" message={errors.profession} />
             </div>
           </FormSection>
 
@@ -908,56 +1020,62 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 maxLength={LIMITS.phone}
                 value={form.phone}
                 onChange={onFormChange("phone")}
-                className="mt-1.5"
+                className={`mt-1.5 ${phoneError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
                 aria-invalid={Boolean(phoneError)}
                 aria-describedby={phoneError ? "patient-phone-error" : undefined}
                 data-testid="patient-phone-input"
                 placeholder="(11) 91234-5678"
               />
-              {phoneError && <p id="patient-phone-error" className="mt-1 text-xs text-red-600">{phoneError}</p>}
+              <FieldError id="patient-phone" message={phoneError} />
             </div>
 
             <div>
               <Label htmlFor="patient-email">E-mail *</Label>
               <Input
                 id="patient-email"
+                {...fieldA11y("email", "patient-email")}
                 required
                 type="email"
                 inputMode="email"
                 maxLength={LIMITS.email}
                 value={form.email}
                 onChange={onFormChange("email")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("email")}`}
                 data-testid="patient-email-input"
               />
+              <FieldError id="patient-email" message={errors.email} />
             </div>
 
             <div className="sm:col-span-2">
               <Label htmlFor="patient-address">Endereço *</Label>
               <Input
                 id="patient-address"
+                {...fieldA11y("address", "patient-address")}
                 required
                 maxLength={LIMITS.address}
                 value={form.address}
                 onChange={onFormChange("address")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("address")}`}
                 placeholder="Rua, número, bairro, cidade"
                 data-testid="patient-address-input"
               />
+              <FieldError id="patient-address" message={errors.address} />
             </div>
 
             <div className="sm:col-span-2">
               <Label htmlFor="patient-emergency">Contato de emergência *</Label>
               <Input
                 id="patient-emergency"
+                {...fieldA11y("emergency_contact", "patient-emergency")}
                 required
                 maxLength={LIMITS.emergencyContact}
                 value={form.emergency_contact}
                 onChange={onFormChange("emergency_contact")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("emergency_contact")}`}
                 placeholder="Nome, parentesco e telefone"
                 data-testid="patient-emergency-input"
               />
+              <FieldError id="patient-emergency" message={errors.emergency_contact} />
             </div>
           </FormSection>
 
@@ -966,15 +1084,17 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               <Label htmlFor="patient-notes">Notas iniciais *</Label>
               <Textarea
                 id="patient-notes"
+                {...fieldA11y("initial_notes", "patient-notes")}
                 required
                 maxLength={LIMITS.patientNotes}
                 value={form.initial_notes}
                 onChange={onFormChange("initial_notes")}
-                className="mt-1.5"
+                className={`mt-1.5 ${invalidClass("initial_notes")}`}
                 placeholder="Motivo da procura, encaminhamento, observações da triagem"
                 data-testid="patient-notes-input"
                 rows={3}
               />
+              <FieldError id="patient-notes" message={errors.initial_notes} />
             </div>
           </FormSection>
 
@@ -999,6 +1119,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                   Celular: opções com área de toque maior (linha inteira, 44 px). */}
               <fieldset className="space-y-1">
                 <legend className="text-sm font-medium text-[#0F172A]">O paciente concorda com o termo? *</legend>
+                <FieldError id="patient-consent" message={errors.consent_terms} />
                 <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
                   <input
                     id="patient-consent-yes"
@@ -1008,6 +1129,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                     checked={form.consent_terms === true}
                     onChange={onFormChange("consent_terms")}
                     required
+                    {...fieldA11y("consent_terms", "patient-consent")}
                   />
                   Concordo
                 </label>
@@ -1018,6 +1140,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                     value="false"
                     checked={form.consent_terms === false}
                     onChange={onFormChange("consent_terms")}
+                    {...fieldA11y("consent_terms", "patient-consent")}
                   />
                   Não concordo
                 </label>
