@@ -26,7 +26,7 @@ import CloseAccountCard from "@/components/settings/CloseAccountCard";
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
-  FileSignature, Archive, TimerReset, Mail, Download, ShieldCheck, UserX,
+  FileSignature, Archive, TimerReset, Mail, Download, ShieldCheck, UserX, CalendarClock,
 } from "lucide-react";
 
 // Rótulos das ações gravadas pelo backend em log_audit(). Ações novas da etapa
@@ -130,7 +130,7 @@ function ProfessionalProfile() {
 // Mudanças aqui valem só para NOVOS consentimentos: cada paciente guarda a
 // cópia exata do texto que aceitou (backend: apply_consent).
 function ConsentTermEditor() {
-  const { user } = useAuth();
+  const { user, setUser } = useAuth();
   const showIdentification = Boolean(user?.features?.professional_identification);
   const [term, setTerm] = useState(null);
   const [body, setBody] = useState("");
@@ -146,9 +146,13 @@ function ConsentTermEditor() {
     setSaving(true);
     try {
       const { data } = await api.put("/consent-term", { body: nextBody });
+      const keptAsIs = nextBody === term.body; // O1: "Revisei e mantenho este texto"
       setTerm(data);
       setBody(data.body);
-      toast.success(data.is_default ? "Modelo padrão restaurado." : "Termo de consentimento atualizado.");
+      // O1: salvar conta como revisão (passo dos "Primeiros passos" do painel).
+      setUser((current) => (current ? { ...current, consent_term_reviewed: true } : current));
+      toast.success(keptAsIs ? "Termo revisado. O texto continua o mesmo."
+        : data.is_default ? "Modelo padrão restaurado." : "Termo de consentimento atualizado.");
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail));
     } finally {
@@ -185,6 +189,14 @@ function ConsentTermEditor() {
             <p className="mt-2 whitespace-pre-line text-xs leading-relaxed text-slate-600">{term.text}</p>
           </details>
           <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            {/* Análise de UI (O1): revisar o termo é um dos "Primeiros passos". Quem lê e
+                concorda com o texto não precisa mudar nada para concluir o passo. */}
+            {!user?.consent_term_reviewed && body === term.body && (
+              <Button type="button" variant="outline" disabled={saving} onClick={() => save(term.body)}
+                data-testid="consent-term-keep">
+                Revisei e mantenho este texto
+              </Button>
+            )}
             <Button type="button" variant="outline" disabled={saving || term.is_default} onClick={() => save("")}>
               Restaurar modelo padrão
             </Button>
@@ -282,6 +294,83 @@ function SessionSecurity() {
         </div>
       </div>
       {confirmDialog}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Análise de UI (P7): horário de atendimento. A grade da agenda (Semana, Dia,
+// 3 dias) mostra só estas horas, em vez das 24 do dia. Sessões fora do
+// horário continuam aparecendo (a grade se estende até elas), e a própria
+// agenda tem "Mostrar 24 horas". Gravado na conta: vale em todos os aparelhos.
+// ---------------------------------------------------------------------------
+const START_HOURS = Array.from({ length: 24 }, (_, h) => h);          // 00:00 a 23:00
+const END_HOURS = Array.from({ length: 24 }, (_, h) => h + 1);        // 01:00 a 24:00
+const MIN_AGENDA_HOURS = 2;                                           // mesma regra do servidor
+const hourText = (h) => (h === 24 ? "24:00 (meia-noite)" : `${String(h).padStart(2, "0")}:00`);
+
+function AgendaHours() {
+  const { user, setUser } = useAuth();
+  const [hours, setHours] = useState({ start: user?.agenda_start_hour ?? 7, end: user?.agenda_end_hour ?? 21 });
+  const [saving, setSaving] = useState(false);
+  const invalid = hours.end - hours.start < MIN_AGENDA_HOURS;
+  const unchanged = hours.start === user?.agenda_start_hour && hours.end === user?.agenda_end_hour;
+
+  const save = async (event) => {
+    event.preventDefault();
+    if (invalid) return;
+    setSaving(true);
+    try {
+      const { data } = await api.put("/auth/agenda-settings", { start_hour: hours.start, end_hour: hours.end });
+      setUser((current) => ({ ...current, ...data }));
+      toast.success(`A agenda vai mostrar das ${hourText(hours.start)} às ${hourText(hours.end)}.`);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="border-slate-200 p-6 shadow-sm">
+      <div className="flex items-center gap-2">
+        <CalendarClock className="h-4 w-4 text-[#1E3A8A]" aria-hidden="true" />
+        <h2 className="font-head text-lg font-bold text-[#0F172A]">Horário de atendimento</h2>
+      </div>
+      <p className="mt-1 text-sm text-slate-500">
+        A grade da agenda mostra só este horário. Sessões fora dele continuam aparecendo, e a agenda tem
+        “Mostrar 24 horas” para ver o dia inteiro.
+      </p>
+      <form onSubmit={save} className="mt-4 flex flex-wrap items-end gap-4">
+        <div>
+          <Label htmlFor="agenda-start" className="text-slate-700">Das</Label>
+          <NativeSelect id="agenda-start" value={String(hours.start)} className="mt-1.5 w-40"
+            onChange={(e) => setHours({ ...hours, start: Number(e.target.value) })}
+            aria-invalid={invalid || undefined} aria-describedby={invalid ? "agenda-hours-error" : undefined}
+            data-testid="agenda-start-select">
+            {START_HOURS.map((h) => <option key={h} value={String(h)}>{hourText(h)}</option>)}
+          </NativeSelect>
+        </div>
+        <div>
+          <Label htmlFor="agenda-end" className="text-slate-700">Às</Label>
+          <NativeSelect id="agenda-end" value={String(hours.end)} className="mt-1.5 w-48"
+            onChange={(e) => setHours({ ...hours, end: Number(e.target.value) })}
+            aria-invalid={invalid || undefined} aria-describedby={invalid ? "agenda-hours-error" : undefined}
+            data-testid="agenda-end-select">
+            {END_HOURS.map((h) => <option key={h} value={String(h)}>{hourText(h)}</option>)}
+          </NativeSelect>
+        </div>
+        <Button type="submit" disabled={saving || invalid || unchanged} className="bg-[#1E3A8A] hover:bg-[#0F2C59]"
+          data-testid="agenda-hours-save">
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar horário"}
+        </Button>
+      </form>
+      {/* F1: o problema aparece junto dos campos, ligado a eles (aria-describedby). */}
+      {invalid && (
+        <p id="agenda-hours-error" className="mt-2 text-xs text-red-600" role="status">
+          O fim precisa ser pelo menos {MIN_AGENDA_HOURS} horas depois do início.
+        </p>
+      )}
     </Card>
   );
 }
@@ -614,9 +703,10 @@ const PRIVACY_FEATURES = [
 // ---------------------------------------------------------------------------
 // UX (Configurações em abas): antes era uma página única e longa, chamada
 // "Privacidade & LGPD", onde trocar a senha exigia rolar por termo,
-// criptografia e auditoria. Agora são quatro abas:
+// criptografia e auditoria. Agora são cinco abas:
 //   Minha conta   - senha, duas etapas, aparelhos, bloqueio, rascunhos,
 //                   encerrar a conta (e nome/CRP);
+//   Agenda        - horário de atendimento (análise de UI, P7);
 //   Termo         - termo de consentimento dos pacientes;
 //   Privacidade   - conformidade, política e o que o sistema protege;
 //   Auditoria     - trilha de auditoria (carregada só ao abrir a aba).
@@ -626,6 +716,7 @@ const PRIVACY_FEATURES = [
 // ---------------------------------------------------------------------------
 const TABS = [
   { id: "conta", label: "Minha conta", icon: UserRound },
+  { id: "agenda", label: "Agenda", icon: CalendarClock },
   { id: "termo", label: "Termo de consentimento", icon: FileSignature },
   { id: "privacidade", label: "Privacidade", icon: Shield },
   { id: "auditoria", label: "Auditoria", icon: ScrollText },
@@ -643,7 +734,7 @@ export default function Settings() {
     <div className="space-y-6">
       <div>
         <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Configurações</h1>
-        <p className="mt-1 text-sm text-slate-500">Sua conta, o termo de consentimento, privacidade e auditoria</p>
+        <p className="mt-1 text-sm text-slate-500">Sua conta, a agenda, o termo de consentimento, privacidade e auditoria</p>
       </div>
 
       {/* `replace`: trocar de aba não enche o histórico do navegador. */}
@@ -668,6 +759,11 @@ export default function Settings() {
           <ConnectedDevicesCard />
           <SessionSecurity />
           <CloseAccountCard />
+        </TabsContent>
+
+        {/* P7: horário de atendimento da grade da agenda. */}
+        <TabsContent value="agenda" className="mt-6">
+          <AgendaHours />
         </TabsContent>
 
         <TabsContent value="termo" forceMount className={`mt-6 ${KEEP_MOUNTED}`}>

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, CloudOff, HardDriveDownload, Loader2, Save } from "lucide-react";
+import { AlertTriangle, CloudOff, HardDriveDownload, Loader2, Maximize2, Minimize2, Save } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { draftSlot, draftsSupported, prepareDraftKey, readDraft } from "@/lib/drafts";
 import { formatDateTime, formatTime, localInputToISO, toLocalInput } from "@/lib/datetime";
@@ -33,7 +33,37 @@ import {
 //   - sessão expirada ou tela bloqueada no "Salvar": o texto fica no editor
 //     e no rascunho, e basta salvar de novo depois de entrar/desbloquear;
 //   - data e hora vão para a API com fuso (correção do horário deslocado).
+//
+// Análise de UI (P3): escrever a evolução é a tarefa central do sistema, e ela
+// acontecia num campo fixo de 12 linhas. Agora:
+//   - "Tela cheia": o editor ocupa a tela inteira, com o texto numa coluna de
+//     leitura confortável. A escolha fica lembrada neste navegador;
+//   - o campo CRESCE com o texto (até 60% da altura da tela; daí em diante
+//     rola por dentro, e o "Salvar" continua à vista);
+//   - Ctrl+Enter (⌘+Enter no Mac) salva sem tirar as mãos do teclado.
 // ---------------------------------------------------------------------------
+
+// P3: preferência de tela cheia (só conveniência deste navegador: sem
+// armazenamento, simplesmente abre no tamanho normal).
+const FULLSCREEN_KEY = "psi:record-editor-fullscreen";
+const readFullscreen = () => {
+  try {
+    return window.localStorage.getItem(FULLSCREEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+const storeFullscreen = (value) => {
+  try {
+    window.localStorage.setItem(FULLSCREEN_KEY, value ? "1" : "0");
+  } catch {
+    // sem armazenamento: vale só até fechar o editor
+  }
+};
+// P3: o atalho se escreve diferente no Mac (⌘) e nos demais (Ctrl).
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+const SAVE_SHORTCUT = IS_MAC ? "⌘+Enter" : "Ctrl+Enter";
+const GROW_MAX_SHARE = 0.6; // altura máxima do campo fora da tela cheia (fração da tela)
 
 const sameFields = (a, b) =>
   a.session_datetime === b.session_datetime && a.content === b.content && a.diagnosis === b.diagnosis;
@@ -66,6 +96,12 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
   // Segurança (varredura, item 9): outra edição desta anotação foi salva
   // enquanto esta estava aberta (o servidor respondeu 409). { currentVersion }
   const [conflict, setConflict] = useState(null);
+  // P3: editor em tela cheia (lembrado neste navegador).
+  const [fullscreen, setFullscreen] = useState(readFullscreen);
+  const toggleFullscreen = () => setFullscreen((current) => {
+    storeFullscreen(!current);
+    return !current;
+  });
 
   useEffect(() => {
     if (!open) return undefined;
@@ -111,6 +147,20 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
   // recebe o modelo; com texto, o modelo vai para o fim (nada é apagado). O
   // rascunho automático guarda o resultado como qualquer outra digitação.
   const contentRef = useRef(null);
+
+  // P3: o campo cresce com o texto. Na tela cheia quem manda é o layout (ele
+  // ocupa todo o espaço livre); fora dela, a altura acompanha o conteúdo, de
+  // 12 linhas (rows) até GROW_MAX_SHARE da tela.
+  useLayoutEffect(() => {
+    const area = contentRef.current;
+    if (!area || !open) return;
+    if (fullscreen) {
+      area.style.height = "";
+      return;
+    }
+    area.style.height = "auto";
+    area.style.height = `${Math.min(area.scrollHeight + 2, Math.round(window.innerHeight * GROW_MAX_SHARE))}px`;
+  }, [fields.content, fullscreen, open]);
   const insertTemplate = (template) => {
     setFields((current) => ({ ...current, content: applyTemplate(current.content, template).slice(0, LIMITS.recordContent) }));
     requestAnimationFrame(() => {
@@ -214,9 +264,32 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
 
   const outdatedDraft = record && restored && restored.baseVersion != null && restored.baseVersion !== record.version;
 
+  // P3: Ctrl+Enter (⌘+Enter) salva de qualquer campo do editor. Com um
+  // conflito aberto, a decisão é no aviso (o atalho não salva por cima).
+  const onKeyDown = (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      event.preventDefault();
+      if (!conflict) save();
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+      {/* P3: na tela cheia, o diálogo ocupa a tela toda (sem bordas arredondadas)
+          e vira uma coluna: o campo de texto fica com todo o espaço que sobra. */}
+      <DialogContent onKeyDown={onKeyDown}
+        className={fullscreen
+          ? "left-0 top-0 flex h-[100dvh] max-h-none w-screen max-w-none translate-x-0 translate-y-0 flex-col overflow-y-auto rounded-none sm:max-w-none sm:rounded-none"
+          : "max-h-[92vh] overflow-y-auto sm:max-w-2xl"}
+        data-testid="record-editor">
+        {/* P3: alternar a tela cheia (ao lado do "Fechar", no canto). */}
+        <button type="button" onClick={toggleFullscreen}
+          aria-label={fullscreen ? "Sair da tela cheia" : "Abrir o editor em tela cheia"} title={fullscreen ? "Sair da tela cheia" : "Tela cheia"}
+          className="absolute right-11 top-2.5 flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-70 transition-opacity hover:bg-slate-100 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          data-testid="record-fullscreen-toggle">
+          {fullscreen ? <Minimize2 className="h-4 w-4" aria-hidden="true" /> : <Maximize2 className="h-4 w-4" aria-hidden="true" />}
+        </button>
+        <div className={fullscreen ? "mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4" : "contents"}>
         <DialogHeader>
           {/* Segurança do prontuário (análise de UI, C1): o editor não dizia de QUAL
               paciente era a evolução ("Nova evolução", só isso). Registrar no prontuário
@@ -267,7 +340,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
           </p>
         )}
 
-        <div className="space-y-4">
+        <div className={fullscreen ? "flex flex-1 flex-col gap-4" : "space-y-4"}>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <Label htmlFor="record-datetime">Data/Hora da sessão</Label>
@@ -286,7 +359,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
                 className="mt-1.5" placeholder="CID / hipótese diagnóstica" data-testid="record-diagnosis-input" />
             </div>
           </div>
-          <div>
+          <div className={fullscreen ? "flex flex-1 flex-col" : undefined}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Label htmlFor="record-content">Texto da evolução</Label>
               <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Modelos de texto">
@@ -310,7 +383,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
               aria-invalid={fieldErrors.content ? true : undefined}
               aria-describedby={[fieldErrors.content ? "record-content-error" : null,
                 fields.content.length > LIMITS.recordContent * 0.9 ? "record-content-count" : null].filter(Boolean).join(" ") || undefined}
-              rows={12} className={`mt-1.5 psi-scroll font-normal leading-relaxed ${fieldErrors.content ? "border-red-500" : ""}`}
+              rows={12} className={`mt-1.5 psi-scroll font-normal leading-relaxed ${fullscreen ? "min-h-[40vh] flex-1 resize-none text-base" : ""} ${fieldErrors.content ? "border-red-500" : ""}`}
               placeholder="Descreva a evolução da sessão..." data-testid="record-content-input" />
             {fieldErrors.content && <p id="record-content-error" className="mt-1 text-xs text-red-600">{fieldErrors.content}</p>}
             {fields.content.length > LIMITS.recordContent * 0.9 && (
@@ -346,16 +419,21 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
 
         <DialogFooter className="flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <DraftStatus status={draft.status} savedAt={draft.savedAt} dirty={dirty} />
-          <div className="flex gap-2 sm:justify-end">
+          <div className="flex items-center gap-2 sm:justify-end">
+            {/* P3: o atalho fica à vista (no celular não há teclado físico: escondido). */}
+            <span className="mr-1 hidden text-xs text-slate-500 sm:inline" aria-hidden="true">
+              <kbd className="rounded border border-slate-200 bg-slate-50 px-1 font-sans">{SAVE_SHORTCUT}</kbd> salva
+            </span>
             <Button variant="outline" onClick={() => handleOpenChange(false)}>Cancelar</Button>
             {/* Com um conflito aberto, a decisão é no aviso acima (o Salvar normal levaria outro 409). */}
             <Button onClick={() => save()} disabled={saving || Boolean(conflict)} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]"
-              data-testid="save-record-btn">
+              aria-keyshortcuts={IS_MAC ? "Meta+Enter" : "Control+Enter"} data-testid="save-record-btn">
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               Salvar
             </Button>
           </div>
         </DialogFooter>
+        </div>
       </DialogContent>
       {confirmDialog}
     </Dialog>

@@ -39,7 +39,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
-from sqlalchemy import delete, desc, func, select, text, tuple_, update
+from sqlalchemy import delete, desc, exists, func, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -51,7 +51,8 @@ import mailer
 import observability
 import totp
 from crypto import (
-    hash_token, is_fernet_token, load_fernet, load_search_key, name_search_tokens, query_search_tokens,
+    SEARCH_INDEX_VERSION, contact_search_tokens, hash_token, is_fernet_token, load_fernet, load_search_key,
+    name_search_tokens, query_contact_tokens, query_search_tokens,
 )
 import rate_limit as rate_limiting
 from rate_limit import client_ip, enforce, rate_limit, require_shared_rate_limit
@@ -1043,7 +1044,11 @@ class SessionInput(BaseModel):
     # Segurança (varredura, item 3): limites também nos campos que faltavam.
     patient_id: Optional[str] = Field(default="", max_length=64)
     patient_name: Optional[str] = Field(default="", max_length=PATIENT_NAME_MAX)
-    title: str = Field(max_length=200)
+    # PRODUTO (análise de UI, P6): o título deixou de ser obrigatório. Era quase
+    # sempre "Sessão", digitado à mão a cada agendamento. Em branco, o servidor
+    # gera: "Sessão" (com paciente) ou "Compromisso" (sem paciente: supervisão,
+    # reunião). Quem quiser continua escrevendo um título ("Avaliação inicial").
+    title: str = Field(default="", max_length=200)
     start: datetime # Tipagem alterada para datetime nativo
     end: Optional[datetime] = None # Tipagem alterada para datetime nativo
     # Antes aceitava qualquer texto (item 17 da auditoria); a agenda só conhece estes
@@ -1062,10 +1067,7 @@ class SessionInput(BaseModel):
     @field_validator("title")
     @classmethod
     def validate_title(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Informe um título para a sessão.")
-        return value
+        return (value or "").strip()  # P6: vazio vale; o título é gerado em validate_period
 
     @field_validator("start", "end")
     @classmethod
@@ -1083,6 +1085,9 @@ class SessionInput(BaseModel):
         # P1: só se repete sessão AGENDADA (as próximas ainda não aconteceram).
         if self.repeat is not None and self.status != "agendada":
             raise ValueError("Só uma sessão agendada pode se repetir.")
+        # P6: título automático quando ficou em branco.
+        if not self.title:
+            self.title = "Sessão" if (self.patient_id or (self.patient_name or "").strip()) else "Compromisso"
         return self
 
 
@@ -1126,6 +1131,28 @@ class EndSessionsInput(BaseModel):
     # CSRF; exigindo JSON, outro site não consegue montar a requisição sem
     # passar pela checagem do CORS.
     confirm: Literal[True]
+
+
+# PRODUTO (análise de UI, P7): horário de atendimento padrão da grade da agenda
+# (antes a grade tinha as 24 horas e abria rolada nas 07:00). Fim exclusivo.
+DEFAULT_AGENDA_HOURS = (7, 21)
+
+
+class AgendaSettingsInput(BaseModel):
+    """P7: horário de atendimento (horas cheias). 0 a 24 mostra o dia inteiro."""
+    start_hour: int = Field(ge=0, le=23)
+    end_hour: int = Field(ge=1, le=24)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end_hour - self.start_hour < 2:
+            raise ValueError("O horário de atendimento precisa ter pelo menos 2 horas.")
+        return self
+
+
+class OnboardingInput(BaseModel):
+    """O1: ocultar (ou mostrar de novo) a lista "Primeiros passos" do painel."""
+    dismissed: bool
 
 
 class LockSettingsInput(BaseModel):
@@ -1280,6 +1307,13 @@ def public_user(u: User) -> dict:
         # Produto: tempo do bloqueio por inatividade e como desbloquear a tela
         # (senha para quem tem; Google para quem só entra pelo Google).
         "lock_minutes": u.lock_minutes or DEFAULT_LOCK_MINUTES,
+        # Análise de UI (P7): horário de atendimento mostrado na grade da agenda.
+        "agenda_start_hour": DEFAULT_AGENDA_HOURS[0] if u.agenda_start_hour is None else u.agenda_start_hour,
+        "agenda_end_hour": DEFAULT_AGENDA_HOURS[1] if u.agenda_end_hour is None else u.agenda_end_hour,
+        # Análise de UI (O1): passos da lista "Primeiros passos" que dependem da conta.
+        # Termo personalizado antes desta versão também conta como revisado.
+        "consent_term_reviewed": bool(u.consent_term_reviewed_at or u.consent_term_body),
+        "onboarding_dismissed": u.onboarding_dismissed_at is not None,
         "has_password": bool(u.password_hash),
         # Segurança (backlog): verificação em duas etapas e e-mail comprovado.
         "mfa_enabled": u.mfa_enabled_at is not None,
@@ -1994,6 +2028,13 @@ async def get_privacy_policy():
     # ANTES de aceitá-la. Texto e versão vêm de legal.py (fonte única).
     return legal.privacy_policy()
 
+
+@api_router.get("/legal/contact")
+async def get_contact():
+    # Análise de UI (O2): contatos da página de Ajuda (suporte e encarregado de
+    # dados). Pública: quem não consegue entrar é quem mais precisa de ajuda.
+    return legal.contact_info()
+
 @api_router.put("/auth/profile")
 async def update_profile(data: ProfileInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     # Item 6: nome e CRP do profissional, usados no termo de consentimento dos pacientes.
@@ -2138,6 +2179,30 @@ async def update_lock_settings(data: LockSettingsInput, user: User = Depends(get
     await db.refresh(user)
     await log_audit(db, user.user_id, user.email, "editar", "usuario", user.user_id,
                     f"Bloqueio por inatividade: {data.minutes} min")
+    return public_user(user)
+
+
+@api_router.put("/auth/agenda-settings")
+async def update_agenda_settings(data: AgendaSettingsInput, user: User = Depends(get_active_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Análise de UI (P7): horário de atendimento da grade da agenda."""
+    user.agenda_start_hour = data.start_hour
+    user.agenda_end_hour = data.end_hour
+    await db.commit()
+    await db.refresh(user)
+    await log_audit(db, user.user_id, user.email, "editar", "usuario", user.user_id,
+                    f"Horário de atendimento: {data.start_hour:02d}:00 às {data.end_hour:02d}:00")
+    return public_user(user)
+
+
+@api_router.put("/auth/onboarding")
+async def update_onboarding(data: OnboardingInput, user: User = Depends(get_active_user),
+                            db: AsyncSession = Depends(get_db)):
+    """Análise de UI (O1): ocultar a lista "Primeiros passos" (ou trazê-la de
+    volta, pela página de Ajuda). Preferência de tela: sem registro na auditoria."""
+    user.onboarding_dismissed_at = now_utc() if data.dismissed else None
+    await db.commit()
+    await db.refresh(user)
     return public_user(user)
 
 
@@ -2497,14 +2562,22 @@ async def update_consent_term(data: ConsentTermInput, user: User = Depends(get_a
     body = data.body.strip()
     # Corpo vazio ou igual ao padrão = volta a acompanhar o modelo padrão
     # (assim ajustes futuros no modelo padrão chegam a quem não personalizou).
+    unchanged = (user.consent_term_body or None) == (None if not body or body == DEFAULT_CONSENT_TERM_BODY else body)
     user.consent_term_body = None if not body or body == DEFAULT_CONSENT_TERM_BODY else body
+    # Análise de UI (O1): salvar (mesmo sem mudar nada, "Revisei e mantenho este
+    # texto") conta como revisão do termo, um dos "Primeiros passos" do painel.
+    user.consent_term_reviewed_at = now_utc()
     await db.commit()
     await db.refresh(user)
 
     # Mudar o modelo NÃO altera consentimentos já dados: cada paciente guarda
     # a cópia do texto que aceitou (ver apply_consent).
-    await log_audit(db, user.user_id, user.email, "editar", "termo", user.user_id,
-                    "Modelo do termo de consentimento" + (" (padrão restaurado)" if user.consent_term_body is None else ""))
+    detail = "Modelo do termo de consentimento"
+    if unchanged:
+        detail += " (revisado, sem alteração)"
+    elif user.consent_term_body is None:
+        detail += " (padrão restaurado)"
+    await log_audit(db, user.user_id, user.email, "editar", "termo", user.user_id, detail)
     return await get_consent_term(user)
 
 # ---------------------------------------------------------------------------
@@ -2687,18 +2760,27 @@ def _row_id(row) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Índice cego de busca por nome (ESCALA)
+# Índice cego de busca por nome (ESCALA), telefone e CPF (análise de UI, P5)
 # ---------------------------------------------------------------------------
-async def _index_patient_name(db: AsyncSession, p: Patient, plain_name: str) -> None:
+def search_contacts(data) -> dict:
+    """P5: telefones e CPFs (do paciente e do responsável) que entram no índice."""
+    return {
+        "phones": (data.phone, getattr(data, "guardian_phone", "")),
+        "cpfs": (data.cpf, getattr(data, "guardian_cpf", "")),
+    }
+
+
+async def _index_patient_search(db: AsyncSession, p: Patient, plain_name: str, *, phones=(), cpfs=()) -> None:
     """(Re)grava os tokens de busca do paciente. Chamado em toda criação,
     edição, anonimização e cadastro via Google Forms, na MESMA transação da
-    alteração: o índice nunca fica desatualizado em relação ao nome."""
+    alteração: o índice nunca fica desatualizado em relação ao nome.
+    P5: inclui telefone e CPF (antes só o nome era buscável)."""
     await db.flush()  # garante o id de um paciente recém-criado
     await db.execute(delete(PatientSearchToken).where(PatientSearchToken.patient_id == p.id))
-    db.add_all([
-        PatientSearchToken(patient_id=p.id, owner_id=p.owner_id, token=token)
-        for token in name_search_tokens(_search_key, p.owner_id, plain_name)
-    ])
+    tokens = name_search_tokens(_search_key, p.owner_id, plain_name)
+    tokens |= contact_search_tokens(_search_key, p.owner_id, phones, cpfs)
+    db.add_all([PatientSearchToken(patient_id=p.id, owner_id=p.owner_id, token=token) for token in tokens])
+    p.search_index_version = SEARCH_INDEX_VERSION
 
 
 def patient_summary(p: Patient) -> dict:
@@ -2784,9 +2866,18 @@ async def _patients_page(db: AsyncSession, user: User, *, archived: bool, query:
     conditions = [Patient.owner_id == user.user_id,
                   Patient.archived_at.is_not(None) if archived else Patient.archived_at.is_(None)]
 
-    # Cada palavra digitada vira um token; o paciente precisa ter TODOS.
+    # P5: a busca é um telefone ou CPF ("(11) 91234-5678", "123.456.789-09")?
+    # Então basta UM dos tokens bater (o mesmo número pode ser telefone ou CPF).
+    contact_tokens = query_contact_tokens(_search_key, user.user_id, query)
+    if contact_tokens:
+        conditions.append(Patient.id.in_(
+            select(PatientSearchToken.patient_id).where(
+                PatientSearchToken.owner_id == user.user_id, PatientSearchToken.token.in_(contact_tokens),
+            )
+        ))
+    # Nome: cada palavra digitada vira um token; o paciente precisa ter TODOS.
     # Palavras de 1 letra são ignoradas (não há token para elas).
-    for token in query_search_tokens(_search_key, user.user_id, query):
+    for token in ([] if contact_tokens else query_search_tokens(_search_key, user.user_id, query)):
         conditions.append(Patient.id.in_(
             select(PatientSearchToken.patient_id).where(
                 PatientSearchToken.owner_id == user.user_id, PatientSearchToken.token == token,
@@ -2854,10 +2945,11 @@ EXPORT_LIMIT, EXPORT_WINDOW_SECONDS = 10, 300  # 10 exportações a cada 5 minut
 
 @api_router.post("/patients/search", dependencies=[Depends(rate_limit("search", 2 * SEARCH_LIMIT_PER_MINUTE, 60))])
 async def search_patients(data: PatientSearchInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
-    """Busca por nome, no servidor, pelo índice cego (ESCALA).
+    """Busca por nome, no servidor, pelo índice cego (ESCALA). Desde a análise
+    de UI (P5), também por telefone (com ou sem DDD) e por CPF.
 
-    É POST, e não GET com ?q=, DE PROPÓSITO: o termo buscado é o nome de um
-    paciente. Em GET ele iria para a URL, e URLs ficam gravadas em logs de
+    É POST, e não GET com ?q=, DE PROPÓSITO: o termo buscado é o nome (ou o
+    telefone, o CPF) de um paciente. Em GET ele iria para a URL, e URLs ficam gravadas em logs de
     proxy, de load balancer, de CDN e no histórico do navegador. No corpo
     de um POST ele não é registrado por nenhuma dessas camadas.
     """
@@ -2887,7 +2979,8 @@ async def create_patient(data: PatientInput, user: User = Depends(get_active_use
     consent_action = apply_consent(novo_paciente, data.consent_terms, user)
 
     db.add(novo_paciente)
-    await _index_patient_name(db, novo_paciente, data.full_name)  # escala: busca no servidor
+    # Escala: busca no servidor. P5: também por telefone e CPF.
+    await _index_patient_search(db, novo_paciente, data.full_name, **search_contacts(data))
     await db.commit()
     await db.refresh(novo_paciente)
 
@@ -2906,7 +2999,8 @@ async def update_patient(pid: str, data: PatientInput, user: User = Depends(get_
     _apply_patient_input(p, data)
     consent_action = apply_consent(p, data.consent_terms, user)
     p.updated_at = now_utc()
-    await _index_patient_name(db, p, data.full_name)  # escala: o nome pode ter mudado
+    # Escala: o nome pode ter mudado. P5: e o telefone e o CPF também.
+    await _index_patient_search(db, p, data.full_name, **search_contacts(data))
 
     await db.commit()
     await db.refresh(p)
@@ -3075,8 +3169,9 @@ async def anonymize_patient(pid: str, user: User = Depends(get_active_user), db:
     # Item 13: o marcador também vai criptografado, para a coluna ter um
     # formato só (token Fernet) e a rotação de chave tratar todos igual.
     p.full_name = encrypt_field("Paciente Anonimizado")
-    # Escala/LGPD: os tokens do nome real saem do índice de busca junto.
-    await _index_patient_name(db, p, "Paciente Anonimizado")
+    # Escala/LGPD: os tokens do nome real (e do telefone e CPF, P5) saem do
+    # índice de busca junto: sem contatos, só o marcador fica buscável.
+    await _index_patient_search(db, p, "Paciente Anonimizado")
     p.cpf = ""
     p.rg = ""
     p.address = ""
@@ -3084,6 +3179,13 @@ async def anonymize_patient(pid: str, user: User = Depends(get_active_user), db:
     p.email = ""
     p.emergency_contact = ""
     p.initial_notes = ""
+    # LGPD (correção encontrada na análise de UI, P5): os dados do RESPONSÁVEL
+    # legal (fluxo clínico, C3) também identificam o paciente e ficavam depois
+    # da anonimização. Agora saem junto.
+    p.guardian_name = ""
+    p.guardian_cpf = ""
+    p.guardian_relationship = ""
+    p.guardian_phone = ""
     p.anonymized = True
     p.updated_at = now_utc()
 
@@ -3492,7 +3594,8 @@ async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = H
     novo_paciente = Patient(owner_id=owner.user_id, anonymized=False)
     _apply_patient_input(novo_paciente, data)  # item 13: mesmos campos criptografados do cadastro manual
     db.add(novo_paciente)
-    await _index_patient_name(db, novo_paciente, data.full_name)  # escala: busca no servidor
+    # Escala: busca no servidor. P5: também por telefone e CPF.
+    await _index_patient_search(db, novo_paciente, data.full_name, **search_contacts(data))
     # Termo por profissional: o consentimento marcado no formulário é
     # registrado com a cópia do termo ATUAL do profissional. Por isso a tela de
     # integração orienta a usar no formulário o mesmo texto de Configurações.
@@ -3579,6 +3682,12 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
             "updated_at": r.updated_at.isoformat() if r.updated_at else "",
         })
 
+    # Análise de UI (O1): passos da lista "Primeiros passos" que dependem dos
+    # dados (os da conta vêm em /auth/me). Qualquer paciente conta, até
+    # arquivado; qualquer sessão também, até cancelada: o passo é "aprender a fazer".
+    has_patients = await db.scalar(select(exists().where(Patient.owner_id == uid)))
+    has_sessions = await db.scalar(select(exists().where(Session.owner_id == uid)))
+
     return {
         "total_patients": total_patients,
         "sessions_month": sessions_month,
@@ -3586,6 +3695,7 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
         "upcoming_sessions": upcoming, # Variável populada com a query dinâmica
         "recent_patients": recent_patients,
         "records_feed": feed,
+        "onboarding": {"has_patients": bool(has_patients), "has_sessions": bool(has_sessions)},
     }
 # ---------------------------------------------------------------------------
 # Funções Auxiliares de Serialização (Agenda)
@@ -3926,6 +4036,41 @@ async def delete_session(sid: str,
         detail += f" e {count_label(len(following), 'próxima sessão da série', 'próximas sessões da série')}"
     await log_audit(db, user.user_id, user.email, "excluir", "agenda", sid, detail)
     return {"ok": True, "deleted": 1 + len(following)}
+
+
+# ---------------------------------------------------------------------------
+# Análise de UI (P2): agenda dentro da ficha do paciente
+# ---------------------------------------------------------------------------
+# A ficha não mostrava as próximas sessões nem permitia agendar: era preciso
+# ir à agenda e procurar o paciente. Esta rota traz, numa chamada só:
+#   - as próximas sessões (de agora em diante, inclusive canceladas, para o
+#     profissional ver o que mudou), até `limit`;
+#   - o total de próximas sessões que ocupam horário;
+#   - o resumo do que já passou por status (realizadas, faltas, cancelamentos):
+#     adesão ao tratamento à vista, sem abrir a agenda (fluxo clínico, C4).
+# A leitura da ficha já fica na auditoria (GET /patients/{pid}).
+PATIENT_SESSIONS_LIMIT = 5
+
+
+@api_router.get("/patients/{pid}/sessions")
+async def patient_sessions(pid: str, limit: int = Query(PATIENT_SESSIONS_LIMIT, ge=1, le=20),
+                           user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    await _get_owned_patient(db, pid, user)  # 404 se não for deste profissional
+    now = now_utc()
+    mine = (Session.owner_id == user.user_id, Session.patient_id == pid)
+    upcoming = (await db.execute(select(Session).where(*mine, Session.start_time >= now)
+                                 .order_by(Session.start_time.asc()).limit(limit))).scalars().all()
+    upcoming_total = await db.scalar(select(func.count()).select_from(Session).where(
+        *mine, Session.start_time >= now, _occupies_slot))
+    status = func.coalesce(Session.status, "agendada")
+    past = dict((await db.execute(select(status, func.count()).where(*mine, Session.start_time < now)
+                                  .group_by(status))).all())
+    records = await _record_ids_for_sessions(db, [s.id for s in upcoming])
+    return {
+        "upcoming": [session_public(s, records.get(s.id)) for s in upcoming],
+        "upcoming_total": upcoming_total,
+        "past": {key: past.get(key, 0) for key in ("realizada", "faltou", "cancelada", "agendada")},
+    }
 
 
 # ---------------------------------------------------------------------------

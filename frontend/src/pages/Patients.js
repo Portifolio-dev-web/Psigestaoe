@@ -2,7 +2,7 @@
 // IMPORTS
 // ============================================================================
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Plus, Search, MoreVertical, Pencil, Trash2, ShieldOff, FileText, Users, Loader2,
@@ -183,6 +183,8 @@ export default function Patients() {
   // STATE MANAGEMENT
   // ========================================================================
   const navigate = useNavigate();
+  // Análise de UI (O1): ?novo=1 (link "Cadastre o primeiro paciente") abre o cadastro.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [patients, setPatients] = useState(null);
   const [query, setQuery] = useState("");
   // ESCALA: a busca roda no servidor. `debouncedQuery` espera 300 ms sem
@@ -304,6 +306,14 @@ export default function Patients() {
     loadCurrentTerm(); // sempre o texto mais recente (nome/CRP/modelo podem ter mudado)
     setDialogOpen(true);
   };
+
+  // O1: chegou com ?novo=1 -> abre o cadastro; o parâmetro sai da URL (recarregar não reabre).
+  useEffect(() => {
+    if (searchParams.get("novo") !== "1") return;
+    openNew();
+    setSearchParams({}, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // ESCALA: a lista agora traz só um resumo (nome e datas). A edição busca a
   // ficha completa antes de abrir o formulário: sem isso, salvar enviaria
@@ -669,13 +679,14 @@ function PatientSearch({ query, onQueryChange }) {
   // Correção (varredura de UI, defeito 7): o campo não tinha largura própria e,
   // na linha ao lado do filtro Ativos/Arquivados, encolhia até cortar o texto de
   // ajuda ("Buscar por nome (mín. 2"). Agora ocupa a largura disponível, até ~380 px.
+  // Análise de UI (P5): a busca aceita também telefone (com ou sem DDD) e CPF.
   return (
     <div className="relative w-full sm:max-w-sm">
       <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" aria-hidden="true" />
       <Input
         maxLength={LIMITS.search} // varredura, item 2: o servidor aceita até 120 caracteres
-        aria-label="Buscar paciente por nome"
-        placeholder="Buscar por nome (mín. 2 letras)..."
+        aria-label="Buscar paciente por nome, telefone ou CPF"
+        placeholder="Buscar por nome, telefone ou CPF..."
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
         className="pl-9"
@@ -738,8 +749,9 @@ function PatientContent({ patients, filtered, navigate, showArchived, searching,
           {showArchived ? "Nenhum paciente arquivado" : "Nenhum paciente encontrado"}
         </p>
         <p className="mt-1 text-sm text-slate-500">
+          {/* P5: explica as três formas de busca (o telefone precisa de 8 números ou mais). */}
           {searching
-            ? "Nenhum nome começa com o que foi digitado. A busca considera o início de cada palavra."
+            ? "A busca considera o início de cada palavra do nome, o telefone (pelo menos 8 números, com ou sem DDD) e o CPF."
             : showArchived
               ? "Pacientes arquivados saem da lista ativa, mas os prontuários continuam guardados."
               : "Cadastre seu primeiro paciente para começar."}

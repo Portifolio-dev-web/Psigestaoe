@@ -30,7 +30,11 @@ import {
 //   - fluxo clínico (C4): status "Faltou" (o paciente não veio);
 //   - fluxo clínico (P1): sessão nova pode se repetir (toda semana / a cada 2
 //     semanas, N sessões); numa sessão de série, alterar ou remover "só esta"
-//     ou "esta e as próximas".
+//     ou "esta e as próximas";
+//   - análise de UI (P6): o paciente vem primeiro e o título é OPCIONAL (era
+//     obrigatório e quase sempre "Sessão"); em branco, o servidor gera
+//     "Sessão" (com paciente) ou "Compromisso" (sem paciente);
+//   - análise de UI (P2): `initial` pode trazer o paciente (agendar pela ficha).
 // ---------------------------------------------------------------------------
 
 const DURATIONS = [30, 50, 60, 90];
@@ -43,7 +47,7 @@ function toForm(initial) {
       id: initial.id,
       patient_id: initial.patient_id || "",
       patient_name: initial.patient_name || "",
-      title: initial.title || "Sessão",
+      title: initial.title || "",
       start: toLocalInput(start),
       end: toLocalInput(end),
       status: initial.status || "agendada",
@@ -54,7 +58,8 @@ function toForm(initial) {
   }
   const start = initial?.start || new Date();
   return {
-    id: null, patient_id: "", patient_name: "", title: "Sessão",
+    // P2: vindo da ficha, o paciente já está escolhido. P6: título em branco (automático).
+    id: null, patient_id: initial?.patient_id || "", patient_name: initial?.patient_name || "", title: "",
     start: toLocalInput(start), end: toLocalInput(addMinutes(start, DEFAULT_SESSION_MINUTES)),
     status: "agendada", notes: "",
     // P1: repetição da sessão nova ("" = não repete).
@@ -110,12 +115,12 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
     // F1: todos os problemas de uma vez, cada um no seu campo, e o foco no primeiro.
     const start = localInputToISO(form.start);
     const end = localInputToISO(form.end);
+    // P6: o título não é mais obrigatório (em branco, o servidor gera).
     const found = {
-      title: form.title.trim() ? "" : "Informe um título.",
       start: start ? "" : "Informe o início da sessão.",
       end: start && end && new Date(end) <= new Date(start) ? "O término deve ser depois do início." : "",
     };
-    const first = ["title", "start", "end"].find((key) => found[key]);
+    const first = ["start", "end"].find((key) => found[key]);
     if (first) {
       setErrors(found);
       document.getElementById(`session-${first}`)?.focus();
@@ -155,18 +160,24 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
           <DialogDescription>Agende ou edite uma sessão clínica.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          <div>
-            <Label htmlFor="session-title">Título</Label>
-            <Input id="session-title" value={form.title} maxLength={200}
-              onChange={(e) => { setForm({ ...form, title: e.target.value }); setErrors({ ...errors, title: "" }); }}
-              {...fieldError("title")} className={`mt-1.5 ${errors.title ? "border-red-500" : ""}`} data-testid="session-title-input" />
-            <ErrorText id="session-title" message={errors.title} />
-          </div>
+          {/* P6: o paciente vem primeiro (é o que define a sessão). */}
           <div>
             {/* Acessibilidade (varredura de UI): rótulo ligado ao seletor (htmlFor/id). */}
             <Label htmlFor="session-patient">Paciente</Label>
             <PatientPicker id="session-patient" value={form.patient_id} valueLabel={form.patient_name}
               onChange={(p) => setForm({ ...form, patient_id: p ? p.id : "", patient_name: p ? p.full_name : "" })} />
+          </div>
+          <div>
+            {/* P6: opcional. O texto de exemplo mostra o que será gravado se ficar em branco. */}
+            <Label htmlFor="session-title">Título <span className="font-normal text-slate-500">(opcional)</span></Label>
+            <Input id="session-title" value={form.title} maxLength={200}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              placeholder={form.patient_id || form.patient_name ? "Sessão" : "Compromisso (ex.: supervisão)"}
+              aria-describedby="session-title-hint" className="mt-1.5" data-testid="session-title-input" />
+            <p id="session-title-hint" className="mt-1 text-xs text-slate-500">
+              Em branco, fica “{form.patient_id || form.patient_name ? "Sessão" : "Compromisso"}”. Use para algo
+              diferente, como “Avaliação inicial”.
+            </p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>

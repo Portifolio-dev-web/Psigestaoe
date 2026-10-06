@@ -12,7 +12,8 @@ import { LIMITS } from "@/lib/validation";
 // lista suspensa. Agora:
 //   - ao abrir, mostra os 20 cadastrados mais recentemente;
 //   - ao digitar 2+ letras, busca pelo índice cego (POST /patients/search,
-//     com o nome no corpo da requisição, nunca na URL).
+//     com o nome no corpo da requisição, nunca na URL). Análise de UI (P5):
+//     o mesmo campo aceita telefone e CPF.
 // `value` é o id escolhido; `valueLabel`, o nome a exibir (vem da própria
 // sessão ao editar, sem precisar buscar o paciente de novo).
 // `id`: liga o seletor ao <Label htmlFor> de quem o usa (acessibilidade, varredura de UI).
@@ -63,7 +64,7 @@ export default function PatientPicker({ id, value, valueLabel, onChange }) {
       <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
         <Command shouldFilter={false}>
           {/* Segurança (varredura, item 2): o servidor aceita buscas de até 120 caracteres. */}
-          <CommandInput placeholder="Buscar paciente pelo nome..." value={query} onValueChange={setQuery} maxLength={LIMITS.search} />
+          <CommandInput placeholder="Nome, telefone ou CPF..." value={query} onValueChange={setQuery} maxLength={LIMITS.search} />
           <CommandList>
             <CommandGroup>
               <CommandItem value="__sem_paciente__" onSelect={() => choose(null)}>

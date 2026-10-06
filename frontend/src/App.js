@@ -1,12 +1,13 @@
 import { Suspense, lazy, useRef } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import AppLayout from "@/components/AppLayout";
 import TermsGate from "@/components/TermsGate";
 import LockScreen from "@/components/LockScreen";
 import RouteAnnouncer from "@/components/RouteAnnouncer";
+import PublicPageShell from "@/components/PublicPageShell";
 import { IdleLockProvider } from "@/context/IdleLockContext";
 import { Loader2 } from "lucide-react";
 
@@ -24,6 +25,7 @@ const PatientDetail = lazy(() => import("@/pages/PatientDetail"));
 const Agenda = lazy(() => import("@/pages/Agenda"));
 const Settings = lazy(() => import("@/pages/Settings"));
 const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
+const Help = lazy(() => import("@/pages/Help"));
 
 function LoadingScreen() {
   return (
@@ -71,6 +73,22 @@ function ProtectedRoute({ children }) {
   );
 }
 
+// Análise de UI (O2): telas do sistema que abrem também SEM login. A Ajuda é
+// para quem não consegue entrar, também. Logado: dentro do sistema (menu ao lado,
+// mesma moldura das outras telas). Sem login: na moldura das páginas públicas.
+// O ramo é o mesmo das telas protegidas, para o menu não ser recriado ao
+// navegar entre elas e a Ajuda.
+const OPEN_WITHOUT_LOGIN = ["/ajuda"];
+
+function AppBranch() {
+  const { user, loading } = useAuth();
+  const { pathname } = useLocation();
+  if (!loading && !user && OPEN_WITHOUT_LOGIN.includes(pathname)) {
+    return <PublicPageShell><Outlet /></PublicPageShell>;
+  }
+  return <ProtectedRoute><AppLayout /></ProtectedRoute>;
+}
+
 function PublicOnly({ children }) {
   const { user, loading } = useAuth();
   const location = useLocation();
@@ -99,12 +117,14 @@ function AppRouter() {
       <Route path="/redefinir-senha" element={<EmailLinkPassword purpose="password_reset" />} />
       {/* Pública para todos (logado ou não): a política deve poder ser lida antes do aceite. */}
       <Route path="/privacidade" element={<PrivacyPolicy />} />
-      <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+      <Route element={<AppBranch />}>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/pacientes" element={<Patients />} />
         <Route path="/pacientes/:id" element={<PatientDetail />} />
         <Route path="/agenda" element={<Agenda />} />
         <Route path="/configuracoes" element={<Settings />} />
+        {/* O2: Ajuda (abre também sem login, ver AppBranch). */}
+        <Route path="/ajuda" element={<Help />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

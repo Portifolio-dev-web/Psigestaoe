@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { format, isToday } from "date-fns";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { format, isSameDay, isToday } from "date-fns";
 import { ptBR } from "date-fns/locale";
+import { useAuth } from "@/context/AuthContext";
 import {
-  HOUR_HEIGHT, STATUS, THREE_DAYS, defaultNewSessionStart, dragState, formatTimeRange, layoutDay, snapMinutes,
+  HOUR_HEIGHT, STATUS, THREE_DAYS, defaultNewSessionStart, dragState, formatTimeRange, layoutDay, sessionInterval,
+  snapMinutes,
 } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
@@ -12,11 +15,50 @@ import {
 //   - clicar num horário vazio cria a sessão ali (encaixe de 15 min);
 //   - arrastar uma sessão para outro horário/dia remarca, mantendo a duração
 //     e o ponto onde ela foi "pega" (a Agenda pergunta se houver conflito);
-//   - linha vermelha marca a hora atual; a grade abre rolada nas 07:00.
+//   - linha vermelha marca a hora atual.
 // Arrastar é atalho de mouse; pelo teclado, a sessão abre no formulário.
+//
+// Análise de UI (P7): antes a grade tinha as 24 horas e abria rolada nas
+// 07:00 (rolagem para chegar à tarde, madrugada inteira à toa). Agora mostra o
+// HORÁRIO DE ATENDIMENTO do profissional (Configurações > Agenda; padrão
+// 07:00 às 21:00). Nada fica escondido: uma sessão fora do horário estende a
+// grade até ela. "Mostrar 24 horas" volta ao dia inteiro (lembrado neste navegador).
 // ---------------------------------------------------------------------------
 
-const HOURS = Array.from({ length: 24 }, (_, h) => h);
+const DEFAULT_HOURS = [7, 21]; // mesmo padrão do servidor (DEFAULT_AGENDA_HOURS)
+const FULL_DAY_KEY = "psi:agenda-full-day";
+const readFullDay = () => {
+  try {
+    return window.localStorage.getItem(FULL_DAY_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+const storeFullDay = (value) => {
+  try {
+    window.localStorage.setItem(FULL_DAY_KEY, value ? "1" : "0");
+  } catch {
+    // sem armazenamento: vale até sair da agenda
+  }
+};
+const hourLabel = (h) => `${String(h).padStart(2, "0")}:00`;
+
+/**
+ * P7: faixa de horas da grade [first, last). Parte do horário de atendimento
+ * e estende para caber toda sessão dos dias visíveis (nada fica escondido).
+ */
+function visibleHours(days, sessions, [startHour, endHour], fullDay) {
+  let first = fullDay ? 0 : startHour;
+  let last = fullDay ? 24 : endHour;
+  sessions.forEach((session) => {
+    const { start, end } = sessionInterval(session);
+    if (!days.some((day) => isSameDay(day, start))) return;
+    first = Math.min(first, start.getHours());
+    const endsSameDay = isSameDay(start, end);
+    last = Math.max(last, endsSameDay ? end.getHours() + (end.getMinutes() > 0 ? 1 : 0) : 24);
+  });
+  return [first, last];
+}
 
 function useNow(intervalMs) {
   const [now, setNow] = useState(() => new Date());
@@ -34,10 +76,28 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
   const scrollRef = useRef(null);
   const now = useNow(60000);
   const multiDay = days.length > 1;
+  // P7: horário de atendimento do profissional (vem de /auth/me).
+  const { user } = useAuth();
+  const workHours = [user?.agenda_start_hour ?? DEFAULT_HOURS[0], user?.agenda_end_hour ?? DEFAULT_HOURS[1]];
+  const [fullDay, setFullDay] = useState(readFullDay);
+  const [first, last] = useMemo(
+    () => visibleHours(days, sessions, workHours, fullDay),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [days, sessions, workHours[0], workHours[1], fullDay],
+  );
+  const hours = Array.from({ length: last - first }, (_, i) => first + i);
+  const gridHeight = (last - first) * HOUR_HEIGHT;
 
+  // Dia inteiro: abre rolada no início do atendimento. Só o horário: abre no topo.
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = 7 * HOUR_HEIGHT - 8; // começa às 07:00
-  }, []);
+    if (scrollRef.current) scrollRef.current.scrollTop = fullDay ? Math.max(workHours[0] * HOUR_HEIGHT - 8, 0) : 0;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullDay]);
+
+  const toggleFullDay = () => setFullDay((current) => {
+    storeFullDay(!current);
+    return !current;
+  });
 
   const columns = `56px repeat(${days.length}, minmax(0, 1fr))`;
 
@@ -77,31 +137,53 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
 
         <div ref={scrollRef} className="psi-scroll relative max-h-[65vh] overflow-y-auto" data-testid="time-grid">
           <div className="grid" style={{ gridTemplateColumns: columns }}>
-            <div className="relative" style={{ height: 24 * HOUR_HEIGHT }} aria-hidden="true">
-              {HOURS.map((h) => (
-                <span key={h} className="absolute right-2 -translate-y-1/2 text-[10px] text-slate-500" style={{ top: h * HOUR_HEIGHT }}>
-                  {h === 0 ? "" : `${String(h).padStart(2, "0")}:00`}
+            <div className="relative" style={{ height: gridHeight }} aria-hidden="true">
+              {hours.map((h) => (
+                // P7: a primeira hora da grade fica alinhada ao topo (centralizada, seria cortada).
+                <span key={h} className={`absolute right-2 text-[10px] text-slate-500 ${h === first ? "translate-y-0.5" : "-translate-y-1/2"}`}
+                  style={{ top: (h - first) * HOUR_HEIGHT }}>
+                  {h === 0 ? "" : hourLabel(h)}
                 </span>
               ))}
             </div>
             {days.map((day) => (
-              <DayColumn key={day.toISOString()} day={day} sessions={sessions} now={now}
+              <DayColumn key={day.toISOString()} day={day} sessions={sessions} now={now} first={first} last={last}
                 onCreateAt={onCreateAt} onOpenSession={onOpenSession} onMoveSession={onMoveSession} />
             ))}
           </div>
         </div>
       </div>
+      {/* P7: o horário mostrado, como ver o dia inteiro e onde mudar o horário. */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600" data-testid="agenda-hours">
+        <span>
+          {fullDay ? "Mostrando as 24 horas." : `Horário de atendimento: ${hourLabel(workHours[0])} às ${hourLabel(workHours[1])}.`}
+        </span>
+        <button type="button" onClick={toggleFullDay}
+          className="min-h-6 rounded-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+          data-testid="agenda-full-day-toggle">
+          {fullDay ? "Mostrar só o horário de atendimento" : "Mostrar 24 horas"}
+        </button>
+        <Link to="/configuracoes?aba=agenda"
+          className="inline-flex min-h-6 items-center rounded-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+          Alterar o horário
+        </Link>
+      </div>
     </div>
   );
 }
 
-function DayColumn({ day, sessions, now, onCreateAt, onOpenSession, onMoveSession }) {
+// `first`/`last` (P7): faixa de horas da grade; as posições são medidas a partir de `first`.
+function DayColumn({ day, sessions, now, first, last, onCreateAt, onOpenSession, onMoveSession }) {
   const [dropTop, setDropTop] = useState(null);
+  const offset = first * HOUR_HEIGHT;
   const placed = layoutDay(sessions, day);
-  const nowTop = isToday(day) ? ((now.getHours() * 60 + now.getMinutes()) / 60) * HOUR_HEIGHT : null;
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const nowTop = isToday(day) && nowMinutes >= first * 60 && nowMinutes < last * 60
+    ? ((nowMinutes - first * 60) / 60) * HOUR_HEIGHT : null;
 
   const timeFromEvent = (event, offsetMinutes = 0) => {
-    const minutes = Math.min(Math.max(snapMinutes(minutesAt(event, event.currentTarget) - offsetMinutes), 0), 24 * 60 - 15);
+    const minutes = Math.min(Math.max(snapMinutes(minutesAt(event, event.currentTarget) + first * 60 - offsetMinutes), first * 60),
+      last * 60 - 15);
     const at = new Date(day);
     at.setHours(0, minutes, 0, 0);
     return { at, minutes };
@@ -110,7 +192,7 @@ function DayColumn({ day, sessions, now, onCreateAt, onOpenSession, onMoveSessio
   return (
     <div className="relative border-l border-slate-100"
       style={{
-        height: 24 * HOUR_HEIGHT,
+        height: (last - first) * HOUR_HEIGHT,
         // linhas das horas (cheia) e meias horas (pontilhada) desenhadas no fundo
         backgroundImage: `linear-gradient(to bottom, #e2e8f0 1px, transparent 1px), linear-gradient(to bottom, #f1f5f9 1px, transparent 1px)`,
         backgroundSize: `100% ${HOUR_HEIGHT}px, 100% ${HOUR_HEIGHT / 2}px`,
@@ -119,7 +201,7 @@ function DayColumn({ day, sessions, now, onCreateAt, onOpenSession, onMoveSessio
       onDragOver={(event) => {
         event.preventDefault();
         const grab = dragState.current?.grabMinutes || 0;
-        setDropTop((timeFromEvent(event, grab).minutes / 60) * HOUR_HEIGHT);
+        setDropTop(((timeFromEvent(event, grab).minutes - first * 60) / 60) * HOUR_HEIGHT);
       }}
       onDragLeave={() => setDropTop(null)}
       onDrop={(event) => {
@@ -150,7 +232,7 @@ function DayColumn({ day, sessions, now, onCreateAt, onOpenSession, onMoveSessio
           onDragEnd={() => setDropTop(null)}
           onClick={(event) => { event.stopPropagation(); onOpenSession(session); }}
           className={`absolute z-10 overflow-hidden rounded-md border-l-4 px-1.5 py-0.5 text-left text-[11px] leading-tight shadow-sm transition-shadow hover:shadow-md ${STATUS[session.status]?.block || STATUS.agendada.block}`}
-          style={{ top, height, left: `calc(${(col / cols) * 100}% + 2px)`, width: `calc(${100 / cols}% - 4px)` }}
+          style={{ top: top - offset, height, left: `calc(${(col / cols) * 100}% + 2px)`, width: `calc(${100 / cols}% - 4px)` }}
           aria-label={`${formatTimeRange(session)}, ${session.patient_name || session.title}, ${STATUS[session.status]?.label || ""}`}
           data-testid={`grid-session-${session.id}`}>
           <span className="block font-semibold">{formatTimeRange(session)}</span>

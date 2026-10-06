@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { Stethoscope } from "lucide-react";
 import { GradientWave } from "@/components/ui/gradient-wave";
 
@@ -53,6 +54,14 @@ export default function AuthShell({ headline, tagline, children }) {
             </div>
           </div>
           {children}
+          {/* Análise de UI (O2): ajuda e contato também para quem ainda não entrou
+              (esqueceu a senha, não recebeu o e-mail, perdeu o celular da verificação). */}
+          <p className="mt-8 text-center text-xs text-slate-500">
+            <Link to="/ajuda" className="inline-flex min-h-6 items-center rounded-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+              data-testid="auth-help-link">
+              Precisa de ajuda?
+            </Link>
+          </p>
         </div>
       </main>
     </div>

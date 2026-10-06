@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2, LifeBuoy,
 } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import api from "@/lib/api";
@@ -19,6 +19,8 @@ const nav = [
   // UX (Configurações em abas): a página reúne conta, termo, privacidade e
   // auditoria; o nome antigo ("Privacidade & LGPD") escondia a troca de senha.
   { to: "/configuracoes", label: "Configurações", icon: Settings, id: "config" },
+  // Análise de UI (O2): antes não havia "Ajuda" nem contato de suporte em nenhuma tela.
+  { to: "/ajuda", label: "Ajuda", icon: LifeBuoy, id: "ajuda" },
 ];
 
 // Fluxo clínico (C2): quantas sessões já aconteceram e estão sem evolução

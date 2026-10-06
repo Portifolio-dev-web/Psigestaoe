@@ -53,6 +53,24 @@ def _controller() -> dict:
     }
 
 
+def contact_info() -> dict:
+    """Análise de UI (O2): contatos mostrados na página de Ajuda.
+
+    Antes não havia "Ajuda" nem contato de suporte em nenhuma tela, e o contato
+    do encarregado (LGPD, art. 41) só aparecia dentro da política.
+    - support_email: SUPPORT_EMAIL (opcional; dúvidas de uso e problemas de acesso);
+    - dpo_*: o encarregado, os mesmos dados da política (PRIVACY_DPO_*).
+    Campo não configurado volta vazio, e a tela não mostra a linha (em vez do
+    marcador "[A PREENCHER]", que é para a política acusar a falta)."""
+    c = _controller()
+    clean = lambda value: "" if value == _PLACEHOLDER else value  # noqa: E731
+    return {
+        "support_email": os.environ.get("SUPPORT_EMAIL", "").strip(),
+        "dpo_name": clean(c["dpo_name"]),
+        "dpo_email": clean(c["dpo_email"]),
+    }
+
+
 def warn_if_incomplete(environment: str) -> None:
     """A LGPD (art. 41) exige divulgar a identidade e o contato do encarregado.
     Publicar a política com campos vazios em produção é descumprimento."""

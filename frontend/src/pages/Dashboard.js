@@ -14,6 +14,8 @@ import { formatDateOnly } from "@/lib/datetime";
 import { STATUS, evolutionPath, formatDateParam, formatTimeRange, isNoShow } from "@/components/agenda/agendaUtils";
 import SecurityNudge from "@/components/SecurityNudge";
 import PendingEvolutions from "@/components/PendingEvolutions";
+import FirstSteps from "@/components/FirstSteps";
+import { useAuth } from "@/context/AuthContext";
 
 // Correção (varredura de UI, defeito 1): antes `new Date(s).toLocaleDateString()`,
 // que mostrava o nascimento UM DIA ANTES no Brasil (ver lib/datetime.js).
@@ -160,6 +162,7 @@ function TodaySessions() {
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   useEffect(() => {
     // Sessão bloqueada/expirada é tratada pelo AuthContext (ver lib/api.js).
@@ -176,9 +179,13 @@ export default function Dashboard() {
         <p className="mt-1 text-sm text-slate-500">Visão geral da sua prática clínica</p>
       </div>
 
+      {/* Análise de UI (O1): conta nova -> "Primeiros passos" (some quando tudo está feito). */}
+      <FirstSteps onboarding={stats?.onboarding} />
       {/* UX: a agenda do dia vem primeiro (no celular, antes dos totais). */}
-      {/* Segurança (backlog: MFA opcional): convite para ativar a verificação em duas etapas. */}
-      <SecurityNudge />
+      {/* Segurança (backlog: MFA opcional): convite para ativar a verificação em duas etapas.
+          O1: enquanto os "Primeiros passos" não foram ocultados, o convite é um dos passos
+          da lista; a faixa mostra só o aviso de códigos de recuperação acabando. */}
+      <SecurityNudge hideInvite={!user?.onboarding_dismissed} />
       <TodaySessions />
       {/* Fluxo clínico (C2): sessões de dias anteriores ainda sem evolução. */}
       <PendingEvolutions />

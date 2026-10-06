@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import api, { API, formatApiErrorDetail } from "@/lib/api";
 import { motion } from "framer-motion";
@@ -7,6 +7,7 @@ import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
 import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
 import RecordEditorDialog from "@/components/RecordEditorDialog";
 import RecordHistoryDialog from "@/components/RecordHistoryDialog";
+import PatientAgendaCard from "@/components/PatientAgendaCard";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -77,6 +78,9 @@ export default function PatientDetail() {
   const [historyOf, setHistoryOf] = useState(null);
   // Evolução a destacar ao chegar pela agenda/painel ("Ver evolução").
   const [highlightId, setHighlightId] = useState(null);
+  // P2: avisa o cartão da agenda que algo mudou (uma evolução registrada a partir
+  // de uma sessão marca a sessão como realizada).
+  const [agendaVersion, setAgendaVersion] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Período em parâmetros da API: "Até 10/03" inclui o dia 10 inteiro (o
@@ -120,7 +124,10 @@ export default function PatientDetail() {
     }
   }, [id, recordsParams]);
 
-  const load = useCallback(() => Promise.all([loadPatient(), loadRecords()]), [loadPatient, loadRecords]);
+  const load = useCallback(() => {
+    setAgendaVersion((v) => v + 1); // P2: a agenda da ficha também recarrega
+    return Promise.all([loadPatient(), loadRecords()]);
+  }, [loadPatient, loadRecords]);
 
   useEffect(() => { loadPatient(); }, [loadPatient]);
   useEffect(() => { loadRecords(); }, [loadRecords]);
@@ -342,6 +349,9 @@ export default function PatientDetail() {
               </DropdownMenu>
             </div>
           </Card>
+          {/* Análise de UI (P2): próximas sessões e "Agendar sessão" na própria ficha. */}
+          <PatientAgendaCard patient={patient} canSchedule={!patient.archived && !patient.anonymized}
+            refreshKey={agendaVersion} />
         </div>
 
         {/* Right: records */}
@@ -434,7 +444,8 @@ export default function PatientDetail() {
                         <p className="text-sm text-slate-700">{r.diagnosis}</p>
                       </div>
                     )}
-                    <p className="mt-3 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700">{r.content}</p>
+                    {/* Análise de UI (P4): evoluções longas aparecem recolhidas, com "Ler mais". */}
+                    <ClampedText id={`record-text-${r.id}`} text={r.content} startExpanded={highlightId === r.id} />
                     {/* Correção (varredura de UI, defeito 4): dizia "Registro imutável"
                         ao lado do botão de editar. A evolução É editável; o que não se
                         perde são as versões anteriores, guardadas a cada edição. */}
@@ -478,6 +489,54 @@ export default function PatientDetail() {
       <RecordHistoryDialog recordId={historyOf} open={Boolean(historyOf)}
         onOpenChange={(open) => { if (!open) setHistoryOf(null); }} />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Análise de UI (P4): a ficha mostrava cada evolução INTEIRA. Com anos de
+// atendimento, achar uma sessão exigia rolar páginas de texto. Agora cada
+// evolução mostra as primeiras CLAMP_LINES linhas e "Ler mais" abre o resto
+// ali mesmo (sem trocar de tela). O botão só aparece quando há o que abrir:
+// a altura real do texto é medida (scrollHeight conta também a parte
+// escondida), e medida de novo se a largura mudar (girar o celular).
+// A evolução destacada (vinda da agenda ou do painel) já abre inteira.
+// ---------------------------------------------------------------------------
+const CLAMP_LINES = 6;
+
+function ClampedText({ id, text, startExpanded = false }) {
+  const ref = useRef(null);
+  const [expanded, setExpanded] = useState(startExpanded);
+  const [long, setLong] = useState(false);
+
+  useEffect(() => { if (startExpanded) setExpanded(true); }, [startExpanded]);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const lineHeight = parseFloat(window.getComputedStyle(el).lineHeight) || 24;
+      setLong(el.scrollHeight > lineHeight * CLAMP_LINES + 2);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
+
+  return (
+    <>
+      <p id={id} ref={ref}
+        className={`mt-3 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700 ${expanded ? "" : "line-clamp-6"}`}>
+        {text}
+      </p>
+      {long && (
+        <button type="button" onClick={() => setExpanded((open) => !open)} aria-expanded={expanded} aria-controls={id}
+          className="mt-1 min-h-6 rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+          data-testid={`${id}-toggle`}>
+          {expanded ? "Mostrar menos" : "Ler mais"}
+        </button>
+      )}
+    </>
   );
 }
 

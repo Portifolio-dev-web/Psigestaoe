@@ -135,6 +135,21 @@ class User(Base):
     closed_at = Column(DateTime(timezone=True), nullable=True)
     purge_after = Column(DateTime(timezone=True), nullable=True)
 
+    # PRODUTO (análise de UI, P7): horário de atendimento. A grade da agenda
+    # (Semana/Dia) mostra só estas horas, em vez das 24 h do dia. Sessões fora
+    # do horário continuam aparecendo: a grade se estende até elas.
+    # NULL = padrão (DEFAULT_AGENDA_HOURS em server.py). Fim exclusivo (21 = até 21:00).
+    agenda_start_hour = Column(Integer, nullable=True)
+    agenda_end_hour = Column(Integer, nullable=True)
+
+    # PRODUTO (análise de UI, O1): "Primeiros passos" no painel de uma conta nova.
+    # - consent_term_reviewed_at: o profissional revisou o termo de consentimento
+    #   (salvou o texto, mesmo sem mudar nada). É um dos passos da lista.
+    # - onboarding_dismissed_at: a lista foi ocultada ("Ocultar primeiros passos").
+    # Migração: alembic/versions/20261006_productivity.py
+    consent_term_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    onboarding_dismissed_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     # Relacionamentos
@@ -264,6 +279,12 @@ class Patient(Base):
     # o que o tira da lista ativa sem apagar nada.
     archived_at = Column(DateTime(timezone=True), nullable=True)
 
+    # PRODUTO (análise de UI, P5): versão do índice de busca deste paciente
+    # (SEARCH_INDEX_VERSION em crypto.py). A versão 2 passou a indexar também
+    # telefone e CPF; pacientes com versão menor (ou NULL) são reindexados pelo
+    # rebuild_search_index.py, que o prestart roda a cada implantação.
+    search_index_version = Column(Integer, nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
@@ -281,6 +302,8 @@ class PatientSearchToken(Base):
     """Índice cego da busca por nome (ESCALA). Ver crypto.name_search_tokens.
 
     Um paciente tem várias linhas: uma por prefixo de cada palavra do nome.
+    Desde a análise de UI (P5), também os finais do telefone (do paciente e do
+    responsável) e o CPF (crypto.contact_search_tokens), na mesma tabela.
     Nenhuma linha contém o nome; só HMACs que não podem ser revertidos sem a
     SEARCH_INDEX_KEY. É totalmente derivada: pode ser apagada e reconstruída
     com `python rebuild_search_index.py`.

@@ -36,6 +36,7 @@ os.environ["MAINTENANCE_ENABLED"] = "false"
 
 from database import Base, get_db
 import rate_limit
+import rebuild_search_index
 import rotate_encryption_key
 import server
 import legal
@@ -1232,7 +1233,10 @@ async def test_session_validation_and_patient_ownership(client):
 
     assert (await client.post("/api/sessions", json={**base, "status": "qualquer"})).status_code == 422
     assert (await client.post("/api/sessions", json={**base, "end": "2026-10-05T12:00:00Z"})).status_code == 422
-    assert (await client.post("/api/sessions", json={**base, "title": "   "})).status_code == 422
+    # Análise de UI (P6): título em branco deixou de ser erro; o servidor gera um.
+    # (outro horário: esta sessão agora é criada e ocuparia o das próximas)
+    untitled = await client.post("/api/sessions", json={**base, "title": "   ", "start": "2026-10-05T18:00:00Z"})
+    assert untitled.status_code == 200 and untitled.json()["title"] == "Compromisso"
 
     # O nome gravado vem do cadastro do paciente, não do que o navegador mandou.
     linked = await client.post("/api/sessions", json={**base, "patient_id": patient_id, "patient_name": "Nome falso"})
@@ -2577,3 +2581,171 @@ def test_minor_age_rule():
     assert server.is_minor(date(2008, 10, 6), today) is True    # faz 18 amanhã
     assert server.is_minor(date(2008, 10, 5), today) is False   # fez 18 hoje
     assert server.is_minor(None, today) is False
+
+
+# ---------------------------------------------------------------------------
+# Análise de UI: produtividade (P2, P5, P6, P7) e primeiro uso (O1, O2)
+# ---------------------------------------------------------------------------
+@pytest.mark.anyio
+async def test_search_by_phone_and_cpf_uses_blind_index(client):
+    """P5: quando o paciente liga, o que se tem é o telefone (ou o CPF)."""
+    await _register(client, "busca.telefone@example.com")
+    ana = (await client.post("/api/patients", json=patient_data(
+        "Ana Telefone", phone="(11) 91234-5678", cpf="529.982.247-25"))).json()["id"]
+    await client.post("/api/patients", json=patient_data("Bruno Outro", phone="(21) 3333-4444", cpf="123.456.789-09"))
+    birth = (date.today() - timedelta(days=365 * 10)).isoformat()
+    child = (await client.post("/api/patients", json={**patient_data(
+        "Criança Fone", birth_date=birth, rg="", marital_status="", profession="", phone="", email=""),
+        "guardian_name": "Mãe Fone", "guardian_cpf": "111.444.777-35", "guardian_relationship": "Mãe",
+        "guardian_phone": "(31) 98888-7777"})).json()["id"]
+
+    async def search(q):
+        response = await client.post("/api/patients/search", json={"q": q})
+        assert response.status_code == 200
+        return [p["id"] for p in response.json()["items"]]
+
+    for q in ("(11) 91234-5678", "11912345678", "91234-5678", "912345678", "+55 11 91234 5678", "1234-5678"):
+        assert await search(q) == [ana], q                      # com ou sem DDD, 9, +55
+    assert await search("529.982.247-25") == [ana]               # CPF com pontuação
+    assert await search("52998224725") == [ana]                  # CPF só números
+    assert await search("98888-7777") == [child]                 # telefone do responsável
+    assert await search("111.444.777-35") == [child]             # CPF do responsável
+    assert await search("91234") == []                           # menos de 8 dígitos: não identifica
+    assert await search("ana") == [ana]                          # busca por nome continua igual
+
+    # Nenhum token guarda o número em claro.
+    async with client.session_factory() as db:
+        tokens = (await db.execute(select(PatientSearchToken.token))).scalars().all()
+    assert not any("912345678" in t or "52998224725" in t for t in tokens)
+
+    # Edição troca o número no índice; anonimização tira os contatos (e os do responsável).
+    await client.put(f"/api/patients/{ana}", json=patient_data("Ana Telefone", phone="(11) 95555-0000",
+                                                                 cpf="529.982.247-25"))
+    assert await search("91234-5678") == [] and await search("95555-0000") == [ana]
+    anonymized = (await client.post(f"/api/patients/{child}/anonymize")).json()
+    assert anonymized["guardian_name"] == "" and anonymized["guardian_phone"] == "" and anonymized["guardian_cpf"] == ""
+    assert await search("98888-7777") == []
+
+    # Isolamento: outro profissional não acha o paciente pelo telefone.
+    await _register(client, "outro.telefone@example.com")
+    assert await search("95555-0000") == []
+
+
+@pytest.mark.anyio
+async def test_rebuild_search_index_adds_contacts_to_old_patients(client):
+    """P5: pacientes indexados antes (só nome) ganham telefone e CPF no rebuild."""
+    await _register(client, "indice.antigo@example.com")
+    pid = (await client.post("/api/patients", json=patient_data("Paciente Antigo", phone="(11) 97777-1234"))).json()["id"]
+    async with client.session_factory() as db:
+        # Simula o índice da versão 1: sem tokens de contato e sem versão.
+        await db.execute(PatientSearchToken.__table__.delete())
+        await db.execute(update(Patient).values(search_index_version=None))
+        await db.commit()
+    assert (await client.post("/api/patients/search", json={"q": "97777-1234"})).json()["items"] == []
+
+    assert await rebuild_search_index.rebuild(session_factory=client.session_factory) == 1
+    found = (await client.post("/api/patients/search", json={"q": "97777-1234"})).json()["items"]
+    assert [p["id"] for p in found] == [pid]
+    assert (await client.post("/api/patients/search", json={"q": "antigo"})).json()["items"][0]["id"] == pid
+    assert await rebuild_search_index.rebuild(session_factory=client.session_factory) == 0  # já atualizado
+
+
+@pytest.mark.anyio
+async def test_session_title_is_generated_when_blank(client):
+    """P6: o título era obrigatório e quase sempre "Sessão"."""
+    patient_id = await _create_patient(client, "titulo.auto@example.com")
+    with_patient = await client.post("/api/sessions", json={"start": "2026-11-02T13:00:00Z", "patient_id": patient_id})
+    assert with_patient.status_code == 200 and with_patient.json()["title"] == "Sessão"
+    alone = await client.post("/api/sessions", json={"start": "2026-11-03T13:00:00Z", "title": ""})
+    assert alone.json()["title"] == "Compromisso"
+    typed = await client.post("/api/sessions", json={"start": "2026-11-04T13:00:00Z", "title": " Avaliação inicial "})
+    assert typed.json()["title"] == "Avaliação inicial"
+
+
+@pytest.mark.anyio
+async def test_patient_sessions_for_the_record(client):
+    """P2: a ficha mostra as próximas sessões e o resumo do que já passou."""
+    patient_id = await _create_patient(client, "agenda.ficha@example.com")
+    other = (await client.post("/api/patients", json=patient_data("Outro Paciente"))).json()["id"]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    async def make(days, status="agendada", pid=patient_id):
+        start = (now + timedelta(days=days)).isoformat()
+        response = await client.post("/api/sessions", json={
+            "patient_id": pid, "start": start, "status": status, "allow_conflict": True})
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    await make(-14, "realizada")
+    await make(-7, "realizada")
+    await make(-3, "faltou")
+    first = await make(2)
+    await make(4, "cancelada")
+    third = await make(9)
+    await make(3, pid=other)  # de outro paciente: não aparece
+
+    data = (await client.get(f"/api/patients/{patient_id}/sessions")).json()
+    assert data["upcoming"][0]["id"] == first and data["upcoming"][-1]["id"] == third
+    assert len(data["upcoming"]) == 3            # inclui a cancelada (mostrada com o status)
+    assert data["upcoming_total"] == 2           # mas ela não ocupa horário
+    assert data["past"] == {"realizada": 2, "faltou": 1, "cancelada": 0, "agendada": 0}
+    assert len((await client.get(f"/api/patients/{patient_id}/sessions", params={"limit": 1})).json()["upcoming"]) == 1
+
+    await _register(client, "intruso.ficha@example.com")
+    assert (await client.get(f"/api/patients/{patient_id}/sessions")).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_agenda_hours_setting(client):
+    """P7: horário de atendimento da grade da agenda."""
+    await register_account(client, "horario@example.com")
+    me = (await client.get("/api/auth/me")).json()
+    assert (me["agenda_start_hour"], me["agenda_end_hour"]) == (7, 21)  # padrão
+
+    saved = await client.put("/api/auth/agenda-settings", json={"start_hour": 8, "end_hour": 19})
+    assert saved.status_code == 200 and (saved.json()["agenda_start_hour"], saved.json()["agenda_end_hour"]) == (8, 19)
+    assert (await client.put("/api/auth/agenda-settings", json={"start_hour": 0, "end_hour": 24})).status_code == 200
+    for bad in ({"start_hour": 10, "end_hour": 11}, {"start_hour": 9, "end_hour": 25}, {"start_hour": -1, "end_hour": 8}):
+        assert (await client.put("/api/auth/agenda-settings", json=bad)).status_code == 422, bad
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["detail"] == "Horário de atendimento: 08:00 às 19:00" for log in logs)
+
+
+@pytest.mark.anyio
+async def test_onboarding_first_steps(client):
+    """O1: os passos da lista "Primeiros passos" e o "Ocultar"."""
+    await register_account(client, "primeiros.passos@example.com")
+    stats = (await client.get("/api/dashboard/stats")).json()
+    assert stats["onboarding"] == {"has_patients": False, "has_sessions": False}
+    me = (await client.get("/api/auth/me")).json()
+    assert me["consent_term_reviewed"] is False and me["onboarding_dismissed"] is False
+
+    # Revisar o termo sem mudar nada também conta (e fica na auditoria como revisão).
+    term = (await client.get("/api/consent-term")).json()
+    assert (await client.put("/api/consent-term", json={"body": term["body"]})).json()["is_default"] is True
+    assert (await client.get("/api/auth/me")).json()["consent_term_reviewed"] is True
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["detail"] == "Modelo do termo de consentimento (revisado, sem alteração)" for log in logs)
+
+    pid = (await client.post("/api/patients", json=patient_data("Primeiro Paciente"))).json()["id"]
+    await client.post("/api/sessions", json={"patient_id": pid, "start": "2026-11-05T13:00:00Z"})
+    stats = (await client.get("/api/dashboard/stats")).json()
+    assert stats["onboarding"] == {"has_patients": True, "has_sessions": True}
+
+    assert (await client.put("/api/auth/onboarding", json={"dismissed": True})).json()["onboarding_dismissed"] is True
+    assert (await client.put("/api/auth/onboarding", json={"dismissed": False})).json()["onboarding_dismissed"] is False
+
+
+@pytest.mark.anyio
+async def test_help_contact_is_public(client, monkeypatch):
+    """O2: a página de Ajuda mostra o suporte e o encarregado, sem exigir login."""
+    monkeypatch.setenv("SUPPORT_EMAIL", "suporte@example.com")
+    monkeypatch.setenv("PRIVACY_DPO_NAME", "Encarregada Teste")
+    monkeypatch.setenv("PRIVACY_DPO_EMAIL", "dpo@example.com")
+    data = (await client.get("/api/legal/contact")).json()
+    assert data == {"support_email": "suporte@example.com", "dpo_name": "Encarregada Teste", "dpo_email": "dpo@example.com"}
+    # Não configurado: vazio (a tela esconde a linha), nunca o marcador "[A PREENCHER]".
+    monkeypatch.delenv("SUPPORT_EMAIL")
+    monkeypatch.delenv("PRIVACY_DPO_EMAIL")
+    data = (await client.get("/api/legal/contact")).json()
+    assert data["support_email"] == "" and data["dpo_email"] == ""

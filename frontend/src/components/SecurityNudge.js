@@ -13,6 +13,9 @@ import { Button } from "@/components/ui/button";
 // "Agora não" esconde o convite NESTE aparelho por 30 dias (localStorage é só
 // conveniência: se não houver, o convite simplesmente volta a aparecer).
 // Quem entra só pelo Google não vê o convite: usa a verificação da conta Google.
+// Análise de UI (O1): `hideInvite` esconde o convite enquanto a lista
+// "Primeiros passos" do painel está ativa (ativar as duas etapas é um dos
+// passos; dois convites iguais na mesma tela seriam ruído).
 // ---------------------------------------------------------------------------
 const SNOOZE_DAYS = 30;
 const snoozeKey = (userId) => `psi:mfa-nudge:${userId}`;
@@ -26,13 +29,13 @@ function snoozed(userId) {
   }
 }
 
-export default function SecurityNudge() {
+export default function SecurityNudge({ hideInvite = false }) {
   const { user } = useAuth();
   const [hidden, setHidden] = useState(() => (user ? snoozed(user.user_id) : true));
   if (!user) return null;
 
   const lowCodes = user.mfa_enabled && user.mfa_recovery_codes_left <= 2;
-  const invite = user.has_password && !user.mfa_enabled && !hidden;
+  const invite = user.has_password && !user.mfa_enabled && !hidden && !hideInvite;
   if (!lowCodes && !invite) return null;
 
   const dismiss = () => {

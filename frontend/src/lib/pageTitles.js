@@ -23,6 +23,7 @@ const PAGES = [
   [/^\/pacientes\/[^/]+\/?$/, "Ficha do paciente"],
   [/^\/agenda\/?$/, "Agenda"],
   [/^\/configuracoes\/?$/, "Configurações"],
+  [/^\/ajuda\/?$/, "Ajuda"],  // análise de UI, O2
 ];
 
 /** { name: "Pacientes", full: "Pacientes · PsiGestão" } para o endereço dado. */

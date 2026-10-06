@@ -185,3 +185,67 @@ def query_search_tokens(key: bytes, owner_id: str, query: str) -> list:
         for word in normalize_search_words(query)
         if len(word) >= SEARCH_MIN_PREFIX
     ]
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO (análise de UI, P5): busca por TELEFONE e CPF no mesmo índice cego
+# ---------------------------------------------------------------------------
+# Quando o paciente liga, o que se tem na mão é o número dele, não o nome.
+# Mesma técnica da busca por nome: guardamos só HMACs (com a SEARCH_INDEX_KEY
+# e o owner_id), nunca o número. Os fragmentos ganham um prefixo ("tel:",
+# "cpf:") que nenhuma palavra de nome tem (palavras só têm letras e números),
+# então um token de telefone nunca bate com um de nome.
+#
+# Telefone: indexamos os FINAIS do número, do 8º dígito em diante
+# ("12345678", "912345678", "11912345678"). Assim a busca acha o paciente com
+# ou sem DDD, com ou sem o 9 da frente, e com +55. Menos de 8 dígitos não
+# identificam ninguém (e vazariam mais), então não há token para eles.
+# CPF: só o número completo (11 dígitos), sem pontos e traço.
+#
+# Limite, documentado de propósito como o do nome: quem tiver a chave pode
+# testar números por força bruta. Por isso a chave é separada e obrigatória.
+SEARCH_INDEX_VERSION = 2   # 1 = só nome; 2 = nome + telefone + CPF
+PHONE_MIN_DIGITS = 8
+
+
+def _digits(text: str) -> str:
+    return re.sub(r"\D", "", text or "")
+
+
+def _phone_digits(text: str) -> str:
+    """Só os dígitos, sem o código do país (+55) e sem o zero de operadora."""
+    digits = _digits(text)
+    if len(digits) >= 12 and digits.startswith("55"):
+        digits = digits[2:]
+    return digits.lstrip("0")
+
+
+def contact_search_tokens(key: bytes, owner_id: str, phones=(), cpfs=()) -> set:
+    """Tokens gravados para os telefones e CPFs de um paciente."""
+    tokens = set()
+    for phone in phones:
+        digits = _phone_digits(phone)
+        for size in range(PHONE_MIN_DIGITS, len(digits) + 1):
+            tokens.add(_search_token(key, owner_id, "tel:" + digits[-size:]))
+    for cpf in cpfs:
+        digits = _digits(cpf)
+        if len(digits) == 11:
+            tokens.add(_search_token(key, owner_id, "cpf:" + digits))
+    return tokens
+
+
+def query_contact_tokens(key: bytes, owner_id: str, query: str) -> list:
+    """A busca digitada é um telefone ou CPF? Então devolve os tokens a
+    procurar (basta UM bater: o mesmo número pode ser telefone ou CPF).
+    Nome (ou número curto demais) -> lista vazia, e vale a busca por nome."""
+    text = (query or "").strip()
+    # Só números e a pontuação de telefone/CPF: "(11) 91234-5678", "123.456.789-09".
+    if not text or re.search(r"[^\d\s().+\-/]", text):
+        return []
+    digits = _phone_digits(text)
+    if len(digits) < PHONE_MIN_DIGITS:
+        return []
+    tokens = [_search_token(key, owner_id, "tel:" + digits)]
+    if len(_digits(text)) == 11:
+        tokens.append(_search_token(key, owner_id, "cpf:" + _digits(text)))
+    return tokens

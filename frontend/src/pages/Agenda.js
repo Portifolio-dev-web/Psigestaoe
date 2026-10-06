@@ -1,27 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock, Loader2, Plus } from "lucide-react";
-import api, { formatApiErrorDetail } from "@/lib/api";
+import api from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
-  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import SessionDialog from "@/components/agenda/SessionDialog";
 import MonthView from "@/components/agenda/MonthView";
 import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
-import { useSingleFlight } from "@/hooks/useSingleFlight";
-import { notifyPendingEvolutionsChanged } from "@/lib/pendingEvolutions";
+import { useSessionActions } from "@/components/agenda/useSessionActions";
 import { WIDE_SCREEN, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
-  RECURRENCE, STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, evolutionPath, formatDateParam, formatTimeRange,
-  sessionPayload,
+  STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, formatDateParam, formatTimeRange,
   parseDateParam, sessionInterval, shiftDate, viewForScreen, viewRange, viewTitle, viewsForScreen,
 } from "@/components/agenda/agendaUtils";
 
@@ -44,14 +38,14 @@ import {
 //     "Desfazer" no aviso;
 //   - conflito de horário: o servidor recusa e aqui a pessoa decide se salva
 //     mesmo assim (ex.: um horário propositalmente encaixado).
+// Análise de UI (P2): salvar, remover e o conflito de horário saíram daqui para
+// components/agenda/useSessionActions.js, que a ficha do paciente também usa.
+// Análise de UI (O1): ?nova=1 abre "Nova sessão" ao chegar (link dos
+// "Primeiros passos" do painel).
 // ---------------------------------------------------------------------------
-
-// Dados completos de uma sessão para o PUT: sessionPayload (agendaUtils.js),
-// compartilhado com o painel ("Marcar falta", fluxo clínico C2/C4).
 
 export default function Agenda() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
   // Celular (UX): a largura é acompanhada (girar o aparelho troca Semana <-> 3 dias).
   const wide = useMediaQuery(WIDE_SCREEN);
   const requestedView = VIEW_IDS.includes(searchParams.get("visao")) ? searchParams.get("visao") : (wide ? "semana" : "lista");
@@ -65,10 +59,6 @@ export default function Agenda() {
   const [upcoming, setUpcoming] = useState([]);
   const [dialog, setDialog] = useState({ open: false, initial: null });
   const [saving, setSaving] = useState(false);
-  // Segurança (varredura, item 9): "Remover" não travava durante o envio; um
-  // duplo clique mandava a exclusão duas vezes (e a segunda virava "Erro ao remover").
-  const inFlight = useSingleFlight();
-  const [conflict, setConflict] = useState(null); // { conflicts, resolve }
   const requestSeq = useRef(0);
 
   // `replace`: navegar pelos períodos não enche o histórico do navegador.
@@ -99,62 +89,8 @@ export default function Agenda() {
 
   useEffect(() => { load(); }, [load]);
 
-  /**
-   * Salva (cria ou altera) tratando conflito de horário: se o servidor
-   * responder 409, pergunta antes de salvar por cima ("allow_conflict").
-   * Devolve a sessão salva (verdadeiro) ou false.
-   */
-  const attemptSave = useCallback(async (id, payload, { successMessage, undo } = {}) => {
-    try {
-      const { data: savedSession } = id ? await api.put(`/sessions/${id}`, payload) : await api.post("/sessions", payload);
-      // UX (agenda -> evolução): sessão marcada como realizada, com paciente e
-      // ainda sem evolução: o aviso já oferece "Registrar evolução".
-      const registerPath = savedSession?.status === "realizada" && !savedSession.record_id ? evolutionPath(savedSession) : null;
-      const action = undo
-        ? { action: { label: "Desfazer", onClick: undo } }
-        : registerPath ? { action: { label: "Registrar evolução", onClick: () => navigate(registerPath) }, duration: 10000 } : undefined;
-      // Fluxo clínico (P1): quantas sessões a série criou ou alterou.
-      let message = successMessage || "Sessão salva.";
-      if (!successMessage && savedSession?.series_count > 1) {
-        message = `${savedSession.series_count} sessões agendadas (${RECURRENCE[savedSession.recurrence]?.label.toLowerCase() || "recorrentes"}).`;
-      } else if (!successMessage && savedSession?.updated_following > 0) {
-        message = `Sessão salva. ${savedSession.updated_following === 1 ? "A próxima sessão da série também foi alterada."
-          : `As ${savedSession.updated_following} próximas sessões da série também foram alteradas.`}`;
-      }
-      toast.success(message, action);
-      load();
-      notifyPendingEvolutionsChanged(); // C2: status/horário mudou (ex.: virou falta)
-      return savedSession || true;
-    } catch (err) {
-      const detail = err.response?.data?.detail;
-      if (err.response?.status === 409 && detail?.code === "schedule_conflict") {
-        return new Promise((resolve) => {
-          // Só a PRIMEIRA resposta vale: o clique em "Salvar mesmo assim" também
-          // fecha o diálogo (onOpenChange), que responderia "não" logo depois.
-          let answered = false;
-          setConflict({
-            conflicts: detail.conflicts,
-            resolve: async (confirmed) => {
-              if (answered) return;
-              answered = true;
-              setConflict(null);
-              if (!confirmed) {
-                load(); // desfaz a remarcação otimista do arraste
-                resolve(false);
-                return;
-              }
-              resolve(await attemptSave(id, { ...payload, allow_conflict: true }, { successMessage, undo }));
-            },
-          });
-        });
-      }
-      if (![401, 423].includes(err.response?.status)) {
-        toast.error(formatApiErrorDetail(detail) || err.message);
-      }
-      load();
-      return false;
-    }
-  }, [load, navigate]);
+  // P2: salvar/remover com as regras compartilhadas (conflito, "Desfazer", série).
+  const { attemptSave, deleteSession: removeSession, moveSession: saveMove, conflictDialog, isDeleting } = useSessionActions(load);
 
   const submitDialog = async (id, payload) => {
     setSaving(true);
@@ -163,34 +99,11 @@ export default function Agenda() {
     if (saved) setDialog({ open: false, initial: null });
   };
 
-  // Fluxo clínico (P1): scope "following" remove esta e as próximas sessões
-  // agendadas da série (sem "Desfazer": são várias; o diálogo pergunta antes).
-  const deleteSession = (id, scope = "this") => inFlight.run(`delete:${id}`, async () => {
+  // O diálogo informa o id; o hook precisa da sessão inteira (para o "Desfazer").
+  const deleteSession = async (id, scope = "this") => {
     const session = sessions.find((s) => s.id === id) || dialog.initial;
-    try {
-      const { data } = await api.delete(`/sessions/${id}?${new URLSearchParams({ scope })}`);
-      setDialog({ open: false, initial: null });
-      load();
-      notifyPendingEvolutionsChanged(); // C2: sessão removida deixa de ser pendência
-      if (data?.deleted > 1) {
-        toast.success(`${data.deleted} sessões removidas (esta e as próximas da série).`);
-        return;
-      }
-      toast.success("Sessão removida.", {
-        // Recria a sessão com os mesmos dados (pode ganhar um novo id).
-        action: session ? {
-          label: "Desfazer",
-          onClick: () => {
-            const { start, end } = sessionInterval(session);
-            attemptSave(null, { ...sessionPayload(session, start, session.end ? end : null), allow_conflict: true },
-              { successMessage: "Sessão restaurada." });
-          },
-        } : undefined,
-      });
-    } catch (err) {
-      if (![401, 423].includes(err.response?.status)) toast.error("Erro ao remover.");
-    }
-  });
+    if (session && await removeSession(session, scope)) setDialog({ open: false, initial: null });
+  };
 
   // Arrastar-e-soltar: remarca mantendo a duração, com "Desfazer".
   const moveSession = (session, newStart) => {
@@ -199,15 +112,21 @@ export default function Agenda() {
     const newEnd = new Date(newStart.getTime() + (oldEnd - oldStart));
     // Otimista: a sessão aparece no novo lugar na hora; se falhar/cancelar, a agenda recarrega.
     setSessions((list) => list.map((s) => (s.id === session.id ? { ...s, start: newStart.toISOString(), end: newEnd.toISOString() } : s)));
-    attemptSave(session.id, sessionPayload(session, newStart, newEnd), {
-      successMessage: `Sessão remarcada para ${format(newStart, "EEE, dd/MM 'às' HH:mm", { locale: ptBR })}.`,
-      undo: () => attemptSave(session.id, { ...sessionPayload(session, oldStart, session.end ? oldEnd : null), allow_conflict: true },
-        { successMessage: "Remarcação desfeita." }),
-    });
+    saveMove(session, newStart);
   };
 
   const openNew = (start) => setDialog({ open: true, initial: { start } });
   const openSession = (session) => setDialog({ open: true, initial: session });
+
+  // O1: ?nova=1 (link "Marcar a primeira sessão") abre o formulário ao chegar.
+  // O parâmetro sai da URL, para recarregar a página não abrir de novo.
+  useEffect(() => {
+    if (searchParams.get("nova") !== "1") return;
+    setDialog({ open: true, initial: { start: defaultNewSessionStart(date) } });
+    const next = new URLSearchParams(searchParams);
+    next.delete("nova");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, date]);
 
   const viewProps = {
     sessions, onCreateAt: openNew, onOpenSession: openSession, onMoveSession: moveSession,
@@ -269,7 +188,8 @@ export default function Agenda() {
                 className="flex w-full items-center gap-3 rounded-md border border-slate-100 p-3 text-left transition-colors hover:bg-slate-50">
                 <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F0F4F8] text-[#1E3A8A]"><Clock className="h-4 w-4" /></div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-[#0F172A]">{s.title}{s.patient_name ? ` · ${s.patient_name}` : ""}</p>
+                  {/* P6: com o título automático ("Sessão"), o paciente vem primeiro. */}
+                  <p className="truncate text-sm font-medium text-[#0F172A]">{s.patient_name ? `${s.patient_name} · ${s.title}` : s.title}</p>
                   <p className="text-xs text-slate-500">
                     {format(new Date(s.start), "EEE, dd 'de' MMM", { locale: ptBR })} · {formatTimeRange(s)}
                   </p>
@@ -283,35 +203,10 @@ export default function Agenda() {
 
       <SessionDialog open={dialog.open} initial={dialog.initial} saving={saving}
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submitDialog} onDelete={deleteSession}
-        deleting={inFlight.isBusy(`delete:${dialog.initial?.id}`)} />
+        deleting={isDeleting(dialog.initial?.id)} />
 
-      {/* Conflito de horário: decisão da pessoa, com o que já está marcado. */}
-      <AlertDialog open={Boolean(conflict)} onOpenChange={(open) => { if (!open) conflict?.resolve(false); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Conflito de horário</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div>
-                {/* P1: uma série pode bater com várias sessões já marcadas. */}
-                <p>{conflict?.conflicts.length > 1 ? "Já existem sessões nestes horários:" : "Já existe sessão neste horário:"}</p>
-                <ul className="mt-2 space-y-1" data-testid="conflict-list">
-                  {conflict?.conflicts.map((c) => (
-                    <li key={c.id} className="rounded-md bg-slate-50 px-2 py-1 text-sm text-slate-700">
-                      {format(new Date(c.start), "dd/MM", { locale: ptBR })} · {formatTimeRange(c)} · {c.patient_name || c.title}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => conflict?.resolve(false)}>Voltar</AlertDialogCancel>
-            <AlertDialogAction onClick={() => conflict?.resolve(true)} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="confirm-conflict">
-              Salvar mesmo assim
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Conflito de horário (useSessionActions, P2). */}
+      {conflictDialog}
     </div>
   );
 }
