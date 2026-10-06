@@ -3,7 +3,6 @@ import { Link, useNavigate } from "react-router-dom";
 import { addDays, format, startOfDay } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import api from "@/lib/api";
-import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -169,10 +168,12 @@ export default function Dashboard() {
     api.get("/dashboard/stats").then(({ data }) => setStats(data)).catch(() => {});
   }, []);
 
+  // Desempenho (análise de componentes sem uso): era um motion.div do
+  // framer-motion com "entrada em cascata", mas os blocos de dentro não tinham
+  // animação própria, então nada se movia. Sem ele, o Painel (primeira tela
+  // depois do login) deixa de baixar a biblioteca inteira (37 KB comprimidos).
   return (
-    <motion.div initial="hidden" animate="show"
-      variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06 } } }}
-      className="space-y-6">
+    <div className="space-y-6">
       <div>
         {/* Análise de UI (F3): "Painel" em vez de "Dashboard". */}
         <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Painel</h1>
@@ -266,6 +267,6 @@ export default function Dashboard() {
           </div>
         </>
       )}
-    </motion.div>
+    </div>
   );
 }

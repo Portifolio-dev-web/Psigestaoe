@@ -62,6 +62,15 @@ Para subir um pacote específico, acrescente `--upgrade-package <nome>` ao prime
 ele é realmente importado em `src/`: pacotes sem uso foram removidos na varredura de
 segurança (item 13) e não devem voltar.
 
+Na análise de componentes sem uso saíram também 30 arquivos que nada importava (27
+componentes de `src/components/ui/`, o `use-toast` e as constantes `testIds`) e 25
+pacotes: o `@tanstack/react-query` (o provedor envolvia o app, mas nenhuma tela o
+usava), o `framer-motion` (trocado pela animação CSS `psi-fade-up`) e os 23 pacotes
+desses componentes. O Tailwind lê **todos** os arquivos de `src/` para montar o CSS:
+um componente parado ali aumenta o CSS de produção mesmo sem ser importado. Precisa de
+um componente do shadcn/ui de novo? Traga só ele, quando for usar
+(`npx shadcn@latest add <nome>`).
+
 As vulnerabilidades conhecidas são conferidas pelo CI a cada push (ver abaixo).
 
 ## CI (GitHub Actions)

@@ -65,3 +65,10 @@ h1, h2, h3, h4, .font-head {
     to { opacity: 1; transform: translateY(0); }
 }
 .psi-fade-up { animation: psi-fade-up 0.4s ease-out both; }
+/* Acessibilidade (WCAG 2.3.3): quem pediu ao sistema para reduzir movimento
+   (labirintite, enxaqueca, distração) vê o conteúdo direto, sem a animação.
+   Vale para as telas de entrada e, desde a troca do framer-motion (análise
+   de componentes sem uso), para a lista de evoluções da ficha. */
+@media (prefers-reduced-motion: reduce) {
+    .psi-fade-up { animation: none; }
+}

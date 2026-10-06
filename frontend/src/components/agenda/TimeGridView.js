@@ -135,7 +135,13 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
           ))}
         </div>
 
-        <div ref={scrollRef} className="psi-scroll relative max-h-[65vh] overflow-y-auto" data-testid="time-grid">
+        {/* Acessibilidade (WCAG 2.1.1, achado na varredura da análise de componentes
+            sem uso): a grade tem rolagem própria. Numa semana sem sessões não havia
+            nada focável dentro dela, e quem usa só o teclado não conseguia rolá-la.
+            Agora a grade recebe o foco (Tab) e rola com as setas; o nome diz o que é. */}
+        <div ref={scrollRef} tabIndex={0} role="region" aria-label="Grade de horários"
+          className="psi-scroll relative max-h-[65vh] overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+          data-testid="time-grid">
           <div className="grid" style={{ gridTemplateColumns: columns }}>
             <div className="relative" style={{ height: gridHeight }} aria-hidden="true">
               {hours.map((h) => (

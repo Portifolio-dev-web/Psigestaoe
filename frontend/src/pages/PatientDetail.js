@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import api, { API, formatApiErrorDetail } from "@/lib/api";
-import { motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import { draftInfo, draftSlot, purgeExpiredDrafts } from "@/lib/drafts";
 import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
@@ -27,6 +26,10 @@ import {
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js;
 // antes havia uma cópia desta função em cada tela).
 const fmtDate = formatDateOnly;
+// Entrada em cascata das evoluções (animação CSS psi-fade-up): 50 ms entre uma e
+// outra, só nas 10 primeiras (as demais não esperam).
+const RECORD_STAGGER_MS = 50;
+const RECORD_STAGGER_ITEMS = 10;
 const fmtDateTime = formatDateTime; // sempre na hora local (ver lib/datetime.js)
 
 // Correção (varredura de UI, defeito 3): "14/05/1990 (36 anos)". Antes aparecia
@@ -408,11 +411,15 @@ export default function PatientDetail() {
               <Button onClick={openNew} variant="link" className="mt-2 text-[#1E3A8A]">Registrar a primeira evolução</Button>
             </Card>
           ) : (
-            <motion.div initial="hidden" animate="show"
-              variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05 } } }}
-              className="space-y-4">
-              {records.map((r) => (
-                <motion.div key={r.id} variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}>
+            // Desempenho (análise de componentes sem uso): a entrada em cascata das
+            // evoluções era feita pelo framer-motion (37 KB comprimidos só para isto).
+            // Agora é a animação CSS psi-fade-up (index.css), o mesmo efeito: sobe 8 px
+            // e aparece, 50 ms depois da anterior. O atraso vale só para as primeiras
+            // da lista; as que chegam em "Carregar registros anteriores" aparecem na hora.
+            <div className="space-y-4">
+              {records.map((r, index) => (
+                <div key={r.id} className="psi-fade-up"
+                  style={{ animationDelay: `${index < RECORD_STAGGER_ITEMS ? index * RECORD_STAGGER_MS : 0}ms` }}>
                   <Card className={`border-slate-200 p-5 shadow-sm ${highlightId === r.id ? "ring-2 ring-[#1E3A8A]" : ""}`}
                     data-testid={`record-${r.id}`}>
                     <div className="flex items-start justify-between gap-3">
@@ -465,7 +472,7 @@ export default function PatientDetail() {
                       )}
                     </div>
                   </Card>
-                </motion.div>
+                </div>
               ))}
               {recordsCursor && (
                 <div className="flex justify-center pt-2">
@@ -476,7 +483,7 @@ export default function PatientDetail() {
                   </Button>
                 </div>
               )}
-            </motion.div>
+            </div>
           )}
         </div>
       </div>
