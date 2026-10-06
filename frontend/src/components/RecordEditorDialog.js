@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { LIMITS } from "@/lib/validation";
 import { RECORD_TEMPLATES, applyTemplate } from "@/lib/recordTemplates";
 import { notifyPendingEvolutionsChanged } from "@/lib/pendingEvolutions";
+import { useConfirm } from "@/hooks/useConfirm";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -58,6 +59,10 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
   const [fields, setFields] = useState(baseline);
   const [restored, setRestored] = useState(null); // { savedAt, baseVersion } do rascunho recuperado
   const [saving, setSaving] = useState(false);
+  // Análise de UI (F1): erros do formulário no próprio campo (antes avisos que sumiam).
+  const [fieldErrors, setFieldErrors] = useState({});
+  // Análise de UI (F2): confirmação no padrão do sistema (antes window.confirm).
+  const [confirm, confirmDialog] = useConfirm();
   // Segurança (varredura, item 9): outra edição desta anotação foi salva
   // enquanto esta estava aberta (o servidor respondeu 409). { currentVersion }
   const [conflict, setConflict] = useState(null);
@@ -67,6 +72,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
     setFields(baseline);
     setRestored(null);
     setConflict(null);
+    setFieldErrors({}); // F1: cada abertura começa sem erros
     if (userId) prepareDraftKey(userId); // chave em memória ANTES de qualquer imprevisto
     let cancelled = false;
     if (slot && draftsSupported()) {
@@ -95,7 +101,11 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
     enabled: open,
   });
 
-  const set = (key) => (event) => setFields((current) => ({ ...current, [key]: event.target.value }));
+  const set = (key) => (event) => {
+    setFields((current) => ({ ...current, [key]: event.target.value }));
+    // F1: mexeu no campo, a mensagem de erro dele sai.
+    setFieldErrors((current) => (current[key] ? { ...current, [key]: "" } : current));
+  };
 
   // Complementares (evoluções): modelo de texto (SOAP, DAP...). Campo vazio
   // recebe o modelo; com texto, o modelo vai para o fim (nada é apagado). O
@@ -120,12 +130,18 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
   };
 
   // Fechar (Cancelar, Esc, clique fora) não perde o texto: ele fica no rascunho.
-  const handleOpenChange = (next) => {
+  const handleOpenChange = async (next) => {
     if (!next && dirty) {
       if (draft.supported) {
         draft.flush();
         toast.info("Rascunho guardado neste dispositivo. Você pode continuar depois.");
-      } else if (!window.confirm("Este navegador não permite guardar rascunhos. Descartar o texto não salvo?")) {
+      } else if (!(await confirm({
+        title: "Descartar o texto não salvo?",
+        description: "Este navegador não permite guardar rascunhos: se fechar agora, o texto digitado se perde.",
+        confirmLabel: "Descartar texto",
+        cancelLabel: "Continuar escrevendo",
+        destructive: true,
+      }))) {
         return;
       }
     }
@@ -136,13 +152,15 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
   // "Salvar mesmo assim", que confirma sobrescrever a versão mais nova.
   const save = async (expectedVersion = record?.version) => {
     if (saving) return; // varredura, item 9: um envio por vez
-    if (!fields.content.trim()) {
-      toast.warning("O texto da evolução não pode estar vazio.");
-      return;
-    }
+    // F1: os problemas aparecem no campo (com o foco nele), não num aviso que some.
     const sessionDatetime = localInputToISO(fields.session_datetime);
-    if (!sessionDatetime) {
-      toast.warning("Informe a data e a hora da sessão.");
+    const errors = {
+      session_datetime: sessionDatetime ? "" : "Informe a data e a hora da sessão.",
+      content: fields.content.trim() ? "" : "Escreva o texto da evolução.",
+    };
+    if (errors.session_datetime || errors.content) {
+      setFieldErrors(errors);
+      document.getElementById(errors.session_datetime ? "record-datetime" : "record-content")?.focus();
       return;
     }
     setSaving(true);
@@ -254,7 +272,12 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
             <div>
               <Label htmlFor="record-datetime">Data/Hora da sessão</Label>
               <Input id="record-datetime" type="datetime-local" value={fields.session_datetime} onChange={set("session_datetime")}
-                className="mt-1.5" data-testid="record-datetime-input" />
+                aria-invalid={fieldErrors.session_datetime ? true : undefined}
+                aria-describedby={fieldErrors.session_datetime ? "record-datetime-error" : undefined}
+                className={`mt-1.5 ${fieldErrors.session_datetime ? "border-red-500" : ""}`} data-testid="record-datetime-input" />
+              {fieldErrors.session_datetime && (
+                <p id="record-datetime-error" className="mt-1 text-xs text-red-600">{fieldErrors.session_datetime}</p>
+              )}
             </div>
             <div>
               <Label htmlFor="record-diagnosis">Diagnóstico / hipótese (opcional)</Label>
@@ -271,7 +294,8 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
                 {RECORD_TEMPLATES.map((template) => (
                   <button key={template.id} type="button" onClick={() => insertTemplate(template)} title={template.description}
                     aria-label={`Usar o modelo ${template.label} (${template.description})`}
-                    className="rounded-full border border-slate-200 px-2.5 py-0.5 text-xs text-slate-600 transition-colors hover:border-[#1E3A8A] hover:text-[#1E3A8A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+                    // A9 (análise de UI): pelo menos 24 px de altura (antes 22 px).
+                    className="min-h-6 rounded-full border border-slate-200 px-2.5 py-0.5 text-xs text-slate-600 transition-colors hover:border-[#1E3A8A] hover:text-[#1E3A8A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
                     data-testid={`record-template-${template.id}`}>
                     {template.label}
                   </button>
@@ -283,9 +307,12 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
                 para a anotação não ser cortada sem a pessoa perceber. */}
             <Textarea id="record-content" ref={contentRef} value={fields.content} onChange={set("content")}
               maxLength={LIMITS.recordContent}
-              aria-describedby={fields.content.length > LIMITS.recordContent * 0.9 ? "record-content-count" : undefined}
-              rows={12} className="mt-1.5 psi-scroll font-normal leading-relaxed"
+              aria-invalid={fieldErrors.content ? true : undefined}
+              aria-describedby={[fieldErrors.content ? "record-content-error" : null,
+                fields.content.length > LIMITS.recordContent * 0.9 ? "record-content-count" : null].filter(Boolean).join(" ") || undefined}
+              rows={12} className={`mt-1.5 psi-scroll font-normal leading-relaxed ${fieldErrors.content ? "border-red-500" : ""}`}
               placeholder="Descreva a evolução da sessão..." data-testid="record-content-input" />
+            {fieldErrors.content && <p id="record-content-error" className="mt-1 text-xs text-red-600">{fieldErrors.content}</p>}
             {fields.content.length > LIMITS.recordContent * 0.9 && (
               <p id="record-content-count" className="mt-1 text-right text-xs text-amber-700" role="status">
                 {fields.content.length.toLocaleString("pt-BR")} de {LIMITS.recordContent.toLocaleString("pt-BR")} caracteres
@@ -330,6 +357,7 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
           </div>
         </DialogFooter>
       </DialogContent>
+      {confirmDialog}
     </Dialog>
   );
 }

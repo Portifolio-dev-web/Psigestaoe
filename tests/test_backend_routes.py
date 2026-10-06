@@ -1933,8 +1933,9 @@ async def test_logins_and_logouts_are_audited(client, monkeypatch):
 
     logs = (await client.get("/api/audit")).json()["items"]
     actions = [(log["action"], log["detail"]) for log in logs]
-    assert ("entrar", "Login com senha (Chrome no Windows)") in actions
-    assert ("entrar_falha", "Login recusado: senha incorreta (Chrome no Windows)") in actions
+    # Análise de UI (F3): termos em português ("Entrada", não "Login").
+    assert ("entrar", "Entrada com senha (Chrome no Windows)") in actions
+    assert ("entrar_falha", "Entrada recusada: senha incorreta (Chrome no Windows)") in actions
     assert all(log["ip_address"] for log in logs if log["action"].startswith("entrar"))
 
     await client.post("/api/auth/logout")
@@ -1949,7 +1950,7 @@ async def test_logins_and_logouts_are_audited(client, monkeypatch):
         await other.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
         google_logs = [(log["action"], log["detail"]) for log in (await other.get("/api/audit")).json()["items"]]
     assert ("criar", "Cadastro com Google") in google_logs
-    assert ("entrar", "Login com Google (Chrome no Windows)") in google_logs
+    assert ("entrar", "Entrada com Google (Chrome no Windows)") in google_logs
 
 
 def test_describe_user_agent():
@@ -2348,7 +2349,7 @@ async def test_audit_filters_and_csv_export(client):
     content = export.content.decode("utf-8-sig")
     header, *rows = content.strip().splitlines()
     assert header.startswith("Data e hora") and ";Ação;" in header
-    assert rows and all(";Login;" in row for row in rows)
+    assert rows and all(";Entrada;" in row for row in rows)  # F3: rótulo em português
     assert server._csv_cell("=HYPERLINK(1)") == "'=HYPERLINK(1)"  # sem fórmula no Excel
     # A própria exportação fica na trilha.
     assert any(log["action"] == "exportar" and log["entity_type"] == "auditoria"

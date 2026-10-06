@@ -308,7 +308,9 @@ export default function PatientDetail() {
               </details>
               {patient.initial_notes && (
                 <div className="mt-4 rounded-md bg-[#F0F4F8] p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Observações iniciais</p>
+                  {/* Acessibilidade (análise de UI, A8): slate-500 sobre este fundo azulado dava
+                      contraste 4,3:1 (mínimo 4,5:1); slate-600 chega a 6,9:1. */}
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-600">Observações iniciais</p>
                   <p className="mt-1 text-sm text-slate-700">{patient.initial_notes}</p>
                 </div>
               )}

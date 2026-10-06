@@ -2,7 +2,7 @@
 // IMPORTS
 // ============================================================================
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Plus, Search, MoreVertical, Pencil, Trash2, ShieldOff, FileText, Users, Loader2,
@@ -20,6 +20,7 @@ import { countLabel } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -146,8 +147,8 @@ const EMPTY_FORM = {
   guardian_name: "", guardian_cpf: "", guardian_relationship: "", guardian_phone: "",
 };
 
-// Listas de seleção com a mesma aparência dos campos de texto.
-const SELECT_CLASS = "mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950";
+// Listas de seleção: o componente único NativeSelect (análise de UI, F4),
+// com a mesma aparência dos campos de texto. Antes havia uma classe própria aqui.
 
 // Termo por profissional: aqui existia uma CÓPIA do termo com o nome e o CRP de
 // uma psicóloga fixos no código ("Fernanda Andrade Da Silva – CRP 06/228054"),
@@ -690,10 +691,10 @@ function SortSelect({ sort, onChange }) {
   return (
     <div className="flex items-center gap-2">
       <Label htmlFor="patients-sort" className="text-sm text-slate-600">Ordem</Label>
-      <select id="patients-sort" value={sort} onChange={(e) => onChange(e.target.value)} data-testid="patients-sort"
-        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+      {/* F4: a mesma lista de seleção de todo o sistema. */}
+      <NativeSelect id="patients-sort" value={sort} onChange={(e) => onChange(e.target.value)} data-testid="patients-sort">
         {SORT_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-      </select>
+      </NativeSelect>
     </div>
   );
 }
@@ -767,7 +768,8 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive,
             <TableHead>Nascimento</TableHead>
             <TableHead>Última consulta</TableHead>
             <TableHead>Próxima sessão</TableHead>
-            <TableHead className="w-10"></TableHead>
+            {/* A11: a coluna do menu tem nome para o leitor de tela (antes cabeçalho vazio). */}
+            <TableHead className="w-10"><span className="sr-only">Ações</span></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -776,10 +778,19 @@ function PatientTable({ filtered, navigate, onEdit, onDelete, onAnon, onArchive,
               onClick={() => navigate(`/pacientes/${p.id}`)} data-testid={`patient-row-${p.id}`}>
               <TableCell className="font-medium text-[#0F172A]">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E3A8A] text-xs font-semibold text-white">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#1E3A8A] text-xs font-semibold text-white"
+                    aria-hidden="true">
                     {(p.full_name || "?")[0]}
                   </div>
-                  {p.full_name}
+                  {/* Acessibilidade (análise de UI, A11): o nome é um LINK para a ficha.
+                      Antes só a linha inteira era clicável (com mouse): pelo teclado a ficha
+                      só abria pelo menu "⋮", e não dava para abrir em nova aba para comparar
+                      pacientes. stopPropagation: o clique no link não dispara também o da linha. */}
+                  <Link to={`/pacientes/${p.id}`} onClick={(e) => e.stopPropagation()}
+                    className="rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]"
+                    data-testid={`patient-link-${p.id}`}>
+                    {p.full_name}
+                  </Link>
                 </div>
               </TableCell>
               <TableCell className="text-slate-600">{fmtDate(p.birth_date)}</TableCell>
@@ -803,15 +814,17 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
       {filtered.map((p) => (
         <Card key={p.id} className="border-slate-200 p-4 shadow-sm" data-testid={`patient-card-${p.id}`}>
           <div className="flex items-start justify-between">
-            <button className="flex items-center gap-3 text-left" onClick={() => navigate(`/pacientes/${p.id}`)}>
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E3A8A] text-sm font-semibold text-white">
+            {/* A11: link (e não botão) para a ficha: abre também em nova aba. */}
+            <Link to={`/pacientes/${p.id}`} className="flex items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1E3A8A] text-sm font-semibold text-white"
+                aria-hidden="true">
                 {(p.full_name || "?")[0]}
               </div>
               <div>
                 <p className="font-medium text-[#0F172A]">{p.full_name}</p>
                 <p className="text-xs text-slate-500">Nasc. {fmtDate(p.birth_date)}</p>
               </div>
-            </button>
+            </Link>
             <RowMenu p={p} busy={isBusy?.(`patient:${p.id}`)} onEdit={onEdit} onOpen={() => navigate(`/pacientes/${p.id}`)}
               onDelete={onDelete} onAnon={onAnon} onArchive={onArchive} />
           </div>
@@ -1003,13 +1016,13 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             {!minor && (
             <div>
               <Label htmlFor="patient-marital-status">Estado civil *</Label>
-              <select
+              <NativeSelect
                 id="patient-marital-status"
                 {...fieldA11y("marital_status", "patient-marital-status")}
                 required
                 value={form.marital_status}
                 onChange={onFormChange("marital_status")}
-                className={`${SELECT_CLASS} ${invalidClass("marital_status")}`}
+                className="mt-1.5" selectClassName={invalidClass("marital_status")}
               >
                 <option value="">Selecione...</option>
                 <option value="Solteiro(a)">Solteiro(a)</option>
@@ -1017,7 +1030,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 <option value="Divorciado(a)">Divorciado(a)</option>
                 <option value="Viúvo(a)">Viúvo(a)</option>
                 <option value="União estável">União estável</option>
-              </select>
+              </NativeSelect>
               <FieldError id="patient-marital-status" message={errors.marital_status} />
             </div>
             )}
@@ -1026,13 +1039,13 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               {/* Correção (varredura de UI, defeito 5): o "*" aparecia sem o campo ser
                   exigido. Agora TODOS os campos são obrigatórios (aqui e no servidor). */}
               <Label htmlFor="patient-education">Escolaridade *</Label>
-              <select
+              <NativeSelect
                 id="patient-education"
                 {...fieldA11y("education", "patient-education")}
                 required
                 value={form.education}
                 onChange={onFormChange("education")}
-                className={`${SELECT_CLASS} ${invalidClass("education")}`}
+                className="mt-1.5" selectClassName={invalidClass("education")}
               >
                 <option value="">Selecione...</option>
                 <option value="Fundamental - Incompleto">Fundamental - Incompleto</option>
@@ -1042,7 +1055,7 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 <option value="Superior - Incompleto">Superior - Incompleto</option>
                 <option value="Superior - Completo">Superior - Completo</option>
                 <option value="Pós Graduação - Completo">Pós Graduação - Completo</option>
-              </select>
+              </NativeSelect>
               <FieldError id="patient-education" message={errors.education} />
             </div>
 
@@ -1088,12 +1101,12 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               </div>
               <div>
                 <Label htmlFor="patient-guardian-relationship">Parentesco *</Label>
-                <select id="patient-guardian-relationship" {...fieldA11y("guardian_relationship", "patient-guardian-relationship")}
+                <NativeSelect id="patient-guardian-relationship" {...fieldA11y("guardian_relationship", "patient-guardian-relationship")}
                   required value={form.guardian_relationship} onChange={onFormChange("guardian_relationship")}
-                  className={`${SELECT_CLASS} ${invalidClass("guardian_relationship")}`}>
+                  className="mt-1.5" selectClassName={invalidClass("guardian_relationship")}>
                   <option value="">Selecione...</option>
                   {GUARDIAN_RELATIONSHIPS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                </NativeSelect>
                 <FieldError id="patient-guardian-relationship" message={errors.guardian_relationship} />
               </div>
               <div>

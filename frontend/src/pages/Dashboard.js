@@ -171,7 +171,8 @@ export default function Dashboard() {
       variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06 } } }}
       className="space-y-6">
       <div>
-        <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Dashboard</h1>
+        {/* Análise de UI (F3): "Painel" em vez de "Dashboard". */}
+        <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Painel</h1>
         <p className="mt-1 text-sm text-slate-500">Visão geral da sua prática clínica</p>
       </div>
 

@@ -1712,7 +1712,8 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
         if user:
             reason = "senha incorreta" if user.password_hash else "conta sem senha (entra pelo Google)"
             await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
-                            f"Login recusado: {reason} ({describe_user_agent(_audit_user_agent.get())})")
+                            # Análise de UI (F3): termos em português na trilha ("Entrada", não "Login").
+                            f"Entrada recusada: {reason} ({describe_user_agent(_audit_user_agent.get())})")
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
     if user.mfa_enabled_at is not None:
@@ -1723,7 +1724,7 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
     set_auth_cookie(response, await open_login_session(db, user))
     # Auditoria de login: cada acesso aparece em Configurações > Trilha de auditoria.
     await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id,
-                    f"Login com senha ({describe_user_agent(_audit_user_agent.get())})")
+                    f"Entrada com senha ({describe_user_agent(_audit_user_agent.get())})")  # F3: em português
 
     return {"user": public_user(user)}
 
@@ -1947,7 +1948,7 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
     if created_account:
         await log_audit(db, user.user_id, user.email, "criar", "usuario", user.user_id, "Cadastro com Google")
     await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id,
-                    f"Login com Google ({describe_user_agent(_audit_user_agent.get())})")
+                    f"Entrada com Google ({describe_user_agent(_audit_user_agent.get())})")  # F3: em português
 
     # `password_discarded` permite ao frontend explicar por que a senha antiga
     # desta conta deixou de funcionar.
@@ -2015,7 +2016,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
         await db.delete(sess)
         await db.commit()
         # Auditoria de login: a saída também fica registrada.
-        await log_audit(db, user.user_id, user.email, "sair", "sessao", user.user_id, "Logout")
+        await log_audit(db, user.user_id, user.email, "sair", "sessao", user.user_id, "Saída do sistema")  # F3
 
     clear_auth_cookie(response)
     return {"ok": True}
@@ -2286,11 +2287,11 @@ async def login_mfa(data: MfaLoginInput, background: BackgroundTasks, response: 
     device = describe_user_agent(_audit_user_agent.get())
     if method is None:
         await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
-                        f"Login recusado: código de verificação incorreto ({device})")
+                        f"Entrada recusada: código de verificação incorreto ({device})")  # F3: em português
         raise HTTPException(status_code=401, detail=MFA_INVALID_DETAIL)
 
     set_auth_cookie(response, await open_login_session(db, user))
-    detail = f"Login com senha e verificação em duas etapas ({device})"
+    detail = f"Entrada com senha e verificação em duas etapas ({device})"  # F3: em português
     left = len(_recovery_hashes(user))
     if method == "recovery":
         detail += f"; código de recuperação usado ({count_label(left, 'restante', 'restantes')})"
@@ -3320,8 +3321,9 @@ AUDIT_ACTION_LABELS = {
     "desarquivar": "Reativação", "consentir": "Consentimento", "revogar": "Revogação", "aceitar": "Aceite",
     "gerar_token": "Novo token", "bloquear": "Bloqueio", "desbloquear": "Desbloqueio",
     "desbloquear_falha": "Senha incorreta", "encerrar": "Encerramento", "vincular": "Vínculo Google",
-    "alterar_senha": "Troca de senha", "alterar_senha_falha": "Senha incorreta", "entrar": "Login",
-    "entrar_falha": "Login recusado", "sair": "Logout", "solicitar_senha": "Pedido de nova senha",
+    # Análise de UI (F3): "Entrada"/"Saída" em vez de "Login"/"Logout" (os mesmos rótulos da tela).
+    "alterar_senha": "Troca de senha", "alterar_senha_falha": "Senha incorreta", "entrar": "Entrada",
+    "entrar_falha": "Entrada recusada", "sair": "Saída", "solicitar_senha": "Pedido de nova senha",
     "mfa_ativar": "Duas etapas ativada", "mfa_desativar": "Duas etapas desativada",
     "mfa_codigos": "Novos códigos",
 }

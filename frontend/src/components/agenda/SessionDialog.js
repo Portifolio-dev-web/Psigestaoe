@@ -2,14 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { addDays, addMinutes, format } from "date-fns";
 import { FileText, Loader2, Repeat, Trash2 } from "lucide-react";
-import { toast } from "sonner";
 import { localInputToISO, toLocalInput } from "@/lib/datetime";
 import PatientPicker from "@/components/PatientPicker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { NativeSelect } from "@/components/ui/native-select";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -81,6 +80,8 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
   const [form, setForm] = useState(() => toForm(initial));
   // P1: remover uma sessão de série pergunta "só esta" ou "esta e as próximas".
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Análise de UI (F1): erros no próprio campo (antes avisos flutuantes que sumiam).
+  const [errors, setErrors] = useState({});
   // Alterou algo no formulário? Então o atalho para a evolução espera o
   // "Salvar" (sair para a ficha agora descartaria as alterações).
   const saved = useMemo(() => toForm(initial), [initial]);
@@ -90,6 +91,7 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
     if (open) {
       setForm(toForm(initial));
       setConfirmDelete(false);
+      setErrors({});
     }
   }, [open, initial]);
 
@@ -105,20 +107,21 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
   }));
 
   const submit = () => {
-    if (!form.title.trim()) {
-      toast.warning("Informe um título.");
-      return;
-    }
+    // F1: todos os problemas de uma vez, cada um no seu campo, e o foco no primeiro.
     const start = localInputToISO(form.start);
     const end = localInputToISO(form.end);
-    if (!start) {
-      toast.warning("Informe o início da sessão.");
+    const found = {
+      title: form.title.trim() ? "" : "Informe um título.",
+      start: start ? "" : "Informe o início da sessão.",
+      end: start && end && new Date(end) <= new Date(start) ? "O término deve ser depois do início." : "",
+    };
+    const first = ["title", "start", "end"].find((key) => found[key]);
+    if (first) {
+      setErrors(found);
+      document.getElementById(`session-${first}`)?.focus();
       return;
     }
-    if (end && new Date(end) <= new Date(start)) {
-      toast.warning("O término deve ser depois do início.");
-      return;
-    }
+    setErrors({});
     onSubmit(form.id, {
       patient_id: form.patient_id,
       patient_name: form.patient_name,
@@ -135,6 +138,9 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
   };
 
   const currentDuration = durationMinutes(form);
+  // F1: atributos do campo com erro (inválido + mensagem ligada a ele).
+  const fieldError = (key) => (errors[key]
+    ? { "aria-invalid": true, "aria-describedby": `session-${key}-error` } : {});
   const inSeries = Boolean(form.id && initial?.series_id);
   // P1: resumo da repetição ("12 sessões, toda semana, até 21/12/2026").
   const repeating = !form.id && form.repeat && form.status === "agendada";
@@ -152,7 +158,9 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
           <div>
             <Label htmlFor="session-title">Título</Label>
             <Input id="session-title" value={form.title} maxLength={200}
-              onChange={(e) => setForm({ ...form, title: e.target.value })} className="mt-1.5" data-testid="session-title-input" />
+              onChange={(e) => { setForm({ ...form, title: e.target.value }); setErrors({ ...errors, title: "" }); }}
+              {...fieldError("title")} className={`mt-1.5 ${errors.title ? "border-red-500" : ""}`} data-testid="session-title-input" />
+            <ErrorText id="session-title" message={errors.title} />
           </div>
           <div>
             {/* Acessibilidade (varredura de UI): rótulo ligado ao seletor (htmlFor/id). */}
@@ -163,20 +171,25 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <Label htmlFor="session-start">Início</Label>
-              <Input id="session-start" type="datetime-local" value={form.start} onChange={(e) => changeStart(e.target.value)}
-                className="mt-1.5" data-testid="session-start-input" />
+              <Input id="session-start" type="datetime-local" value={form.start}
+                onChange={(e) => { changeStart(e.target.value); setErrors({ ...errors, start: "", end: "" }); }}
+                {...fieldError("start")} className={`mt-1.5 ${errors.start ? "border-red-500" : ""}`} data-testid="session-start-input" />
+              <ErrorText id="session-start" message={errors.start} />
             </div>
             <div>
               <Label htmlFor="session-end">Término</Label>
-              <Input id="session-end" type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })}
-                className="mt-1.5" data-testid="session-end-input" />
+              <Input id="session-end" type="datetime-local" value={form.end}
+                onChange={(e) => { setForm({ ...form, end: e.target.value }); setErrors({ ...errors, end: "" }); }}
+                {...fieldError("end")} className={`mt-1.5 ${errors.end ? "border-red-500" : ""}`} data-testid="session-end-input" />
+              <ErrorText id="session-end" message={errors.end} />
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Duração">
             <span className="mr-1 text-xs text-slate-500">Duração:</span>
             {DURATIONS.map((minutes) => (
               <button key={minutes} type="button" onClick={() => setDuration(minutes)} aria-pressed={currentDuration === minutes}
-                className={`rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
+                // A9 (análise de UI): pelo menos 24 px de altura (antes 22 px).
+                className={`min-h-6 rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
                   currentDuration === minutes ? "border-[#1E3A8A] bg-[#1E3A8A] text-white" : "border-slate-200 text-slate-600 hover:bg-slate-50"
                 }`}>
                 {minutes} min
@@ -185,16 +198,15 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
           </div>
           <div>
             <Label htmlFor="session-status">Status</Label>
-            <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>
-              <SelectTrigger id="session-status" className="mt-1.5" data-testid="session-status-select"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="agendada">Agendada</SelectItem>
-                <SelectItem value="realizada">Realizada</SelectItem>
+            {/* F4 (análise de UI): a mesma lista de seleção de todo o sistema. */}
+            <NativeSelect id="session-status" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}
+              className="mt-1.5" data-testid="session-status-select">
+                <option value="agendada">Agendada</option>
+                <option value="realizada">Realizada</option>
                 {/* C4: o paciente não veio (sem aviso). Libera o horário e não pede evolução. */}
-                <SelectItem value="faltou">Faltou</SelectItem>
-                <SelectItem value="cancelada">Cancelada</SelectItem>
-              </SelectContent>
-            </Select>
+                <option value="faltou">Faltou</option>
+                <option value="cancelada">Cancelada</option>
+            </NativeSelect>
           </div>
 
           {/* P1: repetir a sessão nova. Antes cada sessão semanal era marcada à mão. */}
@@ -203,27 +215,25 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <Label htmlFor="session-repeat">Repetir</Label>
-                  <Select value={form.repeat || "none"} onValueChange={(v) => setForm({ ...form, repeat: v === "none" ? "" : v })}>
-                    <SelectTrigger id="session-repeat" className="mt-1.5" data-testid="session-repeat-select"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">Não repete</SelectItem>
-                      {Object.entries(RECURRENCE).map(([id, rule]) => (
-                        <SelectItem key={id} value={id}>{rule.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <NativeSelect id="session-repeat" value={form.repeat || "none"}
+                    onChange={(e) => setForm({ ...form, repeat: e.target.value === "none" ? "" : e.target.value })}
+                    className="mt-1.5" data-testid="session-repeat-select">
+                    <option value="none">Não repete</option>
+                    {Object.entries(RECURRENCE).map(([id, rule]) => (
+                      <option key={id} value={id}>{rule.label}</option>
+                    ))}
+                  </NativeSelect>
                 </div>
                 {form.repeat && (
                   <div>
                     <Label htmlFor="session-repeat-count">Quantas sessões</Label>
-                    <Select value={String(form.repeatCount)} onValueChange={(v) => setForm({ ...form, repeatCount: Number(v) })}>
-                      <SelectTrigger id="session-repeat-count" className="mt-1.5" data-testid="session-repeat-count"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {SERIES_COUNTS.map((count) => (
-                          <SelectItem key={count} value={String(count)}>{count} sessões</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <NativeSelect id="session-repeat-count" value={String(form.repeatCount)}
+                      onChange={(e) => setForm({ ...form, repeatCount: Number(e.target.value) })}
+                      className="mt-1.5" data-testid="session-repeat-count">
+                      {SERIES_COUNTS.map((count) => (
+                        <option key={count} value={String(count)}>{count} sessões</option>
+                      ))}
+                    </NativeSelect>
                   </div>
                 )}
               </div>
@@ -315,4 +325,10 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
       </DialogContent>
     </Dialog>
   );
+}
+
+// F1: mensagem de erro de um campo; o id ("<campo>-error") é o que o campo
+// aponta em aria-describedby, para o leitor de tela ler junto.
+function ErrorText({ id, message }) {
+  return message ? <p id={`${id}-error`} className="mt-1 text-xs text-red-600">{message}</p> : null;
 }

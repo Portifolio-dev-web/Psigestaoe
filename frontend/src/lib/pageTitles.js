@@ -18,7 +18,7 @@ const PAGES = [
   [/^\/criar-senha\/?$/, "Criar sua senha"],
   [/^\/redefinir-senha\/?$/, "Criar nova senha"],
   [/^\/privacidade\/?$/, "Política de Privacidade"],
-  [/^\/dashboard\/?$/, "Dashboard"],
+  [/^\/dashboard\/?$/, "Painel"],  // F3: em português (o endereço continua /dashboard)
   [/^\/pacientes\/?$/, "Pacientes"],
   [/^\/pacientes\/[^/]+\/?$/, "Ficha do paciente"],
   [/^\/agenda\/?$/, "Agenda"],

@@ -33,6 +33,8 @@ export default function Register() {
   const [terms, setTerms] = useState(false);
   const [loading, setLoading] = useState(false);
   const [sentTo, setSentTo] = useState("");
+  // Análise de UI (F1): erro do aceite junto da caixa (antes um aviso que sumia).
+  const [termsError, setTermsError] = useState("");
   const [googleBoxRef, googleWidth] = useGoogleButtonWidth();
 
   const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -52,7 +54,8 @@ export default function Register() {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!terms) {
-      toast.warning("É necessário aceitar os Termos de Privacidade (LGPD).");
+      setTermsError("Para continuar, marque que leu e aceita a Política de Privacidade.");
+      document.getElementById("terms")?.focus();
       return;
     }
     requestLink();
@@ -119,7 +122,9 @@ export default function Register() {
               <p id="email-hint" className="mt-1 text-xs text-slate-500">Você vai receber um link para criar a senha.</p>
             </div>
             <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-3">
-              <Checkbox id="terms" checked={terms} onCheckedChange={setTerms}
+              <Checkbox id="terms" checked={terms}
+                onCheckedChange={(value) => { setTerms(value); if (value) setTermsError(""); }}
+                aria-invalid={termsError ? true : undefined} aria-describedby={termsError ? "terms-error" : undefined}
                 className="mt-0.5" data-testid="register-terms-checkbox" />
               {/* Conformidade: antes o texto citava "Termos de Privacidade" que não
                   existiam. Agora o link abre a política real, em nova aba para não
@@ -136,6 +141,8 @@ export default function Register() {
                 , que explica como o PsiGestão trata os meus dados e os dados dos meus pacientes (LGPD).
               </Label>
             </div>
+            {/* F1: a mensagem fica aqui, ligada à caixa (aria-describedby), até a pessoa marcar. */}
+            {termsError && <p id="terms-error" className="-mt-2 text-xs text-red-600" data-testid="register-terms-error">{termsError}</p>}
             <Button type="submit" disabled={loading}
               className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="register-submit-btn">
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Continuar"}

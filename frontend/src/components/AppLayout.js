@@ -12,7 +12,8 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const nav = [
-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, id: "dashboard" },
+  // Análise de UI (F3): "Painel" em vez de "Dashboard" (o resto do sistema é em português).
+  { to: "/dashboard", label: "Painel", icon: LayoutDashboard, id: "dashboard" },
   { to: "/pacientes", label: "Pacientes", icon: Users, id: "pacientes" },
   { to: "/agenda", label: "Agenda", icon: CalendarDays, id: "agenda" },
   // UX (Configurações em abas): a página reúne conta, termo, privacidade e
@@ -21,7 +22,7 @@ const nav = [
 ];
 
 // Fluxo clínico (C2): quantas sessões já aconteceram e estão sem evolução
-// (inclui as de hoje). Aparece ao lado de "Dashboard", onde está a lista.
+// (inclui as de hoje). Aparece ao lado de "Painel", onde está a lista.
 // Recarrega a cada troca de tela e quando algo pode ter mudado (evento).
 function usePendingEvolutionsCount() {
   const { pathname } = useLocation();
@@ -125,6 +126,13 @@ export default function AppLayout() {
   // foco volta ao botão ao fechar e o botão informa "expandido/recolhido".
   return (
     <Sheet open={open} onOpenChange={setOpen}>
+    {/* Acessibilidade (análise de UI, A7): primeiro item do Tab. Antes eram 7 Tabs pelo
+        menu até chegar à tela; este link (visível só com o foco do teclado) pula direto. */}
+    <a href="#conteudo" onClick={(e) => { e.preventDefault(); document.getElementById("conteudo")?.focus(); }}
+      className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[60] focus:rounded-md focus:bg-[#1E3A8A] focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white focus:shadow-lg"
+      data-testid="skip-link">
+      Pular para o conteúdo
+    </a>
     <div className="flex min-h-screen bg-[#F8FAFC]">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 hidden w-64 bg-[#0F2C59] lg:block">
@@ -166,7 +174,7 @@ export default function AppLayout() {
         </header>
         {/* tabIndex -1 + sem contorno: recebe o foco ao trocar de tela (análise de UI, A1,
             components/RouteAnnouncer.js) sem desenhar uma moldura em volta da tela inteira. */}
-        <main tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none lg:px-8">
+        <main id="conteudo" tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none lg:px-8">
           {/* Complementares (desempenho): as telas são carregadas sob demanda
               (App.js). Este Suspense deixa o menu e o topo na tela enquanto só
               o conteúdo carrega, em vez de piscar a página inteira. */}

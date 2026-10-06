@@ -16,7 +16,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { NativeSelect } from "@/components/ui/native-select";
+import { useConfirm } from "@/hooks/useConfirm";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import PasswordInput from "@/components/auth/PasswordInput";
 import TwoFactorCard from "@/components/settings/TwoFactorCard";
@@ -42,7 +43,8 @@ const ACTION_LABEL = {
   // Segurança (varredura, Fase 2): vínculo com o Google e troca de senha.
   vincular: "Vínculo Google", alterar_senha: "Troca de senha", alterar_senha_falha: "Senha incorreta",
   // Segurança alta (auditoria de login): cada acesso, tentativa recusada e saída.
-  entrar: "Login", entrar_falha: "Login recusado", sair: "Logout",
+  // Análise de UI (F3): em português ("Login"/"Logout" eram os únicos termos em inglês da trilha).
+  entrar: "Entrada", entrar_falha: "Entrada recusada", sair: "Saída",
   // Segurança média + backlog: pedido de nova senha por e-mail e verificação em duas etapas.
   solicitar_senha: "Pedido de nova senha", mfa_ativar: "Duas etapas ativada",
   mfa_desativar: "Duas etapas desativada", mfa_codigos: "Novos códigos",
@@ -210,6 +212,8 @@ function SessionSecurity() {
   const [saving, setSaving] = useState(false);
   // Segurança (varredura, item 9): o botão não travava durante o envio.
   const inFlight = useSingleFlight();
+  // Análise de UI (F2): confirmação no padrão do sistema (antes window.confirm).
+  const [confirm, confirmDialog] = useConfirm();
 
   const changeLockMinutes = async (value) => {
     setSaving(true);
@@ -225,9 +229,13 @@ function SessionSecurity() {
   };
 
   const invalidateDrafts = () => inFlight.run("drafts", async () => {
-    const confirmed = window.confirm(
-      "Isto apaga a chave dos rascunhos: evoluções não salvas em QUALQUER aparelho (inclusive este) deixam de poder ser recuperadas. Continuar?",
-    );
+    const confirmed = await confirm({
+      title: "Invalidar os rascunhos em todos os aparelhos?",
+      description: "A chave dos rascunhos é trocada: evoluções não salvas em QUALQUER aparelho (inclusive este) "
+        + "deixam de poder ser recuperadas. Use se um computador com rascunhos foi perdido ou roubado.",
+      confirmLabel: "Invalidar rascunhos",
+      destructive: true,
+    });
     if (!confirmed) return;
     try {
       await api.delete("/auth/draft-key");
@@ -248,16 +256,13 @@ function SessionSecurity() {
       <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-2">
         <div>
           <Label htmlFor="lock-minutes" className="text-slate-700">Bloquear a tela após</Label>
-          <Select value={String(user?.lock_minutes || 10)} onValueChange={changeLockMinutes} disabled={saving}>
-            <SelectTrigger id="lock-minutes" className="mt-1.5 w-full sm:w-56" data-testid="lock-minutes-select">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {LOCK_OPTIONS.map((minutes) => (
-                <SelectItem key={minutes} value={String(minutes)}>{minutes} minutos sem uso</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* F4: a mesma lista de seleção de todo o sistema. */}
+          <NativeSelect id="lock-minutes" value={String(user?.lock_minutes || 10)} disabled={saving}
+            onChange={(e) => changeLockMinutes(e.target.value)} className="mt-1.5 w-full sm:w-56" data-testid="lock-minutes-select">
+            {LOCK_OPTIONS.map((minutes) => (
+              <option key={minutes} value={String(minutes)}>{minutes} minutos sem uso</option>
+            ))}
+          </NativeSelect>
           <p className="mt-2 text-xs leading-relaxed text-slate-500">
             Depois desse tempo a tela trava e pede a senha (ou o Google). O que estava aberto continua lá após
             desbloquear. Use também o botão "Bloquear" no topo ao sair da sala.
@@ -276,6 +281,7 @@ function SessionSecurity() {
           </Button>
         </div>
       </div>
+      {confirmDialog}
     </Card>
   );
 }
@@ -434,7 +440,6 @@ const ACTION_FILTER_LABEL = {
   desbloquear_falha: "Senha incorreta (desbloqueio)",
   alterar_senha_falha: "Senha incorreta (troca de senha)",
 };
-const FILTER_SELECT_CLASS = "mt-1 flex h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]";
 
 function auditParams(filters) {
   const params = new URLSearchParams();
@@ -522,21 +527,22 @@ function AuditTrail() {
         </div>
         <div>
           <Label htmlFor="audit-action" className="text-xs text-slate-600">Ação</Label>
-          <select id="audit-action" value={filters.action} onChange={setFilter("action")} className={FILTER_SELECT_CLASS}>
+          {/* F4: a mesma lista de seleção de todo o sistema. */}
+          <NativeSelect id="audit-action" value={filters.action} onChange={setFilter("action")} className="mt-1">
             <option value="">Todas</option>
             {Object.entries(ACTION_FILTER_LABEL).sort((a, b) => a[1].localeCompare(b[1], "pt-BR")).map(([code, label]) => (
               <option key={code} value={code}>{label}</option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <div>
           <Label htmlFor="audit-entity" className="text-xs text-slate-600">Tipo</Label>
-          <select id="audit-entity" value={filters.entity} onChange={setFilter("entity")} className={FILTER_SELECT_CLASS}>
+          <NativeSelect id="audit-entity" value={filters.entity} onChange={setFilter("entity")} className="mt-1">
             <option value="">Todos</option>
             {Object.entries(ENTITY_LABEL).sort((a, b) => a[1].localeCompare(b[1], "pt-BR")).map(([code, label]) => (
               <option key={code} value={code}>{label}</option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <Button type="button" variant="ghost" size="sm" disabled={!filtered} onClick={() => setFilters(EMPTY_AUDIT_FILTERS)}
           className="col-span-2 text-[#1E3A8A] md:col-span-1">

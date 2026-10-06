@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { format, isToday } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import {
-  HOUR_HEIGHT, STATUS, THREE_DAYS, dragState, formatTimeRange, layoutDay, snapMinutes,
+  HOUR_HEIGHT, STATUS, THREE_DAYS, defaultNewSessionStart, dragState, formatTimeRange, layoutDay, snapMinutes,
 } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
@@ -50,8 +50,9 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
         <div className="grid border-b border-slate-200" style={{ gridTemplateColumns: columns }}>
           <div />
           {days.map((day) => (
-            <button key={day.toISOString()} type="button" onClick={() => onOpenDay(day)} disabled={!multiDay}
-              className="py-2 text-center enabled:hover:bg-slate-50" aria-label={multiDay ? `Abrir ${format(day, "dd/MM")} na visão Dia` : undefined}>
+            <div key={day.toISOString()} className="relative">
+            <button type="button" onClick={() => onOpenDay(day)} disabled={!multiDay}
+              className="w-full py-2 text-center enabled:hover:bg-slate-50" aria-label={multiDay ? `Abrir ${format(day, "dd/MM")} na visão Dia` : undefined}>
               {/* Acessibilidade (varredura de UI): slate-400 -> slate-500 (contraste 2,6:1 -> 4,8:1). */}
               <span className="block text-[11px] font-medium uppercase tracking-wide text-slate-500">
                 {format(day, "EEE", { locale: ptBR })}
@@ -62,6 +63,15 @@ export default function TimeGridView({ days, sessions, onCreateAt, onOpenSession
                 {format(day, "d")}
               </span>
             </button>
+            {/* Acessibilidade (análise de UI, A12): criar sessão clicando num horário vazio
+                só funcionava com mouse. Este botão aparece com o foco do teclado e cria a
+                sessão neste dia (no próximo horário cheio; o horário se ajusta no formulário). */}
+            <button type="button" onClick={() => onCreateAt(defaultNewSessionStart(day))}
+              className="sr-only focus:not-sr-only focus:absolute focus:inset-x-1 focus:bottom-1 focus:z-20 focus:rounded-md focus:bg-[#1E3A8A] focus:px-2 focus:py-1 focus:text-xs focus:font-medium focus:text-white"
+              aria-label={`Nova sessão em ${format(day, "EEEE, dd/MM", { locale: ptBR })}`}>
+              + Nova sessão
+            </button>
+            </div>
           ))}
         </div>
 

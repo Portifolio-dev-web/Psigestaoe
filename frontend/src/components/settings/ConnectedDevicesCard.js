@@ -5,6 +5,7 @@ import api, { formatApiErrorDetail } from "@/lib/api";
 import { formatDateTime } from "@/lib/datetime";
 import { countLabel } from "@/lib/utils";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { useConfirm } from "@/hooks/useConfirm";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -22,6 +23,8 @@ const deviceIcon = (device) => (/Android|iPhone/.test(device) ? Smartphone : /iP
 export default function ConnectedDevicesCard() {
   const [sessions, setSessions] = useState(null);
   const inFlight = useSingleFlight();
+  // Análise de UI (F2): confirmação no padrão do sistema (antes window.confirm).
+  const [confirm, confirmDialog] = useConfirm();
 
   const load = useCallback(() => {
     api.get("/auth/sessions")
@@ -43,7 +46,12 @@ export default function ConnectedDevicesCard() {
   });
 
   const endOthers = () => inFlight.run("end-others", async () => {
-    if (!window.confirm("Encerrar a sessão em todos os outros aparelhos e navegadores? Este continua conectado.")) return;
+    if (!(await confirm({
+      title: "Sair de todos os outros aparelhos?",
+      description: "A sessão é encerrada em todos os outros aparelhos e navegadores. Este continua conectado.",
+      confirmLabel: "Sair dos outros aparelhos",
+      destructive: true,
+    }))) return;
     try {
       const { data } = await api.post("/auth/sessions/end-others", { confirm: true });
       toast.success(data.ended_sessions
@@ -106,6 +114,7 @@ export default function ConnectedDevicesCard() {
         {inFlight.isBusy("end-others") ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" aria-hidden="true" />}
         Sair de todos os outros aparelhos
       </Button>
+      {confirmDialog}
     </Card>
   );
 }
