@@ -63,6 +63,10 @@ services:
       SMTP_SECURITY: none
       SMTP_USERNAME: ""
       SMTP_FROM: "PsiGestão <nao-responda@psigestao.local>"
+      # Produto (assinatura): no desenvolvimento, o pagamento é SIMULADO (a tela
+      # /assinatura/simulacao tem os botões Pagar e Recusar, e Configurações >
+      # Assinatura tem as ferramentas de teste). Em produção a API recusa "simulado".
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-simulado}
     volumes:
       - ./backend:/app
     depends_on:

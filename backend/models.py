@@ -150,6 +150,33 @@ class User(Base):
     consent_term_reviewed_at = Column(DateTime(timezone=True), nullable=True)
     onboarding_dismissed_at = Column(DateTime(timezone=True), nullable=True)
 
+    # PRODUTO (assinatura; regras em billing.py). A situação da conta (teste,
+    # assinante, atraso, somente leitura, cortesia) é CALCULADA a partir destas
+    # datas, nunca guardada pronta: sem aviso do meio de pagamento, a conta
+    # entra sozinha na tolerância e depois no somente leitura.
+    # - trial_ends_at: fim do teste grátis (cadastro + TRIAL_DAYS);
+    # - courtesy_at / courtesy_reason: cortesia concedida pelo comando do
+    #   servidor (manage_billing.py); NULL = sem cortesia;
+    # - subscription_plan: "monthly" ou "annual"; subscription_status: "none",
+    #   "active", "past_due" ou "canceled" (o que o meio de pagamento informou);
+    # - paid_until: até quando o acesso está pago; past_due_since: início do
+    #   atraso (conta a tolerância); cancel_at_period_end: cancelada, vale até paid_until;
+    # - billing_provider / billing_customer_id / billing_subscription_id: o
+    #   meio de pagamento e os identificadores da cliente e da assinatura NELE.
+    # Migração: alembic/versions/20261008_billing.py
+    trial_ends_at = Column(DateTime(timezone=True), nullable=True)
+    courtesy_at = Column(DateTime(timezone=True), nullable=True)
+    courtesy_reason = Column(String, default="")
+    subscription_plan = Column(String, nullable=True)
+    subscription_status = Column(String, default="none")
+    paid_until = Column(DateTime(timezone=True), nullable=True)
+    past_due_since = Column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end = Column(Boolean, default=False)
+    billing_provider = Column(String, nullable=True)
+    billing_customer_id = Column(String, nullable=True, index=True)
+    billing_subscription_id = Column(String, nullable=True, index=True)
+    billing_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     # Relacionamentos
@@ -407,6 +434,27 @@ class Session(Base):
         # Agenda por período (mês visível, próximas sessões) e contagens do painel.
         Index("ix_sessions_owner_start", "owner_id", "start_time"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Assinatura: avisos já processados do meio de pagamento
+# ---------------------------------------------------------------------------
+class BillingEventLog(Base):
+    """Cada aviso do meio de pagamento é aplicado UMA vez (idempotência).
+
+    Os meios de pagamento reenviam o mesmo aviso até receber resposta, e um
+    atacante poderia repetir um aviso antigo ("pagamento confirmado"): a chave
+    primária é o identificador do evento NO MEIO DE PAGAMENTO, então a segunda
+    cópia é reconhecida e ignorada. Guarda só o necessário (sem valores, sem
+    dados do cartão ou da pessoa além do id da conta).
+    """
+    __tablename__ = "billing_events"
+
+    event_id = Column(String, primary_key=True)        # "<meio>:<id do evento no meio>"
+    provider = Column(String, nullable=False)
+    kind = Column(String, nullable=False)
+    user_id = Column(String, nullable=True, index=True)  # sem FK: o registro sobrevive à exclusão da conta
+    received_at = Column(DateTime(timezone=True), default=now_utc)
 
 
 # ---------------------------------------------------------------------------

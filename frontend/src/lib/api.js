@@ -81,6 +81,11 @@ async function request(method, path, body) {
     // lembrando a página de origem (e os rascunhos continuam guardados).
     // As rotas públicas de autenticação respondem 401 por senha errada e
     // não devem disparar isso.
+    // Produto (assinatura): gravação recusada no modo somente leitura. O AuthContext
+    // atualiza a situação da conta e o WriteAccessContext explica o motivo.
+    if (res.status === 402 && data?.detail?.code === "read_only") {
+      window.dispatchEvent(new CustomEvent("psi:read-only", { detail: data.detail }));
+    }
     if (res.status === 401 && !PUBLIC_AUTH_PATHS.includes(path)) {
       window.dispatchEvent(new Event("psi:session-expired"));
     }

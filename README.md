@@ -180,6 +180,46 @@ A API precisa listar o endereço do frontend em `CORS_ORIGINS`.
   nº 001/2009) ficam criptografados, sem acesso de ninguém, e a rotina de manutenção
   os apaga no fim do prazo, junto com a trilha de auditoria da conta.
 
+## Assinatura: planos, teste grátis, cortesia e somente leitura
+
+As regras ficam em `backend/billing.py`; as rotas, em `server.py` (seção "assinatura").
+
+| Situação | O que a pessoa pode fazer |
+|---|---|
+| Teste grátis (`TRIAL_DAYS`, padrão 14, desde o cadastro, sem cartão) | tudo |
+| Assinante (mensal ou anual) | tudo |
+| Pagamento atrasado, dentro da tolerância (`BILLING_GRACE_DAYS`, padrão 7) | tudo, com aviso |
+| Teste encerrado, atraso além da tolerância ou assinatura encerrada | **somente leitura** |
+| Cortesia | tudo, sem cobrança |
+
+**Somente leitura** não é bloqueio: a pessoa vê, **exporta tudo**, corrige o cadastro do
+paciente (LGPD art. 18, III), arquiva, anonimiza, revoga consentimento e encerra a conta.
+Não cria paciente novo nem cria/edita evoluções e sessões (a API responde 402,
+`code: read_only`). A psicóloga é obrigada a guardar o prontuário por 5 anos
+(Resolução CFP nº 001/2009); trancar a conta a impediria de cumprir isso.
+
+A situação é **calculada pelas datas** (fim do teste, "pago até", início do atraso): sem
+aviso do meio de pagamento, a conta entra sozinha na tolerância e depois no somente
+leitura.
+
+**Cortesia** (só pela linha de comando do servidor, registrada na trilha da conta):
+
+```
+docker compose exec api python manage_billing.py cortesia conceder fulana@exemplo.com --motivo "Usuária fundadora"
+docker compose exec api python manage_billing.py cortesia revogar fulana@exemplo.com
+docker compose exec api python manage_billing.py situacao fulana@exemplo.com
+```
+
+**Meio de pagamento.** Hoje só existe o `simulado` (desenvolvimento). Para ligar um meio
+real (Asaas, Mercado Pago, Stripe...): uma classe nova em `billing.py` com a interface de
+`BillingProvider` (`start_checkout` devolve o endereço da página de pagamento do meio:
+nenhum dado de cartão passa pelo servidor; `cancel`; `parse_webhook` confere a
+autenticidade do aviso e o traduz em `BillingEvent`), o nome dela em `KNOWN_PROVIDERS` e
+em `billing_provider()` no `server.py`. Os avisos chegam em
+`POST /api/webhook/billing/<meio>`; cada aviso vale uma vez (tabela `billing_events`).
+Ao contratar o meio real, inclua-o na Política de Privacidade (`legal.py`) como
+suboperador.
+
 ## Backup e a chave de criptografia
 
 Os prontuários ficam criptografados no banco com a `FERNET_KEY`. **Um backup do banco

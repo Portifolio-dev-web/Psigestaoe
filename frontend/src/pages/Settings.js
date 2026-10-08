@@ -23,10 +23,11 @@ import PasswordInput from "@/components/auth/PasswordInput";
 import TwoFactorCard from "@/components/settings/TwoFactorCard";
 import ConnectedDevicesCard from "@/components/settings/ConnectedDevicesCard";
 import CloseAccountCard from "@/components/settings/CloseAccountCard";
+import SubscriptionCard from "@/components/settings/SubscriptionCard";
 import { toast } from "sonner";
 import {
   Shield, Lock, FileCheck, History, KeyRound, ScrollText, Loader2, CheckCircle2, UserRound,
-  FileSignature, Archive, TimerReset, Mail, Download, ShieldCheck, UserX, CalendarClock,
+  FileSignature, Archive, TimerReset, Mail, Download, ShieldCheck, UserX, CalendarClock, CreditCard,
 } from "lucide-react";
 
 // Rótulos das ações gravadas pelo backend em log_audit(). Ações novas da etapa
@@ -48,11 +49,14 @@ const ACTION_LABEL = {
   // Segurança média + backlog: pedido de nova senha por e-mail e verificação em duas etapas.
   solicitar_senha: "Pedido de nova senha", mfa_ativar: "Duas etapas ativada",
   mfa_desativar: "Duas etapas desativada", mfa_codigos: "Novos códigos",
+  // Produto (assinatura): pagamentos, atrasos, cancelamento e cortesia.
+  assinatura: "Assinatura", cortesia: "Cortesia",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
   termos: "Política", termo: "Termo", integracao: "Integração", sessao: "Sessão",
   auditoria: "Auditoria",  // exportação da própria trilha (complementares)
+  assinatura: "Assinatura",  // produto: assinatura
 };
 
 // Correção (varredura de UI, defeito 6): alguns detalhes da trilha guardam a
@@ -703,9 +707,10 @@ const PRIVACY_FEATURES = [
 // ---------------------------------------------------------------------------
 // UX (Configurações em abas): antes era uma página única e longa, chamada
 // "Privacidade & LGPD", onde trocar a senha exigia rolar por termo,
-// criptografia e auditoria. Agora são cinco abas:
+// criptografia e auditoria. Agora são seis abas:
 //   Minha conta   - senha, duas etapas, aparelhos, bloqueio, rascunhos,
 //                   encerrar a conta (e nome/CRP);
+//   Assinatura    - situação, planos, cancelamento (produto: assinatura);
 //   Agenda        - horário de atendimento (análise de UI, P7);
 //   Termo         - termo de consentimento dos pacientes;
 //   Privacidade   - conformidade, política e o que o sistema protege;
@@ -716,6 +721,7 @@ const PRIVACY_FEATURES = [
 // ---------------------------------------------------------------------------
 const TABS = [
   { id: "conta", label: "Minha conta", icon: UserRound },
+  { id: "assinatura", label: "Assinatura", icon: CreditCard },
   { id: "agenda", label: "Agenda", icon: CalendarClock },
   { id: "termo", label: "Termo de consentimento", icon: FileSignature },
   { id: "privacidade", label: "Privacidade", icon: Shield },
@@ -734,7 +740,7 @@ export default function Settings() {
     <div className="space-y-6">
       <div>
         <h1 className="font-head text-3xl font-extrabold tracking-tight text-[#0F172A]">Configurações</h1>
-        <p className="mt-1 text-sm text-slate-500">Sua conta, a agenda, o termo de consentimento, privacidade e auditoria</p>
+        <p className="mt-1 text-sm text-slate-500">Sua conta, a assinatura, a agenda, o termo de consentimento, privacidade e auditoria</p>
       </div>
 
       {/* `replace`: trocar de aba não enche o histórico do navegador. */}
@@ -759,6 +765,11 @@ export default function Settings() {
           <ConnectedDevicesCard />
           <SessionSecurity />
           <CloseAccountCard />
+        </TabsContent>
+
+        {/* Produto (assinatura): situação, planos e cancelamento. */}
+        <TabsContent value="assinatura" className="mt-6">
+          <SubscriptionCard />
         </TabsContent>
 
         {/* P7: horário de atendimento da grade da agenda. */}

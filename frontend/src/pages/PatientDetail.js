@@ -7,6 +7,7 @@ import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime
 import RecordEditorDialog from "@/components/RecordEditorDialog";
 import RecordHistoryDialog from "@/components/RecordHistoryDialog";
 import PatientAgendaCard from "@/components/PatientAgendaCard";
+import { useWriteAccess } from "@/context/WriteAccessContext";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -157,12 +158,16 @@ export default function PatientDetail() {
     }
   };
 
+  // Produto (assinatura): no modo somente leitura, criar ou editar evolução mostra
+  // a explicação (com "Ver planos") em vez de abrir o editor; ler e exportar seguem livres.
+  const { canWrite, guard, explain } = useWriteAccess();
+
   // O editor (com rascunho automático) fica em components/RecordEditorDialog.js.
-  const openNew = () => {
+  const openNew = guard(() => {
     setFromSession(null);
     setEditingRec(null);
     setEditorOpen(true);
-  };
+  });
 
   // UX (agenda -> evolução): o painel "Hoje" e a agenda trazem para cá com
   //   ?evolucao=nova&sessao=<id>&inicio=<ISO>  -> abre o editor já com a data e
@@ -172,7 +177,9 @@ export default function PatientDetail() {
   useEffect(() => {
     const target = searchParams.get("evolucao");
     if (!target || !patient) return;
-    if (target === "nova") {
+    if (target === "nova" && !canWrite) {
+      explain(); // assinatura: "Registrar evolução" vindo da agenda/painel no somente leitura
+    } else if (target === "nova") {
       setFromSession({ sessionId: searchParams.get("sessao") || null, sessionDatetime: searchParams.get("inicio") || null });
       setEditingRec(null);
       setEditorOpen(true);
@@ -180,16 +187,16 @@ export default function PatientDetail() {
       setHighlightId(target);
     }
     setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams, patient]);
+  }, [searchParams, setSearchParams, patient, canWrite, explain]);
 
   useEffect(() => {
     if (!highlightId || !records.some((r) => r.id === highlightId)) return;
     document.querySelector(`[data-testid="record-${highlightId}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [highlightId, records]);
-  const openEdit = (r) => {
+  const openEdit = guard((r) => { // assinatura: editar evolução também grava
     setEditingRec(r);
     setEditorOpen(true);
-  };
+  });
   const onEditorOpenChange = (open) => {
     setEditorOpen(open);
     if (!open) setDraftsVersion((v) => v + 1);

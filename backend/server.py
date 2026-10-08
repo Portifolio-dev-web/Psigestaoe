@@ -47,6 +47,7 @@ from starlette.concurrency import run_in_threadpool
 from xml.sax.saxutils import escape
 
 import legal
+import billing  # produto: assinatura (regras em billing.py)
 import mailer
 import observability
 import totp
@@ -63,7 +64,8 @@ from http_security import (
     validation_error_handler,
 )
 from models import (
-    AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession, now_utc,
+    AuditLog, BillingEventLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User,
+    UserSession, now_utc,
 )
 
 # MONITORAMENTO (escala): configura os logs antes de qualquer outra coisa,
@@ -358,6 +360,9 @@ app.add_exception_handler(IntegrityError, integrity_error_handler)
 observability.init_sentry(ENVIRONMENT)
 # Varredura, itens 8 e 15: em produção o servidor não sobe sem rate limit compartilhado (Redis).
 require_shared_rate_limit(ENVIRONMENT)
+# Produto (assinatura): configuração inválida, ou pagamento SIMULADO em
+# produção (liberaria assinaturas sem cobrar), impede a subida.
+billing.validate_config(ENVIRONMENT)
 
 # Aviso de conformidade: dados do controlador/encarregado em branco na política.
 legal.warn_if_incomplete(ENVIRONMENT)
@@ -1314,6 +1319,9 @@ def public_user(u: User) -> dict:
         # Termo personalizado antes desta versão também conta como revisado.
         "consent_term_reviewed": bool(u.consent_term_reviewed_at or u.consent_term_body),
         "onboarding_dismissed": u.onboarding_dismissed_at is not None,
+        # Produto (assinatura): situação da conta (teste, assinante, atraso,
+        # somente leitura, cortesia), preços e se o pagamento on-line existe.
+        "subscription": billing.public_state(u),
         "has_password": bool(u.password_hash),
         # Segurança (backlog): verificação em duas etapas e e-mail comprovado.
         "mfa_enabled": u.mfa_enabled_at is not None,
@@ -1492,6 +1500,25 @@ async def get_active_user(user: User = Depends(get_current_user)) -> User:
         # aceite) sem depender do texto da mensagem; `msg` é o que o usuário lê.
         raise HTTPException(status_code=403, detail={"code": "terms_required", "msg": TERMS_REQUIRED_DETAIL})
     return user
+
+
+async def get_writer(user: User = Depends(get_active_user)) -> User:
+    """Produto (assinatura): usuário ativo E com permissão de GRAVAR.
+
+    Usada só nas rotas que criam ou editam o conteúdo de trabalho (paciente
+    novo, evolução, sessão da agenda). No modo somente leitura (teste
+    encerrado, atraso além da tolerância, assinatura encerrada) elas respondem
+    402 com `code: read_only`; o frontend mostra o motivo e o caminho para
+    assinar. Ver, EXPORTAR, corrigir o cadastro, anonimizar, arquivar,
+    revogar consentimento e encerrar a conta continuam liberados: a psicóloga
+    precisa cumprir a guarda do prontuário e os pedidos LGPD dos pacientes
+    mesmo sem assinatura.
+    """
+    state = billing.access_state(user)
+    if not state["can_write"]:
+        raise HTTPException(status_code=402, detail={
+            "code": "read_only", "reason": state["reason"], "msg": billing.READ_ONLY_MESSAGES[state["reason"]]})
+    return user
 # ---------------------------------------------------------------------------
 
 # CORREÇÃO DE SEGURANÇA (item 7 da auditoria): as rotas de autenticação
@@ -1646,6 +1673,8 @@ async def confirm_signup(data: SignupConfirmInput, response: Response, db: Async
         terms_accepted_at=accepted_at,
         # A pessoa abriu o link enviado a este e-mail: a posse está comprovada.
         email_verified_at=now_utc(),
+        # Produto (assinatura): a conta nasce no teste grátis, sem cartão.
+        trial_ends_at=now_utc() + timedelta(days=billing.TRIAL_DAYS),
     )
     db.add(new_user)
     try:
@@ -1963,6 +1992,8 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
             # Segurança (varredura, item 5): identidade fixa + e-mail comprovado pelo Google.
             google_sub=google_sub,
             email_verified_at=now_utc(),
+            # Produto (assinatura): a conta nasce no teste grátis, sem cartão.
+            trial_ends_at=now_utc() + timedelta(days=billing.TRIAL_DAYS),
         )
         db.add(user)
         created_account = True
@@ -2204,6 +2235,222 @@ async def update_onboarding(data: OnboardingInput, user: User = Depends(get_acti
     await db.commit()
     await db.refresh(user)
     return public_user(user)
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO: assinatura (planos, teste grátis, cortesia, somente leitura)
+# ---------------------------------------------------------------------------
+# As REGRAS ficam em billing.py; aqui ficam a gravação, a auditoria e as rotas.
+#   POST /billing/checkout         -> endereço da página de pagamento do meio
+#   POST /billing/cancel           -> cancela a renovação (vale até o fim do pago)
+#   POST /billing/simulate*        -> só com o pagamento SIMULADO, em desenvolvimento
+#   POST /webhook/billing/{meio}   -> avisos do meio de pagamento (pagou, atrasou...)
+# A cortesia NÃO tem rota: é concedida no servidor (manage_billing.py), para não
+# existir na API um caminho que libere acesso sem pagamento.
+BILLING_SIM_AUDIENCE = "psigestao-billing-sim"
+BILLING_SIM_MINUTES = 30
+BILLING_ACTOR = "meio de pagamento"
+
+
+class CheckoutInput(BaseModel):
+    plan: Literal["monthly", "annual"]
+
+
+class SimulatedPaymentInput(BaseModel):
+    token: str = Field(max_length=2048)
+    outcome: Literal["pagar", "recusar"]
+
+
+class SimulatedEventInput(BaseModel):
+    # renovar/atrasar/cancelar/estornar: avisos que um meio real mandaria.
+    # vencer_periodo/vencer_tolerancia/encerrar_teste: "viagem no tempo" para
+    # ver cada situação na tela sem esperar dias (só desenvolvimento).
+    event: Literal["renovar", "atrasar", "cancelar", "estornar", "vencer_periodo", "vencer_tolerancia", "encerrar_teste"]
+
+
+def _billing_checkout_token(user: User, plan: str) -> str:
+    """Pagamento simulado: o "pedido" vai num token curto, com destinatário próprio
+    (nunca aceito como sessão), preso à conta e ao plano escolhidos."""
+    issued_at = now_utc()
+    return jwt.encode({
+        "sub": user.user_id, "plan": plan, "iat": issued_at,
+        "exp": issued_at + timedelta(minutes=BILLING_SIM_MINUTES),
+        "iss": JWT_ISSUER, "aud": BILLING_SIM_AUDIENCE, "jti": secrets.token_urlsafe(12),
+    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _billing_checkout_claims(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], issuer=JWT_ISSUER,
+                          audience=BILLING_SIM_AUDIENCE,
+                          options={"require": ["exp", "iat", "iss", "aud", "sub", "jti"]})
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=400, detail={
+            "code": "checkout_expired", "msg": "Este pagamento expirou. Volte e escolha o plano de novo."})
+
+
+def billing_provider() -> Optional[billing.BillingProvider]:
+    """O meio de pagamento configurado (None = pagamento on-line indisponível)."""
+    if billing.BILLING_PROVIDER == "simulado":
+        return billing.SimulatedProvider(_billing_checkout_token, frontend_link)
+    return None
+
+
+def _require_simulated() -> None:
+    """As rotas de simulação só existem com o pagamento simulado, em desenvolvimento."""
+    if billing.BILLING_PROVIDER != "simulado" or ENVIRONMENT != "development":
+        raise HTTPException(status_code=404, detail="Não encontrado.")
+
+
+async def apply_billing_event(db: AsyncSession, user: User, event: billing.BillingEvent, provider_name: str,
+                              actor: str = BILLING_ACTOR) -> bool:
+    """Aplica um aviso do meio de pagamento UMA vez (idempotência por event_id)
+    e registra na trilha. Devolve False se o aviso já tinha sido aplicado."""
+    key = f"{provider_name}:{event.event_id}"
+    if await db.get(BillingEventLog, key) is not None:
+        return False
+    detail = billing.apply_event(user, event)
+    db.add(BillingEventLog(event_id=key, provider=provider_name, kind=event.kind, user_id=user.user_id))
+    try:
+        await db.commit()
+    except IntegrityError:  # o mesmo aviso chegou duas vezes ao mesmo tempo
+        await db.rollback()
+        return False
+    await db.refresh(user)
+    await log_audit(db, user.user_id, actor, "assinatura", "assinatura", user.user_id, detail)
+    return True
+
+
+@api_router.post("/billing/checkout", dependencies=[Depends(rate_limit("billing-checkout", 10, 300))])
+async def billing_checkout(data: CheckoutInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Começa a assinatura: devolve o endereço da página de pagamento do meio.
+    Usa get_active_user (não get_writer): quem está no somente leitura PRECISA conseguir assinar."""
+    state = billing.access_state(user)
+    if state["state"] == "courtesy":
+        raise HTTPException(status_code=409, detail={"code": "courtesy", "msg": "Sua conta é cortesia: não há o que pagar."})
+    if state["state"] == "active" and not state["cancel_at_period_end"]:
+        raise HTTPException(status_code=409, detail={"code": "already_active", "msg": "Você já tem uma assinatura ativa."})
+    provider = billing_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail={
+            "code": "billing_unavailable",
+            "msg": "O pagamento on-line ainda não está disponível. Fale com o suporte (página de Ajuda) para assinar."})
+    url = await provider.start_checkout(user, data.plan)
+    user.billing_provider = provider.name
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "assinatura", "assinatura", user.user_id,
+                    f"Pagamento iniciado: plano {billing.PLAN_LABELS[data.plan]}")
+    return {"url": url}
+
+
+@api_router.post("/billing/cancel", dependencies=[Depends(rate_limit("billing-cancel", 10, 300))])
+async def billing_cancel(data: EndSessionsInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Cancela a RENOVAÇÃO. O que já foi pago continua valendo até o fim do período;
+    depois a conta vai para o somente leitura (sem tolerância: foi uma escolha)."""
+    if user.subscription_status not in ("active", "past_due") or user.courtesy_at is not None:
+        raise HTTPException(status_code=409, detail={"code": "no_subscription", "msg": "Não há assinatura ativa para cancelar."})
+    provider = billing_provider()
+    if provider is not None and user.billing_provider == provider.name:
+        await provider.cancel(user)
+    event = billing.BillingEvent(event_id=f"cancelamento-{uuid.uuid4().hex}", kind="subscription_canceled",
+                                 user_id=user.user_id)
+    await apply_billing_event(db, user, event, user.billing_provider or "app", actor=user.email)
+    return public_user(user)
+
+
+@api_router.post("/billing/simulate")
+async def billing_simulate_payment(data: SimulatedPaymentInput, user: User = Depends(get_active_user),
+                                   db: AsyncSession = Depends(get_db)):
+    """Pagamento SIMULADO (desenvolvimento): a tela /assinatura/simulacao manda
+    "pagar" ou "recusar". Pagar vira o mesmo aviso que um meio real mandaria; o
+    id do aviso vem do token, então o mesmo pagamento nunca vale duas vezes."""
+    _require_simulated()
+    claims = _billing_checkout_claims(data.token)
+    if claims["sub"] != user.user_id:
+        raise HTTPException(status_code=403, detail={"code": "checkout_other_user",
+                                                     "msg": "Este pagamento pertence a outra conta."})
+    if data.outcome == "recusar":
+        await log_audit(db, user.user_id, BILLING_ACTOR, "assinatura", "assinatura", user.user_id,
+                        "Pagamento recusado (simulação)")
+        return {"applied": False, "user": public_user(user)}
+    event = billing.BillingEvent(event_id=f"checkout-{claims['jti']}", kind="payment_confirmed",
+                                 user_id=user.user_id, plan=claims["plan"])
+    applied = await apply_billing_event(db, user, event, "simulado")
+    return {"applied": applied, "user": public_user(user)}
+
+
+@api_router.post("/billing/simulate/event")
+async def billing_simulate_event(data: SimulatedEventInput, user: User = Depends(get_active_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Ferramentas de teste do pagamento simulado (desenvolvimento): avisos do meio
+    de pagamento e "viagem no tempo" para ver cada situação da conta na tela."""
+    _require_simulated()
+    now = now_utc()
+    if data.event in ("vencer_periodo", "vencer_tolerancia", "encerrar_teste"):
+        if data.event == "encerrar_teste":
+            user.trial_ends_at = now - timedelta(seconds=1)
+        elif not user.paid_until:
+            raise HTTPException(status_code=409, detail={"code": "no_period",
+                                                         "msg": "Não há período pago. Simule um pagamento antes."})
+        elif data.event == "vencer_periodo":
+            user.paid_until = now - timedelta(seconds=1)
+        else:
+            user.past_due_since = now - timedelta(days=billing.GRACE_DAYS, seconds=1)
+            user.paid_until = min(_as_utc(user.paid_until), user.past_due_since)
+        await db.commit()
+        await db.refresh(user)
+        await log_audit(db, user.user_id, BILLING_ACTOR, "assinatura", "assinatura", user.user_id,
+                        f"Simulação: {data.event.replace('_', ' ')}")
+        return public_user(user)
+    kind = {"renovar": "payment_confirmed", "atrasar": "payment_overdue", "cancelar": "subscription_canceled",
+            "estornar": "payment_refunded"}[data.event]
+    event = billing.BillingEvent(event_id=f"evento-{uuid.uuid4().hex}", kind=kind, user_id=user.user_id,
+                                 plan=user.subscription_plan)
+    await apply_billing_event(db, user, event, "simulado")
+    return public_user(user)
+
+
+@api_router.post("/webhook/billing/{provider_name}", dependencies=[Depends(rate_limit("billing-webhook", 120, 60))])
+async def billing_webhook(request: Request, provider_name: str = PathParam(max_length=32),
+                          db: AsyncSession = Depends(get_db)):
+    """Avisos do meio de pagamento (pagou, atrasou, cancelou, estornou).
+
+    Fora do CSRF (prefixo /api/webhook/): quem chama é o servidor do meio de
+    pagamento. A autenticidade é conferida por ele mesmo (parse_webhook: token
+    ou assinatura do meio); aviso não autêntico = 401 e nada muda. Cada aviso
+    vale uma vez (apply_billing_event). Responde 200 também para aviso repetido
+    ou de conta desconhecida, senão o meio reenviaria para sempre.
+    """
+    provider = billing_provider()
+    if provider is None or provider.name != provider_name or provider.name == "simulado":
+        raise HTTPException(status_code=404, detail="Não encontrado.")
+    try:
+        events = provider.parse_webhook(dict(request.headers), await request.body())
+    except PermissionError:
+        raise HTTPException(status_code=401, detail="Aviso de pagamento não autenticado.")
+    for event in events:
+        user = await db.get(User, event.user_id) if event.user_id else None
+        if user is None:
+            logger.warning("Aviso de pagamento de conta desconhecida ignorado (%s).", event.kind)
+            continue
+        await apply_billing_event(db, user, event, provider.name)
+    return {"ok": True}
+
+
+async def set_courtesy(db: AsyncSession, email: str, granted: bool, reason: str = "") -> dict:
+    """Cortesia (manage_billing.py): acesso completo sem cobrança, até ser revogada.
+    Só pelo servidor, com registro na trilha da própria conta."""
+    user = (await db.execute(select(User).where(func.lower(User.email) == email.strip().lower()))).scalar_one_or_none()
+    if user is None:
+        raise LookupError(f"Nenhuma conta com o e-mail {email}.")
+    reason = (reason or "").strip()[:120]
+    user.courtesy_at = now_utc() if granted else None
+    user.courtesy_reason = reason if granted else ""
+    await db.commit()
+    await db.refresh(user)
+    detail = ("Cortesia concedida" + (f" ({reason})" if reason else "")) if granted else "Cortesia revogada"
+    await log_audit(db, user.user_id, "sistema (linha de comando)", "cortesia", "assinatura", user.user_id, detail)
+    return billing.access_state(user)
 
 
 # ---------------------------------------------------------------------------
@@ -2973,7 +3220,10 @@ async def get_patient(pid: str, user: User = Depends(get_active_user), db: Async
     return data
 
 @api_router.post("/patients")
-async def create_patient(data: PatientInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def create_patient(data: PatientInput, user: User = Depends(get_writer), db: AsyncSession = Depends(get_db)):
+    # Produto (assinatura): paciente NOVO exige gravação (get_writer). Corrigir o
+    # cadastro de quem já existe (PUT) continua liberado: é direito do paciente
+    # (LGPD art. 18, III) e serve também para revogar o consentimento.
     novo_paciente = Patient(owner_id=user.user_id, anonymized=False)
     _apply_patient_input(novo_paciente, data)
     consent_action = apply_consent(novo_paciente, data.consent_terms, user)
@@ -3021,7 +3271,7 @@ def _record_conflict(current_version: int) -> HTTPException:
 
 
 @api_router.put("/records/{rid}")
-async def update_record(rid: str, data: RecordUpdateInput, user: User = Depends(get_active_user),
+async def update_record(rid: str, data: RecordUpdateInput, user: User = Depends(get_writer),  # assinatura: grava
                         db: AsyncSession = Depends(get_db)):
     """Edita uma evolução, arquivando a versão anterior.
 
@@ -3239,7 +3489,8 @@ async def list_records(
     return {"items": records, "next_cursor": next_cursor, "total": total}
 
 @api_router.post("/patients/{pid}/records")
-async def create_record(pid: str, data: RecordInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def create_record(pid: str, data: RecordInput, user: User = Depends(get_writer),  # assinatura: grava
+                        db: AsyncSession = Depends(get_db)):
     p = await _get_owned_patient(db, pid, user)
 
     # PRODUTO (agenda -> evolução): evolução registrada a partir de uma sessão.
@@ -3584,6 +3835,11 @@ async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = H
         # Backlog: token com validade. O profissional já recebeu o aviso por e-mail.
         raise HTTPException(status_code=401, detail=(
             "Token de integração vencido. Gere um novo em Pacientes > Integrar Google Forms."))
+    # Produto (assinatura): o formulário cria paciente novo, então segue a regra
+    # de gravação da conta. A resposta explica o motivo a quem configurou o script.
+    if not billing.access_state(owner)["can_write"]:
+        raise HTTPException(status_code=402, detail=(
+            "A conta do profissional está no modo somente leitura (assinatura): o cadastro não foi recebido."))
 
     # Não exigimos aqui o aceite da versão vigente da política (get_active_user):
     # se a política mudar, bloquear o webhook faria o formulário do profissional
@@ -3901,7 +4157,8 @@ async def list_sessions(
     return [session_public(s, records.get(s.id)) for s in docs]
 
 @api_router.post("/sessions")
-async def create_session(data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def create_session(data: SessionInput, user: User = Depends(get_writer),  # assinatura: grava
+                         db: AsyncSession = Depends(get_db)):
     # Varredura, item 9: trava ANTES de checar; liberada no commit abaixo
     # (não pode haver commit entre a checagem e a gravação).
     await _lock_owner_schedule(db, user.user_id)
@@ -3946,7 +4203,8 @@ async def create_session(data: SessionInput, user: User = Depends(get_active_use
     return {**session_public(created[0]), "series_count": len(created)}
 
 @api_router.put("/sessions/{sid}")
-async def update_session(sid: str, data: SessionInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def update_session(sid: str, data: SessionInput, user: User = Depends(get_writer),  # assinatura: grava
+                         db: AsyncSession = Depends(get_db)):
     # Varredura, item 9: mesma trava da criação (remarcar também ocupa horário).
     await _lock_owner_schedule(db, user.user_id)
     stmt = select(Session).where(Session.id == sid, Session.owner_id == user.user_id)
@@ -4009,7 +4267,8 @@ async def delete_session(sid: str,
                          # Fluxo clínico (P1): "this" (só esta) ou "following" (esta e as
                          # próximas AGENDADAS da série; ex.: o paciente encerrou o tratamento).
                          scope: Literal["this", "following"] = Query("this"),
-                         user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+                         user: User = Depends(get_writer),  # assinatura: grava
+                         db: AsyncSession = Depends(get_db)):
     stmt = select(Session).where(Session.id == sid, Session.owner_id == user.user_id)
     result = await db.execute(stmt)
     s = result.scalar_one_or_none()

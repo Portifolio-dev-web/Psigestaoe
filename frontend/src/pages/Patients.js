@@ -21,6 +21,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { useWriteAccess } from "@/context/WriteAccessContext";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -298,14 +299,18 @@ export default function Patients() {
   // ========================================================================
   // HANDLERS - DIALOG
   // ========================================================================
-  const openNew = () => {
+  // Produto (assinatura): paciente NOVO exige gravação; no somente leitura aparece a
+  // explicação (com "Ver planos"). Editar o cadastro de quem já existe continua
+  // liberado (correção, LGPD art. 18, III), como no servidor.
+  const { guard } = useWriteAccess();
+  const openNew = guard(() => {
     setEditing(null);
     setForm(EMPTY_FORM);
     setFormErrors({}); // A4: formulário novo começa sem erros
     setSubmitError("");
     loadCurrentTerm(); // sempre o texto mais recente (nome/CRP/modelo podem ter mudado)
     setDialogOpen(true);
-  };
+  });
 
   // O1: chegou com ?novo=1 -> abre o cadastro; o parâmetro sai da URL (recarregar não reabre).
   useEffect(() => {

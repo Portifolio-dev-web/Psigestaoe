@@ -10,6 +10,8 @@ import { PENDING_EVOLUTIONS_EVENT } from "@/lib/pendingEvolutions";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import SubscriptionBanner from "@/components/SubscriptionBanner";
+import { WriteAccessProvider } from "@/context/WriteAccessContext";
 
 const nav = [
   // Análise de UI (F3): "Painel" em vez de "Dashboard" (o resto do sistema é em português).
@@ -126,7 +128,10 @@ export default function AppLayout() {
   // Agora é a gaveta do Radix (components/ui/sheet.jsx), que é um diálogo de
   // verdade: o foco entra no menu e fica nele, Esc e o toque fora fecham, o
   // foco volta ao botão ao fechar e o botão informa "expandido/recolhido".
+  // Produto (assinatura): WriteAccessProvider diz às telas se a conta pode gravar
+  // e explica o somente leitura (ver context/WriteAccessContext.js).
   return (
+    <WriteAccessProvider>
     <Sheet open={open} onOpenChange={setOpen}>
     {/* Acessibilidade (análise de UI, A7): primeiro item do Tab. Antes eram 7 Tabs pelo
         menu até chegar à tela; este link (visível só com o foco do teclado) pula direto. */}
@@ -177,6 +182,8 @@ export default function AppLayout() {
         {/* tabIndex -1 + sem contorno: recebe o foco ao trocar de tela (análise de UI, A1,
             components/RouteAnnouncer.js) sem desenhar uma moldura em volta da tela inteira. */}
         <main id="conteudo" tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none lg:px-8">
+          {/* Produto (assinatura): teste, atraso, somente leitura (em toda tela do sistema). */}
+          <SubscriptionBanner />
           {/* Complementares (desempenho): as telas são carregadas sob demanda
               (App.js). Este Suspense deixa o menu e o topo na tela enquanto só
               o conteúdo carrega, em vez de piscar a página inteira. */}
@@ -191,5 +198,6 @@ export default function AppLayout() {
       </div>
     </div>
     </Sheet>
+    </WriteAccessProvider>
   );
 }

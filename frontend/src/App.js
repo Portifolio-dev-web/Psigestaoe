@@ -26,6 +26,7 @@ const Agenda = lazy(() => import("@/pages/Agenda"));
 const Settings = lazy(() => import("@/pages/Settings"));
 const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
 const Help = lazy(() => import("@/pages/Help"));
+const SimulatedCheckout = lazy(() => import("@/pages/SimulatedCheckout"));
 
 function LoadingScreen() {
   return (
@@ -125,6 +126,8 @@ function AppRouter() {
         <Route path="/configuracoes" element={<Settings />} />
         {/* O2: Ajuda (abre também sem login, ver AppBranch). */}
         <Route path="/ajuda" element={<Help />} />
+        {/* Produto (assinatura): página do pagamento SIMULADO (só funciona no desenvolvimento). */}
+        <Route path="/assinatura/simulacao" element={<SimulatedCheckout />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

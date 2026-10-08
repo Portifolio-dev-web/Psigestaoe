@@ -10,7 +10,10 @@ import { useEffect, useState } from "react";
 // endereço. A limpeza fica num efeito (e não no inicializador do estado),
 // porque o React em modo estrito roda o inicializador duas vezes.
 // ---------------------------------------------------------------------------
-const readToken = () => (window.location.hash.match(/token=([A-Za-z0-9_-]+)/) || [])[1] || "";
+// Produto (assinatura): aceita também o ponto. Os tokens dos e-mails (base64 de
+// URL) não têm ponto, mas o pedido do pagamento simulado é um JWT ("a.b.c"), que
+// antes era cortado no primeiro ponto e a página dizia "pedido não encontrado".
+const readToken = () => (window.location.hash.match(/token=([A-Za-z0-9_.-]+)/) || [])[1] || "";
 
 export function useLinkToken() {
   const [token] = useState(readToken);

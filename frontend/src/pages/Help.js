@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  CalendarDays, FileText, Keyboard, LifeBuoy, Loader2, Mail, Rocket, ShieldCheck, Users,
+  CalendarDays, CreditCard, FileText, Keyboard, LifeBuoy, Loader2, Mail, Rocket, ShieldCheck, Users,
 } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -82,6 +82,29 @@ const TOPICS = [
     ],
   },
 ];
+
+// Produto (assinatura): perguntas sobre teste, planos e somente leitura. Os números
+// (dias de teste, tolerância, preços) vêm da conta quando há login; sem login,
+// os padrões do servidor (backend/billing.py).
+function billingTopic(sub) {
+  const trialDays = sub?.trial_days ?? 14;
+  const graceDays = sub?.grace_days ?? 7;
+  return {
+    id: "assinatura", icon: CreditCard, title: "Assinatura",
+    items: [
+      ["Como funciona o teste grátis?",
+        `Ao criar a conta você tem ${trialDays} dias com tudo liberado, sem cartão. Se assinar durante o teste, os dias que sobrarem não se perdem: o período pago começa depois deles.`],
+      ["Como assino ou mudo de plano?",
+        "Em Configurações > Assinatura, escolha mensal ou anual. O pagamento é feito na página segura do meio de pagamento; o PsiGestão não recebe os dados do seu cartão."],
+      ["O que acontece se eu não assinar ou parar de pagar?",
+        "Nada é apagado. A conta fica em somente leitura: você continua vendo e exportando tudo (PDF, JSON e o arquivo completo da conta), corrigindo cadastros e atendendo pedidos LGPD dos pacientes, mas não cria pacientes, evoluções nem sessões. Assim você continua cumprindo a guarda de 5 anos dos prontuários exigida pelo CFP."],
+      ["E se o pagamento atrasar?",
+        `Você continua com tudo liberado por ${graceDays} dias, com um aviso no topo da tela. Regularizando nesse prazo, nada muda.`],
+      ["Como cancelo?",
+        "Em Configurações > Assinatura > “Cancelar assinatura”. O que já foi pago continua valendo até o fim do período; depois, a conta fica somente leitura. Dá para assinar de novo quando quiser."],
+    ],
+  };
+}
 
 const SHORTCUTS = [
   ["Tab (no início da tela)", "Mostra “Pular para o conteúdo”, que leva direto à tela, sem passar pelo menu"],
@@ -181,7 +204,7 @@ export default function Help() {
         <h2 id="help-faq" className="flex items-center gap-2 font-head text-xl font-bold text-[#0F172A]">
           <LifeBuoy className="h-5 w-5 text-[#1E3A8A]" aria-hidden="true" /> Perguntas frequentes
         </h2>
-        {TOPICS.map((topic) => (
+        {[...TOPICS, billingTopic(user?.subscription)].map((topic) => (
           <Card key={topic.id} className="border-slate-200 p-5 shadow-sm" data-testid={`help-topic-${topic.id}`}>
             <h3 className="flex items-center gap-2 font-head text-base font-bold text-[#0F172A]">
               <topic.icon className="h-4 w-4 text-[#1E3A8A]" aria-hidden="true" /> {topic.title}

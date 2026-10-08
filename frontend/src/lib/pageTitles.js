@@ -24,6 +24,7 @@ const PAGES = [
   [/^\/agenda\/?$/, "Agenda"],
   [/^\/configuracoes\/?$/, "Configurações"],
   [/^\/ajuda\/?$/, "Ajuda"],  // análise de UI, O2
+  [/^\/assinatura\/simulacao\/?$/, "Pagamento simulado"],  // produto: assinatura (desenvolvimento)
 ];
 
 /** { name: "Pacientes", full: "Pacientes · PsiGestão" } para o endereço dado. */

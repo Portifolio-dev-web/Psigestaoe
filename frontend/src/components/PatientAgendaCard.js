@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import SessionDialog from "@/components/agenda/SessionDialog";
 import { useSessionActions } from "@/components/agenda/useSessionActions";
+import { useWriteAccess } from "@/context/WriteAccessContext";
 import { STATUS, defaultNewSessionStart, formatTimeRange, isNoShow } from "@/components/agenda/agendaUtils";
 
 // ---------------------------------------------------------------------------
@@ -55,10 +56,13 @@ export default function PatientAgendaCard({ patient, canSchedule, refreshKey }) 
 
   const { attemptSave, deleteSession, conflictDialog, isDeleting } = useSessionActions(load);
 
-  const openNew = () => setDialog({
+  // Produto (assinatura): no somente leitura, "Agendar sessão" explica e não abre o
+  // formulário; as sessões existentes abrem só para consulta (SessionDialog readOnly).
+  const { canWrite, guard } = useWriteAccess();
+  const openNew = guard(() => setDialog({
     open: true,
     initial: { start: defaultNewSessionStart(new Date()), patient_id: patient.id, patient_name: patient.full_name },
-  });
+  }));
 
   const submit = async (id, payload) => {
     setSaving(true);
@@ -141,7 +145,7 @@ export default function PatientAgendaCard({ patient, canSchedule, refreshKey }) 
 
       <SessionDialog open={dialog.open} initial={dialog.initial} saving={saving}
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submit} onDelete={remove}
-        deleting={isDeleting(dialog.initial?.id)} />
+        deleting={isDeleting(dialog.initial?.id)} readOnly={!canWrite} />
       {conflictDialog}
     </Card>
   );

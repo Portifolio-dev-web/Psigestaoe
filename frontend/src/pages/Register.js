@@ -106,6 +106,10 @@ export default function Register() {
         <>
           <h1 className="font-head text-2xl font-bold text-[#0F172A]">Criar conta</h1>
           <p className="mt-1 text-sm text-slate-500">Cadastro de profissional</p>
+          {/* Produto (assinatura): o teste grátis começa no cadastro, sem cartão. */}
+          <p className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800" data-testid="register-trial-note">
+            Comece com o teste grátis, com tudo liberado e sem cartão.
+          </p>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>

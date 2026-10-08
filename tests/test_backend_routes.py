@@ -35,6 +35,7 @@ os.environ["MAIL_BACKEND"] = "memory"
 os.environ["MAINTENANCE_ENABLED"] = "false"
 
 from database import Base, get_db
+import billing
 import rate_limit
 import rebuild_search_index
 import rotate_encryption_key
@@ -2749,3 +2750,240 @@ async def test_help_contact_is_public(client, monkeypatch):
     monkeypatch.delenv("PRIVACY_DPO_EMAIL")
     data = (await client.get("/api/legal/contact")).json()
     assert data["support_email"] == "" and data["dpo_email"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Produto: assinatura (regras em billing.py)
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+
+def _billing_user(**fields):
+    """Conta "de mentira" para testar as regras puras de billing.access_state."""
+    base = dict(created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), trial_ends_at=None, courtesy_at=None,
+                subscription_plan=None, subscription_status="none", paid_until=None, past_due_since=None,
+                cancel_at_period_end=False, billing_provider=None)
+    base.update(fields)
+    return SimpleNamespace(**base)
+
+
+def test_access_state_rules():
+    """A ordem das regras: cortesia > pago > tolerância > teste > somente leitura."""
+    now = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    day = timedelta(days=1)
+    state = lambda **f: billing.access_state(_billing_user(**f), now)  # noqa: E731
+
+    trial = state(trial_ends_at=now + 3 * day)
+    assert trial["state"] == "trialing" and trial["can_write"] and trial["days_left"] == 3
+    ended = state(trial_ends_at=now - day)
+    assert ended["state"] == "read_only" and ended["reason"] == "trial_ended" and not ended["can_write"]
+    # Conta antiga sem trial_ends_at: cadastro + TRIAL_DAYS.
+    old = state(created_at=now - 2 * day)
+    assert old["state"] == "trialing" and old["days_left"] == billing.TRIAL_DAYS - 2
+
+    active = state(subscription_status="active", paid_until=now + 10 * day, trial_ends_at=now - 30 * day)
+    assert active["state"] == "active" and active["can_write"]
+    # O pagamento não renovou (nem chegou aviso): tolerância a partir do fim do período.
+    grace = state(subscription_status="active", paid_until=now - 2 * day)
+    assert grace["state"] == "past_due" and grace["can_write"] and grace["days_left"] == billing.GRACE_DAYS - 2
+    overdue = state(subscription_status="past_due", paid_until=now - 20 * day, past_due_since=now - 20 * day)
+    assert overdue["state"] == "read_only" and overdue["reason"] == "payment_overdue"
+    # Cancelada: vale até o fim do pago; depois, sem tolerância.
+    canceled_valid = state(subscription_status="canceled", cancel_at_period_end=True, paid_until=now + day)
+    assert canceled_valid["state"] == "active" and canceled_valid["cancel_at_period_end"] is True
+    canceled = state(subscription_status="canceled", paid_until=now - day)
+    assert canceled["state"] == "read_only" and canceled["reason"] == "canceled"
+    # Cortesia vence tudo, até teste encerrado e atraso.
+    courtesy = state(courtesy_at=now - 100 * day, trial_ends_at=now - 50 * day, subscription_status="past_due",
+                     paid_until=now - 40 * day)
+    assert courtesy["state"] == "courtesy" and courtesy["can_write"]
+
+
+def test_billing_dates_and_events():
+    """Somar meses respeita o fim do mês; quem assina no teste não perde os dias de teste."""
+    assert billing.add_months(datetime(2026, 1, 31, tzinfo=timezone.utc), 1).day == 28
+    assert billing.add_months(datetime(2028, 1, 31, tzinfo=timezone.utc), 1).day == 29
+    assert billing.add_months(datetime(2026, 11, 15, tzinfo=timezone.utc), 12).year == 2027
+
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    user = _billing_user(trial_ends_at=now + timedelta(days=5))
+    billing.apply_event(user, billing.BillingEvent("e1", "payment_confirmed", plan="monthly"), now)
+    assert user.paid_until == billing.add_months(now + timedelta(days=5), 1)   # conta a partir do fim do teste
+    billing.apply_event(user, billing.BillingEvent("e2", "payment_confirmed", plan="annual"), now)
+    assert user.paid_until.year == 2027 and user.subscription_plan == "annual"  # renovação soma ao período atual
+    billing.apply_event(user, billing.BillingEvent("e3", "payment_refunded"), now)
+    assert billing.access_state(user, now)["state"] == "read_only"
+
+
+def test_simulated_billing_is_refused_in_production(monkeypatch):
+    """O pagamento simulado libera assinatura sem cobrar: nunca em produção."""
+    monkeypatch.setattr(billing, "BILLING_PROVIDER", "simulado")
+    with pytest.raises(SystemExit):
+        billing.validate_config("production")
+    billing.validate_config("development")
+    monkeypatch.setattr(billing, "BILLING_PROVIDER", "pagamento-qualquer")
+    with pytest.raises(SystemExit):
+        billing.validate_config("development")
+
+
+async def _end_trial(client, email):
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == email).values(
+            trial_ends_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+        await db.commit()
+
+
+@pytest.mark.anyio
+async def test_new_account_is_on_trial_and_read_only_after_it(client):
+    """Teste grátis no cadastro; depois dele, somente leitura: vê, exporta e cumpre a LGPD."""
+    patient_id = await _create_patient(client, "teste.gratis@example.com")
+    me = (await client.get("/api/auth/me")).json()["subscription"]
+    assert me["state"] == "trialing" and me["can_write"] and me["days_left"] == billing.TRIAL_DAYS
+    assert me["prices"] == {"monthly": 5900, "annual": 59000}
+
+    await _end_trial(client, "teste.gratis@example.com")
+    me = (await client.get("/api/auth/me")).json()["subscription"]
+    assert me["state"] == "read_only" and me["reason"] == "trial_ended"
+
+    blocked = [
+        await client.post("/api/patients", json=patient_data("Paciente Novo")),
+        await client.post(f"/api/patients/{patient_id}/records", json={
+            "session_datetime": "2026-10-01T13:00:00Z", "content": "Evolução"}),
+        await client.post("/api/sessions", json={"start": "2026-11-10T13:00:00Z", "patient_id": patient_id}),
+    ]
+    for response in blocked:
+        assert response.status_code == 402 and response.json()["detail"]["code"] == "read_only"
+        assert "exportando" in response.json()["detail"]["msg"]
+
+    # Continua liberado: ver, exportar, corrigir o cadastro (LGPD art. 18), arquivar, anonimizar.
+    assert (await client.get(f"/api/patients/{patient_id}")).status_code == 200
+    assert (await client.get(f"/api/patients/{patient_id}/export", params={"format": "json"})).status_code == 200
+    assert (await client.put(f"/api/patients/{patient_id}", json=patient_data("Nome Corrigido"))).status_code == 200
+    assert (await client.post(f"/api/patients/{patient_id}/archive")).status_code == 200
+    assert (await client.post(f"/api/patients/{patient_id}/anonymize")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_simulated_checkout_payment_grace_and_cancel(client, monkeypatch):
+    """Assinar pelo pagamento simulado, tolerância de atraso e cancelamento."""
+    monkeypatch.setattr(billing, "BILLING_PROVIDER", "simulado")
+    await register_account(client, "assinante@example.com")
+    checkout = await client.post("/api/billing/checkout", json={"plan": "monthly"})
+    assert checkout.status_code == 200
+    url = checkout.json()["url"]
+    assert "/assinatura/simulacao#token=" in url
+    token = url.split("#token=", 1)[1]
+
+    paid = await client.post("/api/billing/simulate", json={"token": token, "outcome": "pagar"})
+    assert paid.json()["applied"] is True
+    state = paid.json()["user"]["subscription"]
+    assert state["state"] == "active" and state["plan"] == "monthly"
+    trial_end = datetime.fromisoformat(state["trial_ends_at"])
+    assert datetime.fromisoformat(state["paid_until"]) == billing.add_months(trial_end, 1)  # não perde o teste
+    # O mesmo pagamento enviado de novo não vale duas vezes.
+    again = await client.post("/api/billing/simulate", json={"token": token, "outcome": "pagar"})
+    assert again.json()["applied"] is False and again.json()["user"]["subscription"]["paid_until"] == state["paid_until"]
+    assert (await client.post("/api/billing/checkout", json={"plan": "annual"})).status_code == 409  # já ativa
+
+    async def simulate(event):
+        response = await client.post("/api/billing/simulate/event", json={"event": event})
+        assert response.status_code == 200, response.text
+        return response.json()["subscription"]
+
+    assert (await simulate("vencer_periodo"))["state"] == "past_due"          # tolerância: ainda grava
+    assert (await client.post("/api/patients", json=patient_data("Na Tolerância"))).status_code == 200
+    overdue = await simulate("vencer_tolerancia")
+    assert overdue["state"] == "read_only" and overdue["reason"] == "payment_overdue"
+    assert (await simulate("renovar"))["state"] == "active"                  # pagou: volta tudo
+
+    canceled = await client.post("/api/billing/cancel", json={"confirm": True})
+    assert canceled.json()["subscription"]["state"] == "active"              # vale até o fim do pago
+    assert canceled.json()["subscription"]["cancel_at_period_end"] is True
+    ended = await simulate("vencer_periodo")
+    assert ended["state"] == "read_only" and ended["reason"] == "canceled"   # cancelada: sem tolerância
+
+    logs = [log["detail"] for log in (await client.get("/api/audit")).json()["items"]]
+    assert any(d.startswith("Pagamento confirmado: plano mensal") for d in logs)
+    assert any(d.startswith("Assinatura cancelada") for d in logs)
+
+    # Pagamento de outra conta não vale nesta.
+    other_token = (await client.post("/api/billing/checkout", json={"plan": "annual"})).json()["url"].split("#token=")[1]
+    await register_account(client, "outra.conta@example.com")
+    stolen = await client.post("/api/billing/simulate", json={"token": other_token, "outcome": "pagar"})
+    assert stolen.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_courtesy_via_server_command_only(client, monkeypatch):
+    """Cortesia: só pelo comando do servidor, com registro na trilha."""
+    monkeypatch.setattr(billing, "BILLING_PROVIDER", "simulado")
+    await register_account(client, "cortesia@example.com")
+    await _end_trial(client, "cortesia@example.com")
+    assert (await client.post("/api/patients", json=patient_data("Bloqueado"))).status_code == 402
+
+    async with client.session_factory() as db:
+        state = await server.set_courtesy(db, "Cortesia@Example.com", True, "Usuária fundadora")
+    assert state["state"] == "courtesy"
+    assert (await client.post("/api/patients", json=patient_data("Liberado"))).status_code == 200
+    assert (await client.post("/api/billing/checkout", json={"plan": "monthly"})).json()["detail"]["code"] == "courtesy"
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["detail"] == "Cortesia concedida (Usuária fundadora)" and log["action"] == "cortesia" for log in logs)
+
+    async with client.session_factory() as db:
+        await server.set_courtesy(db, "cortesia@example.com", False)
+        with pytest.raises(LookupError):
+            await server.set_courtesy(db, "ninguem@example.com", True)
+    assert (await client.post("/api/patients", json=patient_data("De Novo Bloqueado"))).status_code == 402
+
+
+@pytest.mark.anyio
+async def test_billing_unavailable_and_simulation_hidden_without_provider(client):
+    """Sem meio de pagamento: Assinar avisa, e as rotas de simulação não existem."""
+    await register_account(client, "sem.pagamento@example.com")
+    response = await client.post("/api/billing/checkout", json={"plan": "monthly"})
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "billing_unavailable"
+    assert (await client.post("/api/billing/simulate/event", json={"event": "encerrar_teste"})).status_code == 404
+    assert (await client.post("/api/webhook/billing/simulado", content=b"{}")).status_code == 404
+
+
+class _FakeProvider(billing.BillingProvider):
+    """Meio de pagamento de mentira, para provar o caminho dos avisos (webhook)."""
+    name = "teste"
+
+    def parse_webhook(self, headers, body):
+        if headers.get("x-token") != "segredo-do-meio":
+            raise PermissionError("assinatura inválida")
+        data = json.loads(body)
+        return [billing.BillingEvent(event_id=data["id"], kind=data["kind"], user_id=data["user_id"],
+                                     plan=data.get("plan"))]
+
+
+@pytest.mark.anyio
+async def test_billing_webhook_is_authenticated_and_idempotent(client, monkeypatch):
+    monkeypatch.setattr(server, "billing_provider", lambda: _FakeProvider())
+    await register_account(client, "webhook.pagamento@example.com")
+    user_id = (await client.get("/api/auth/me")).json()["user_id"]
+    event = {"id": "evt_1", "kind": "payment_confirmed", "user_id": user_id, "plan": "annual"}
+
+    async def send(payload, token="segredo-do-meio"):
+        return await client.post("/api/webhook/billing/teste", json=payload, headers={"x-token": token})
+
+    assert (await send(event, token="falso")).status_code == 401
+    assert (await client.get("/api/auth/me")).json()["subscription"]["state"] == "trialing"  # nada mudou
+    assert (await send(event)).status_code == 200
+    first = (await client.get("/api/auth/me")).json()["subscription"]
+    assert first["state"] == "active" and first["plan"] == "annual"
+    assert (await send(event)).status_code == 200                            # repetido: 200, sem efeito
+    assert (await client.get("/api/auth/me")).json()["subscription"]["paid_until"] == first["paid_until"]
+    assert (await send({**event, "id": "evt_2", "user_id": "user_inexistente"})).status_code == 200
+    assert (await client.post("/api/webhook/billing/outro", json=event)).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_google_forms_respects_read_only(client):
+    await _create_patient(client, "forms.leitura@example.com")
+    token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
+    await _end_trial(client, "forms.leitura@example.com")
+    response = await client.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
+                                 json={"patient_data": {"full_name": "Via Forms"}})
+    assert response.status_code == 402 and "somente leitura" in response.json()["detail"]

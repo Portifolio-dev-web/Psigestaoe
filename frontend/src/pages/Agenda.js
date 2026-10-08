@@ -13,6 +13,7 @@ import MonthView from "@/components/agenda/MonthView";
 import TimeGridView from "@/components/agenda/TimeGridView";
 import ListView from "@/components/agenda/ListView";
 import { useSessionActions } from "@/components/agenda/useSessionActions";
+import { useWriteAccess } from "@/context/WriteAccessContext";
 import { WIDE_SCREEN, useMediaQuery } from "@/hooks/useMediaQuery";
 import {
   STATUS, VIEW_IDS, daysBetween, defaultNewSessionStart, formatDateParam, formatTimeRange,
@@ -115,21 +116,25 @@ export default function Agenda() {
     saveMove(session, newStart);
   };
 
-  const openNew = (start) => setDialog({ open: true, initial: { start } });
+  // Produto (assinatura): no somente leitura, criar (botão, horário vazio, ?nova=1) e
+  // arrastar para remarcar mostram a explicação; abrir uma sessão vira só consulta.
+  const { canWrite, guard } = useWriteAccess();
+  const openNew = guard((start) => setDialog({ open: true, initial: { start } }));
   const openSession = (session) => setDialog({ open: true, initial: session });
 
   // O1: ?nova=1 (link "Marcar a primeira sessão") abre o formulário ao chegar.
   // O parâmetro sai da URL, para recarregar a página não abrir de novo.
   useEffect(() => {
     if (searchParams.get("nova") !== "1") return;
-    setDialog({ open: true, initial: { start: defaultNewSessionStart(date) } });
+    openNew(defaultNewSessionStart(date)); // assinatura: respeita o somente leitura
     const next = new URLSearchParams(searchParams);
     next.delete("nova");
     setSearchParams(next, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, setSearchParams, date]);
 
   const viewProps = {
-    sessions, onCreateAt: openNew, onOpenSession: openSession, onMoveSession: moveSession,
+    sessions, onCreateAt: openNew, onOpenSession: openSession, onMoveSession: guard(moveSession),
     onOpenDay: (day) => navigateTo("dia", day),
   };
 
@@ -203,7 +208,7 @@ export default function Agenda() {
 
       <SessionDialog open={dialog.open} initial={dialog.initial} saving={saving}
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))} onSubmit={submitDialog} onDelete={deleteSession}
-        deleting={isDeleting(dialog.initial?.id)} />
+        deleting={isDeleting(dialog.initial?.id)} readOnly={!canWrite} />
 
       {/* Conflito de horário (useSessionActions, P2). */}
       {conflictDialog}

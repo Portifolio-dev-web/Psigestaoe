@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { addDays, addMinutes, format } from "date-fns";
 import { FileText, Loader2, Repeat, Trash2 } from "lucide-react";
 import { localInputToISO, toLocalInput } from "@/lib/datetime";
+import { SUBSCRIPTION_PATH } from "@/lib/subscription";
 import PatientPicker from "@/components/PatientPicker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +35,10 @@ import {
 //   - análise de UI (P6): o paciente vem primeiro e o título é OPCIONAL (era
 //     obrigatório e quase sempre "Sessão"); em branco, o servidor gera
 //     "Sessão" (com paciente) ou "Compromisso" (sem paciente);
-//   - análise de UI (P2): `initial` pode trazer o paciente (agendar pela ficha).
+//   - análise de UI (P2): `initial` pode trazer o paciente (agendar pela ficha);
+//   - produto (assinatura): `readOnly` (conta no modo somente leitura) abre a
+//     sessão só para CONSULTA: campos travados, sem Salvar/Remover, com o motivo
+//     e o caminho para assinar. "Ver evolução" continua funcionando.
 // ---------------------------------------------------------------------------
 
 const DURATIONS = [30, 50, 60, 90];
@@ -80,7 +84,7 @@ function showsEvolution(session) {
     || new Date(session.start).getTime() <= Date.now() + STARTED_MARGIN_MS;
 }
 
-export default function SessionDialog({ open, initial, saving, deleting, onOpenChange, onSubmit, onDelete }) {
+export default function SessionDialog({ open, initial, saving, deleting, onOpenChange, onSubmit, onDelete, readOnly = false }) {
   const navigate = useNavigate();
   const [form, setForm] = useState(() => toForm(initial));
   // P1: remover uma sessão de série pergunta "só esta" ou "esta e as próximas".
@@ -156,10 +160,14 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="font-head">{form.id ? "Editar sessão" : "Nova sessão"}</DialogTitle>
-          <DialogDescription>Agende ou edite uma sessão clínica.</DialogDescription>
+          <DialogTitle className="font-head">{readOnly ? "Sessão" : form.id ? "Editar sessão" : "Nova sessão"}</DialogTitle>
+          <DialogDescription>
+            {readOnly ? "Modo somente leitura: você pode consultar esta sessão." : "Agende ou edite uma sessão clínica."}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          {/* Assinatura: no somente leitura, todos os campos ficam travados de uma vez. */}
+          <fieldset disabled={readOnly} className="m-0 min-w-0 space-y-4 border-0 p-0">
           {/* P6: o paciente vem primeiro (é o que define a sessão). */}
           <div>
             {/* Acessibilidade (varredura de UI): rótulo ligado ao seletor (htmlFor/id). */}
@@ -283,6 +291,7 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
             <Textarea id="session-notes" value={form.notes} maxLength={5000}
               onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="mt-1.5" />
           </div>
+          </fieldset>
           {/* UX (agenda -> evolução): antes a evolução era registrada à parte, na ficha,
               digitando de novo a data e a hora da sessão. */}
           {showsEvolution(initial) && (
@@ -320,6 +329,16 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
             </div>
           </div>
         )}
+        {readOnly ? (
+          // Assinatura: sem Salvar/Remover; o motivo e o caminho para voltar a registrar.
+          <DialogFooter className="flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-slate-600">Para remarcar, mudar o status ou remover, assine um plano.</p>
+            <Button type="button" onClick={() => { onOpenChange(false); navigate(SUBSCRIPTION_PATH); }}
+              className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="session-see-plans">
+              Ver planos
+            </Button>
+          </DialogFooter>
+        ) : (
         <DialogFooter className="flex-row justify-between sm:justify-between">
           {/* Varredura, item 9: "Remover" fica travado enquanto a exclusão está em andamento. */}
           {form.id ? (
@@ -333,6 +352,7 @@ export default function SessionDialog({ open, initial, saving, deleting, onOpenC
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
           </Button>
         </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

@@ -35,7 +35,13 @@ export function AuthProvider({ children }) {
   // ProtectedRoute mostrar a tela de aceite.
   useEffect(() => {
     window.addEventListener("psi:terms-required", checkAuth);
-    return () => window.removeEventListener("psi:terms-required", checkAuth);
+    // Produto (assinatura): o servidor recusou uma gravação (somente leitura):
+    // a situação da conta mudou (ex.: o teste acabou com a tela aberta).
+    window.addEventListener("psi:read-only", checkAuth);
+    return () => {
+      window.removeEventListener("psi:terms-required", checkAuth);
+      window.removeEventListener("psi:read-only", checkAuth);
+    };
   }, [checkAuth]);
 
   const broadcast = useCallback((message) => {

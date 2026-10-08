@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { ClipboardList, Loader2 } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
+import { useWriteAccess } from "@/context/WriteAccessContext";
 import { PENDING_EVOLUTIONS_EVENT, notifyPendingEvolutionsChanged } from "@/lib/pendingEvolutions";
 import { STATUS, evolutionPath, formatTimeRange, sessionInterval, sessionPayload } from "@/components/agenda/agendaUtils";
 import { Button } from "@/components/ui/button";
@@ -53,7 +54,9 @@ export default function PendingEvolutions() {
     notifyPendingEvolutionsChanged();
   };
 
-  const markNoShow = (session) => inFlight.run(`noshow:${session.id}`, async () => {
+  // Produto (assinatura): marcar falta altera a sessão; no somente leitura, explica.
+  const { guard } = useWriteAccess();
+  const markNoShow = guard((session) => inFlight.run(`noshow:${session.id}`, async () => {
     try {
       await setStatus(session, "faltou");
       toast.success(`Falta registrada: ${session.patient_name}, ${format(new Date(session.start), "dd/MM 'às' HH:mm")}.`, {
@@ -67,7 +70,7 @@ export default function PendingEvolutions() {
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }
-  });
+  }));
 
   if (!data || !data.total) return null;
 
