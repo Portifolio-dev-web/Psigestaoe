@@ -46,7 +46,7 @@ import observability
 import totp
 from crypto import legacy_key_from_secret
 from models import (
-    AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession,
+    PatientIntake, AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession,
 )
 from server import app
 
@@ -182,9 +182,8 @@ async def test_all_backend_routes(client):
 
     me = await client.get("/api/auth/me", headers=headers)
     assert me.status_code == 200
-    # Item 15: o token do webhook não vem mais no /auth/me; é gerado sob demanda.
-    assert "webhook_token" not in me.json()
-    webhook_token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
+    # Item 15: nenhum token de integração no /auth/me (o Google Forms foi removido).
+    assert "webhook_token" not in me.json() and "webhook_configured" not in me.json()
 
     # Complementares: a lista traz também o total de pacientes.
     assert (await client.get("/api/patients", headers=headers)).json() == {"items": [], "next_cursor": None, "total": 0}
@@ -242,28 +241,10 @@ async def test_all_backend_routes(client):
     assert changed_session.status_code == 200
     assert changed_session.json()["title"] == "Sessao atualizada"
 
-    webhook_payload = {
-        "patient_data": {
-            **patient_payload,
-            "full_name": "Paciente via Forms",
-            "birth_date": "14-01-1992",
-        }
-    }
-    assert (await client.post(
-        "/api/webhook/google-forms",
-        headers={"X-Webhook-Token": "invalido"},
-        json=webhook_payload,
-    )).status_code == 401
-    webhook = await client.post(
-        "/api/webhook/google-forms",
-        headers={"X-Webhook-Token": webhook_token},
-        json=webhook_payload,
-    )
-    assert webhook.status_code == 200
-    assert webhook.json()["status"] == "sucesso"
-    forms_patient = await client.get("/api/patients", headers=headers)
-    assert forms_patient.status_code == 200
-    assert next(p for p in forms_patient.json()["items"] if p["full_name"] == "Paciente via Forms")["birth_date"] == "1992-01-14"
+    # Data no formato brasileiro (dd-mm-aaaa) também é aceita no cadastro.
+    br_date = await client.post("/api/patients", headers=headers,
+                                json={**patient_payload, "full_name": "Paciente Data BR", "birth_date": "14-01-1992"})
+    assert br_date.status_code == 200 and br_date.json()["birth_date"] == "1992-01-14"
 
     json_export = await client.get(f"/api/patients/{patient_id}/export?format=json", headers=headers)
     assert json_export.status_code == 200
@@ -291,9 +272,9 @@ async def test_all_backend_routes(client):
     # Item 12: o paciente tem prontuário dentro da guarda do CFP -> não pode ser excluído.
     assert (await client.delete(f"/api/patients/{patient_id}", headers=headers)).status_code == 409
     # O paciente do Forms não tem prontuário -> exclusão definitiva permitida.
-    forms_patient_id = next(p["id"] for p in forms_patient.json()["items"] if p["full_name"] == "Paciente via Forms")
-    assert (await client.delete(f"/api/patients/{forms_patient_id}", headers=headers)).json() == {"ok": True}
-    assert (await client.delete(f"/api/patients/{forms_patient_id}", headers=headers)).status_code == 404
+    br_date_id = br_date.json()["id"]
+    assert (await client.delete(f"/api/patients/{br_date_id}", headers=headers)).json() == {"ok": True}
+    assert (await client.delete(f"/api/patients/{br_date_id}", headers=headers)).status_code == 404
 
     logout = await client.post("/api/auth/logout", headers=headers)
     assert logout.status_code == 200
@@ -604,34 +585,6 @@ async def test_audit_trail_logs_reads_with_ip_and_is_append_only(client):
         await db.rollback()
         with pytest.raises(DBAPIError, match="append-only"):
             await db.execute(text("DELETE FROM audit_logs"))
-
-
-@pytest.mark.anyio
-async def test_webhook_token_is_hashed_shown_once_and_rotatable(client):
-    # Item 15: só o hash no banco, token visível uma vez, troca revoga o anterior.
-    await _create_patient(client, "webhook@example.com")
-    assert (await client.get("/api/integrations/google-forms")).json()["configured"] is False
-
-    first = (await client.post("/api/integrations/google-forms/token")).json()["token"]
-    async with client.session_factory() as db:
-        user = (await db.execute(select(User).where(User.email == "webhook@example.com"))).scalar_one()
-    assert user.webhook_token_hash and first not in user.webhook_token_hash
-    status = (await client.get("/api/integrations/google-forms")).json()
-    assert status["configured"] is True and status["hint"] == first[-4:] and "token" not in status
-
-    payload = {"patient_data": {"full_name": "Via Forms"}}
-
-    async def send(token):
-        return await client.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token}, json=payload)
-
-    assert (await send(first)).status_code == 200
-
-    second = (await client.post("/api/integrations/google-forms/token")).json()["token"]
-    assert (await send(first)).status_code == 401
-    assert (await send(second)).status_code == 200
-
-    await client.delete("/api/integrations/google-forms/token")
-    assert (await send(second)).status_code == 401
 
 
 @pytest.mark.anyio
@@ -1546,24 +1499,6 @@ async def test_record_and_query_limits(client):
 
 
 @pytest.mark.anyio
-async def test_webhook_keeps_limits_but_not_format_rules(client):
-    # O paciente preenche o Google Forms: um CPF digitado errado não pode fazer
-    # o cadastro inteiro sumir. Os limites de tamanho continuam valendo.
-    await _register(client, "forms.validacao@example.com")
-    token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
-
-    def send(data):
-        return client.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
-                           json={"patient_data": {"full_name": "Paciente do Forms", **data}})
-
-    accepted = await send({"cpf": "123.456.789-00", "phone": "1234", "email": "sem-arroba"})
-    assert accepted.status_code == 200
-    stored = (await client.get(f"/api/patients/{accepted.json()['paciente_id']}")).json()
-    assert stored["cpf"] == "123.456.789-00"  # o profissional corrige ao editar
-    assert (await send({"address": "x" * 301})).status_code == 422
-
-
-@pytest.mark.anyio
 async def test_request_body_size_is_limited(client):
     # Antes o corpo inteiro ia para a memória, sem limite, até em rotas sem login.
     huge = {"email": "a@example.com", "password": "x" * (2 * 1024 * 1024)}
@@ -1751,11 +1686,13 @@ async def test_writes_require_csrf_header_and_allowed_origin(client):
         # Leituras não exigem o cabeçalho.
         assert (await browser.get("/api/auth/me", headers=cookie)).status_code == 200
 
-        # O webhook do Google Forms (sem cookie, sem Origin) continua funcionando.
-        token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
-        hook = await browser.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
-                                  json={"patient_data": {"full_name": "Paciente do Forms"}})
-        assert hook.status_code == 200
+        # As rotas PÚBLICAS do link de cadastro continuam com a proteção CSRF
+        # (são chamadas pela página do próprio PsiGestão, que manda o cabeçalho).
+        intake = await browser.post("/api/intake/open", json={"token": "x" * 43})
+        assert intake.status_code == 403 and intake.json()["detail"]["code"] == "csrf_rejected"
+        # Já os avisos de servidores externos (/api/webhook/...) ficam fora do CSRF:
+        # sem meio de pagamento configurado, a rota responde 404, e não 403.
+        assert (await browser.post("/api/webhook/billing/teste", json={})).status_code == 404
 
     # Origem permitida + cabeçalho: aceito. O paciente não foi anonimizado acima.
     allowed = await client.post(f"/api/patients/{patient_id}/archive", headers={"Origin": "http://localhost:3000"})
@@ -2298,45 +2235,6 @@ async def test_close_account_keeps_only_what_the_law_requires(client):
 
     # O mesmo e-mail pode criar uma conta nova.
     assert (await register_account(client, email)).status_code == 200
-
-
-@pytest.mark.anyio
-async def test_webhook_limit_is_per_token_and_tokens_expire(client, monkeypatch):
-    monkeypatch.setattr(server, "WEBHOOK_LIMIT_PER_TOKEN", 2)
-    tokens = []
-    for email in ("forms.a@example.com", "forms.b@example.com"):
-        async with _second_client() as browser:
-            await register_account(browser, email)
-            tokens.append((await browser.post("/api/integrations/google-forms/token")).json())
-    assert tokens[0]["expires_at"] and tokens[0]["expired"] is False
-    payload = {"patient_data": {"full_name": "Via Forms"}}
-
-    send = lambda token: client.post("/api/webhook/google-forms", json=payload, headers={"X-Webhook-Token": token})
-    first = [(await send(tokens[0]["token"])).status_code for _ in range(3)]
-    assert first == [200, 200, 429]
-    # Mesmo IP (como os servidores do Google), outro formulário: não é afetado.
-    assert (await send(tokens[1]["token"])).status_code == 200
-
-    async with client.session_factory() as db:
-        await db.execute(update(User).where(User.email == "forms.b@example.com")
-                         .values(webhook_token_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
-        await db.commit()
-    expired = await send(tokens[1]["token"])
-    assert expired.status_code == 401 and "vencido" in expired.json()["detail"]
-
-
-@pytest.mark.anyio
-async def test_webhook_token_expiry_reminder(client):
-    await register_account(client, "lembrete@example.com")
-    await client.post("/api/integrations/google-forms/token")
-    async with client.session_factory() as db:
-        await db.execute(update(User).where(User.email == "lembrete@example.com")
-                         .values(webhook_token_expires_at=datetime.now(timezone.utc) + timedelta(days=10)))
-        await db.commit()
-        mailer.outbox.clear()
-        assert await server.notify_expiring_webhook_tokens(db) == 1
-        assert await server.notify_expiring_webhook_tokens(db) == 0  # um aviso só por token
-    assert [m.to for m in mailer.outbox] == ["lembrete@example.com"]
 
 
 @pytest.mark.anyio
@@ -2979,11 +2877,195 @@ async def test_billing_webhook_is_authenticated_and_idempotent(client, monkeypat
     assert (await client.post("/api/webhook/billing/outro", json=event)).status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Produto: cadastro pelo próprio paciente (link temporário; substitui o Google Forms)
+# ---------------------------------------------------------------------------
+def intake_patient(name="Paciente do Link", **overrides):
+    """Ficha como o PACIENTE envia: sem "Notas iniciais" e com o termo respondido."""
+    data = patient_data(name, **overrides)
+    data.pop("initial_notes")
+    data["consent_terms"] = True
+    return data
+
+
+async def _new_intake(client, label=""):
+    created = await client.post("/api/intake-links", json={"label": label})
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert "/cadastro#token=" in body["url"]  # o link vai no fragmento: fora de logs e da prévia
+    return body, body["url"].split("#token=", 1)[1]
+
+
+def _patient_client():
+    """O navegador do paciente: SEM o cookie da psicóloga, com o cabeçalho anti-CSRF da página."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test", headers=CSRF_HEADERS)
+
+
+async def _set_intake(client, intake_id, **values):
+    async with client.session_factory() as db:
+        await db.execute(update(PatientIntake).where(PatientIntake.id == intake_id).values(**values))
+        await db.commit()
+
+
 @pytest.mark.anyio
-async def test_google_forms_respects_read_only(client):
-    await _create_patient(client, "forms.leitura@example.com")
-    token = (await client.post("/api/integrations/google-forms/token")).json()["token"]
-    await _end_trial(client, "forms.leitura@example.com")
-    response = await client.post("/api/webhook/google-forms", headers={"X-Webhook-Token": token},
-                                 json={"patient_data": {"full_name": "Via Forms"}})
-    assert response.status_code == 402 and "somente leitura" in response.json()["detail"]
+async def test_intake_link_full_flow(client):
+    """Link -> paciente abre, começa, preenche (salvo criptografado), envia -> paciente da psicóloga."""
+    await register_account(client, "link.cadastro@example.com", name="Dra. Link")
+    link, token = await _new_intake(client, label="Ana (primeira consulta)")
+    async with client.session_factory() as db:
+        row = await db.get(PatientIntake, link["id"])
+        assert row.token_hash != token and token not in row.token_hash      # só o hash
+        assert "Ana" not in row.label                                       # "para quem é", criptografado
+    assert (await client.get("/api/intake-links")).json()[0]["label"] == "Ana (primeira consulta)"
+
+    async with _patient_client() as patient:
+        opened = await patient.post("/api/intake/open", json={"token": token})
+        assert opened.status_code == 200
+        info = opened.json()
+        assert info["status"] == "pending" and info["professional_name"] == "Dra. Link"
+        assert info["fill_minutes"] == 10 and "Declaro" in info["consent_text"]
+
+        started = await patient.post("/api/intake/start", json={"token": token})
+        assert started.status_code == 200 and started.json()["seconds_left"] == 600
+        secret = started.json()["fill_secret"]
+        # Outro aparelho com o mesmo link (link vazou) não começa nem continua.
+        assert (await patient.post("/api/intake/start", json={"token": token})).status_code == 409
+        assert (await patient.post("/api/intake/resume", json={"token": token, "fill_secret": "y" * 43})).status_code == 403
+
+        partial = {"full_name": "Paciente do Link", "phone": "(11) 98888-1111"}
+        saved = await patient.put("/api/intake/draft", json={"token": token, "fill_secret": secret, "data": partial})
+        assert saved.status_code == 200
+        async with client.session_factory() as db:
+            row = await db.get(PatientIntake, link["id"])
+            assert row.draft and "Paciente do Link" not in row.draft          # rascunho criptografado
+        resumed = await patient.post("/api/intake/resume", json={"token": token, "fill_secret": secret})
+        assert resumed.json()["data"]["full_name"] == "Paciente do Link"   # recarregou: nada perdido
+        early = await patient.post("/api/intake/extend", json={"token": token, "fill_secret": secret})
+        assert early.status_code == 409 and early.json()["detail"]["code"] == "too_early"
+
+        # As MESMAS regras do cadastro manual: CPF inválido volta com erro, e o link continua valendo.
+        bad = await patient.post("/api/intake/submit", json={"token": token, "fill_secret": secret,
+                                                            "data": intake_patient(cpf="111.111.111-11")})
+        assert bad.status_code == 422
+        sent = await patient.post("/api/intake/submit", json={"token": token, "fill_secret": secret,
+                                                             "data": {**intake_patient(), "initial_notes": "tentativa"}})
+        assert sent.status_code == 200 and sent.json() == {"ok": True, "already": False}
+        # Rede caiu na resposta e o paciente enviou de novo: não duplica.
+        again = await patient.post("/api/intake/submit", json={"token": token, "fill_secret": secret,
+                                                              "data": intake_patient()})
+        assert again.json() == {"ok": True, "already": True}
+        done = await patient.post("/api/intake/open", json={"token": token})
+        assert done.status_code == 410 and done.json()["detail"]["code"] == "intake_done"
+
+    patients = (await client.get("/api/patients")).json()
+    assert patients["total"] == 1 and patients["items"][0]["full_name"] == "Paciente do Link"
+    full = (await client.get(f"/api/patients/{patients['items'][0]['id']}")).json()
+    assert full["initial_notes"] == "" and full["consent_terms"] is True       # notas são da psicóloga
+    status = (await client.get("/api/intake-links")).json()[0]
+    assert status["status"] == "submitted" and status["patient_id"] == full["id"] and status["has_draft"] is False
+    details = [log["detail"] for log in (await client.get("/api/audit")).json()["items"]]
+    assert "Cadastro enviado pelo paciente (link de cadastro)" in details
+    assert "Termo de consentimento registrado pelo paciente (link de cadastro)" in details
+    assert "O paciente começou a preencher o cadastro" in details
+
+
+@pytest.mark.anyio
+async def test_intake_extension_and_incomplete_is_not_lost(client):
+    """Mais tempo quando pede; o tempo acabou pela metade -> a psicóloga completa."""
+    await register_account(client, "link.incompleto@example.com")
+    link, token = await _new_intake(client)
+    async with _patient_client() as patient:
+        secret = (await patient.post("/api/intake/start", json={"token": token})).json()["fill_secret"]
+        await patient.put("/api/intake/draft", json={"token": token, "fill_secret": secret,
+                                                     "data": {"full_name": "Paciente Pela Metade", "cpf": "529.982.247-25"}})
+        await _set_intake(client, link["id"], deadline_at=datetime.now(timezone.utc) + timedelta(seconds=60))
+        extended = await patient.post("/api/intake/extend", json={"token": token, "fill_secret": secret})
+        assert extended.status_code == 200 and extended.json()["extensions_left"] == 9
+        assert 600 < extended.json()["seconds_left"] <= 660
+        await _set_intake(client, link["id"], extensions=10, deadline_at=datetime.now(timezone.utc) + timedelta(seconds=60))
+        assert (await patient.post("/api/intake/extend", json={"token": token, "fill_secret": secret})).json()["detail"]["code"] == "no_more_time"
+
+        await _set_intake(client, link["id"], deadline_at=datetime.now(timezone.utc) - timedelta(seconds=30))
+        late = await patient.put("/api/intake/draft", json={"token": token, "fill_secret": secret, "data": {}})
+        assert late.status_code == 410 and "enviado à sua psicóloga" in late.json()["detail"]["msg"]
+        late_submit = await patient.post("/api/intake/submit", json={"token": token, "fill_secret": secret,
+                                                                    "data": intake_patient()})
+        assert late_submit.status_code == 410
+
+    listed = (await client.get("/api/intake-links")).json()[0]
+    assert listed["status"] == "incomplete" and listed["has_draft"] is True
+    draft = (await client.get(f"/api/intake-links/{link['id']}/draft")).json()["data"]
+    assert draft["full_name"] == "Paciente Pela Metade" and draft["cpf"] == "529.982.247-25"
+    completed = await client.post(f"/api/intake-links/{link['id']}/complete",
+                                  json=patient_data("Paciente Pela Metade", cpf="529.982.247-25"))
+    assert completed.status_code == 200
+    listed = (await client.get("/api/intake-links")).json()[0]
+    assert listed["status"] == "completed" and listed["patient_id"] == completed.json()["id"]
+    assert (await client.post(f"/api/intake-links/{link['id']}/complete", json=patient_data("De Novo"))).status_code == 409
+
+
+@pytest.mark.anyio
+async def test_intake_link_expiry_revocation_and_limits(client, monkeypatch):
+    """Vencido, cancelado e desconhecido: a MESMA resposta (não dá para sondar links)."""
+    await register_account(client, "link.vencido@example.com")
+    expired, expired_token = await _new_intake(client)
+    await _set_intake(client, expired["id"], expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+    revoked, revoked_token = await _new_intake(client)
+    assert (await client.post(f"/api/intake-links/{revoked['id']}/revoke", json={"confirm": True})).json()["status"] == "revoked"
+
+    async with _patient_client() as patient:
+        answers = [await patient.post("/api/intake/open", json={"token": t})
+                   for t in (expired_token, revoked_token, "z" * 43)]
+        assert {a.status_code for a in answers} == {410}
+        assert len({a.json()["detail"]["msg"] for a in answers}) == 1
+        assert (await patient.post("/api/intake/start", json={"token": expired_token})).status_code == 410
+
+        # Cancelar um link já começado apaga o que o paciente digitou.
+        started, started_token = await _new_intake(client)
+        secret = (await patient.post("/api/intake/start", json={"token": started_token})).json()["fill_secret"]
+        await patient.put("/api/intake/draft", json={"token": started_token, "fill_secret": secret,
+                                                     "data": {"full_name": "Cancelado"}})
+        await client.post(f"/api/intake-links/{started['id']}/revoke", json={"confirm": True})
+        async with client.session_factory() as db:
+            assert (await db.get(PatientIntake, started["id"])).draft == ""
+
+    monkeypatch.setattr(server, "INTAKE_MAX_PENDING", 1)
+    await _new_intake(client)
+    too_many = await client.post("/api/intake-links", json={})
+    assert too_many.status_code == 409 and too_many.json()["detail"]["code"] == "too_many_links"
+    assert (await client.post("/api/intake-links", json={"label": "x" * 61})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_intake_read_only_blocks_new_links_but_keeps_patient_data(client):
+    """Somente leitura: não gera link novo, mas o cadastro que o paciente já começou é aceito."""
+    await register_account(client, "link.leitura@example.com")
+    _link, token = await _new_intake(client)
+    async with _patient_client() as patient:
+        secret = (await patient.post("/api/intake/start", json={"token": token})).json()["fill_secret"]
+        await _end_trial(client, "link.leitura@example.com")
+        blocked = await client.post("/api/intake-links", json={})
+        assert blocked.status_code == 402 and blocked.json()["detail"]["code"] == "read_only"
+        sent = await patient.post("/api/intake/submit", json={"token": token, "fill_secret": secret,
+                                                             "data": intake_patient("Chegou Mesmo Assim")})
+        assert sent.status_code == 200
+    assert (await client.get("/api/patients")).json()["items"][0]["full_name"] == "Chegou Mesmo Assim"
+
+
+@pytest.mark.anyio
+async def test_intake_maintenance_keeps_incomplete_and_account_close_removes_links(client):
+    await register_account(client, "link.manutencao@example.com", password="Senha-segura-123")
+    old_done, _ = await _new_intake(client)
+    old_incomplete, _ = await _new_intake(client)
+    long_ago = datetime.now(timezone.utc) - timedelta(days=40)
+    await _set_intake(client, old_done["id"], created_at=long_ago, submitted_at=long_ago, completed_by="patient")
+    await _set_intake(client, old_incomplete["id"], created_at=long_ago, started_at=long_ago,
+                      deadline_at=long_ago + timedelta(minutes=10), draft="rascunho-criptografado")
+    async with client.session_factory() as db:
+        assert await server.purge_patient_intakes(db) == 1
+        assert await db.get(PatientIntake, old_done["id"]) is None
+        assert await db.get(PatientIntake, old_incomplete["id"]) is not None   # dados do paciente ficam
+    closed = await client.post("/api/account/close", json={"password": "Senha-segura-123", "confirmation": "ENCERRAR"})
+    assert closed.status_code == 200, closed.text
+    async with client.session_factory() as db:
+        assert (await db.execute(select(PatientIntake))).scalars().all() == []

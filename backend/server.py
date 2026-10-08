@@ -64,8 +64,8 @@ from http_security import (
     validation_error_handler,
 )
 from models import (
-    AuditLog, BillingEventLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User,
-    UserSession, now_utc,
+    AuditLog, BillingEventLog, EmailToken, Patient, PatientIntake, PatientSearchToken, Record, RecordVersion,
+    Session, User, UserSession, now_utc,
 )
 
 # MONITORAMENTO (escala): configura os logs antes de qualquer outra coisa,
@@ -225,7 +225,7 @@ async def lifespan(_app: FastAPI):
     # Varredura, itens 8 e 15: um REDIS_URL errado apareceria só como "sem limite".
     await rate_limiting.check_redis()
     # Segurança média: rotina de manutenção (expurgo de contas encerradas no fim
-    # da guarda e aviso de token do Google Forms vencendo). Ver run_maintenance.
+    # da guarda e limpeza dos links de cadastro antigos). Ver run_maintenance.
     maintenance = asyncio.create_task(_maintenance_loop()) if MAINTENANCE_ENABLED else None
     yield
     if maintenance:
@@ -852,40 +852,64 @@ class PatientInput(BaseModel):
         return self
 
 
-class WebhookPatientInput(PatientInput):
-    """Paciente vindo do Google Forms (webhook).
+class IntakeSubmitData(PatientInput):
+    """Produto (cadastro pelo paciente): a ficha enviada PELO PACIENTE pelo link.
 
-    Segurança (varredura, item 3): os mesmos LIMITES de tamanho do cadastro
-    manual. Já o FORMATO de CPF, telefone e e-mail não bloqueia: quem preenche
-    o formulário é o paciente, e um erro de digitação recusaria o cadastro
-    inteiro sem ninguém ver (o Google Forms não mostra a resposta da API). O
-    dado entra como veio; ao editar o paciente, o profissional precisa corrigi-lo.
-    Os métodos abaixo têm o MESMO nome dos validadores de PatientInput, e por
-    isso os substituem.
+    As MESMAS regras do cadastro manual (formato de CPF, telefone e e-mail,
+    campos obrigatórios, menor de idade com responsável), com duas diferenças:
+      - "Notas iniciais" é anotação clínica da psicóloga: o paciente não
+        preenche (o que vier é descartado) e o campo não é exigido;
+      - o termo de consentimento precisa de resposta explícita (sem valor
+        padrão): "concordo" ou "não concordo", nunca um silêncio.
+    Antes, com o Google Forms, a ficha entrava sem validação nenhuma (um CPF
+    errado entrava como veio); aqui o paciente vê o erro e corrige na hora.
     """
+    consent_terms: bool
 
-    @field_validator("cpf")
+    @field_validator("initial_notes")
     @classmethod
-    def validate_cpf(cls, value: Optional[str]) -> str:
-        return (value or "").strip()
-
-    @field_validator("phone")
-    @classmethod
-    def validate_phone(cls, value: Optional[str]) -> str:
-        return (value or "").strip()
-
-    @field_validator("email")
-    @classmethod
-    def validate_email_address(cls, value: Optional[str]) -> str:
-        return (value or "").strip()
+    def drop_initial_notes(cls, value: Optional[str]) -> str:
+        return ""
 
     @model_validator(mode="after")
     def require_all_fields(self):
-        """Campos obrigatórios NÃO se aplicam ao Google Forms: o formulário do
-        profissional pode não ter todas as perguntas, e recusar o envio perderia
-        o cadastro em silêncio (o Google não mostra o erro a ninguém). A ficha
-        entra incompleta e, ao editá-la, o profissional precisa preencher tudo."""
+        """Mesmo nome do validador de PatientInput: o substitui, sem "Notas iniciais"."""
+        labels = PATIENT_MINOR_REQUIRED_LABELS if is_minor(self.birth_date) else PATIENT_REQUIRED_LABELS
+        missing = [label for field, label in labels.items()
+                   if field != "initial_notes" and not str(getattr(self, field) or "").strip()]
+        if missing:
+            raise ValueError("Preencha todos os campos do cadastro. Faltando: " + ", ".join(missing) + ".")
         return self
+
+
+class IntakeDraftData(BaseModel):
+    """Produto (cadastro pelo paciente): o que já foi digitado, salvo enquanto o
+    paciente preenche. Só LIMITES de tamanho (o rascunho pode estar pela metade);
+    as regras completas valem no envio (IntakeSubmitData). Campos desconhecidos
+    são ignorados: o rascunho guarda só o que a ficha tem."""
+    full_name: str = Field(default="", max_length=PATIENT_NAME_MAX)
+    cpf: str = Field(default="", max_length=20)
+    rg: str = Field(default="", max_length=20)
+    birth_date: str = Field(default="", max_length=10)
+    education: str = Field(default="", max_length=100)
+    marital_status: str = Field(default="", max_length=100)
+    profession: str = Field(default="", max_length=100)
+    phone: str = Field(default="", max_length=30)
+    email: str = Field(default="", max_length=254)
+    address: str = Field(default="", max_length=300)
+    emergency_contact: str = Field(default="", max_length=200)
+    guardian_name: str = Field(default="", max_length=PATIENT_NAME_MAX)
+    guardian_cpf: str = Field(default="", max_length=20)
+    guardian_relationship: str = Field(default="", max_length=60)
+    guardian_phone: str = Field(default="", max_length=30)
+    consent_terms: Optional[bool] = None
+
+    @field_validator("*")
+    @classmethod
+    def reject_null_bytes(cls, value):
+        if isinstance(value, str) and "\x00" in value:
+            raise ValueError("Texto com caractere inválido.")
+        return value
 
 
 # CORREÇÃO (item 6 da auditoria): termo de consentimento por profissional.
@@ -1305,10 +1329,6 @@ def public_user(u: User) -> dict:
         "terms_version": u.terms_version or "",
         "terms_accepted_at": _iso(u.terms_accepted_at),
         "privacy_policy_version": legal.PRIVACY_POLICY_VERSION,
-        # Item 15: o token do webhook NÃO é mais devolvido aqui. Antes ia em
-        # toda resposta de /auth/me, ou seja, em toda carga de página. Agora ele
-        # só aparece uma vez, ao ser gerado (POST /integrations/google-forms/token).
-        "webhook_configured": bool(u.webhook_token_hash),
         # Produto: tempo do bloqueio por inatividade e como desbloquear a tela
         # (senha para quem tem; Google para quem só entra pelo Google).
         "lock_minutes": u.lock_minutes or DEFAULT_LOCK_MINUTES,
@@ -2022,8 +2042,8 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
 @api_router.get("/auth/me")
 async def me(request: Request, db: AsyncSession = Depends(get_db)):
     # Item 15: antes esta rota criava um token de webhook para TODO usuário e o
-    # devolvia a cada carregamento de página. Agora o token só existe se o
-    # profissional gerar um (rota /integrations/google-forms/token).
+    # devolvia a cada carregamento de página. A integração com o Google Forms
+    # foi removida depois (substituída pelo link de cadastro do paciente).
     #
     # Produto: responde MESMO com a sessão bloqueada (informando `locked`),
     # para o frontend mostrar a tela de bloqueio. Recarregar a página não
@@ -2828,67 +2848,6 @@ async def update_consent_term(data: ConsentTermInput, user: User = Depends(get_a
     return await get_consent_term(user)
 
 # ---------------------------------------------------------------------------
-# Integração Google Forms: token do webhook (item 15 da auditoria)
-# ---------------------------------------------------------------------------
-
-# SEGURANÇA (backlog: "token do webhook sem validade"): o token vence depois
-# de WEBHOOK_TOKEN_DAYS (padrão 1 ano). A rotina de manutenção avisa por e-mail
-# WEBHOOK_EXPIRY_NOTICE_DAYS antes, e a tela de integração mostra a data.
-WEBHOOK_TOKEN_DAYS = int(os.environ.get("WEBHOOK_TOKEN_DAYS", "365"))
-WEBHOOK_EXPIRY_NOTICE_DAYS = 30
-
-
-def _integration_status(u: User) -> dict:
-    expires_at = _as_utc(u.webhook_token_expires_at)
-    return {
-        "configured": bool(u.webhook_token_hash),
-        "hint": u.webhook_token_hint or "",
-        "created_at": _iso(u.webhook_token_created_at),
-        "expires_at": _iso(expires_at),
-        "expired": bool(u.webhook_token_hash and expires_at and expires_at <= now_utc()),
-    }
-
-@api_router.get("/integrations/google-forms")
-async def google_forms_status(user: User = Depends(get_active_user)):
-    return _integration_status(user)
-
-@api_router.post("/integrations/google-forms/token")
-async def rotate_google_forms_token(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
-    """Gera um token NOVO e devolve o valor uma única vez.
-
-    - O banco guarda só o hash (crypto.hash_token); se o banco vazar, os
-      tokens não servem para criar pacientes em nome de ninguém.
-    - Gerar um novo token revoga o anterior na hora (o hash é substituído),
-      então um token vazado se resolve em um clique.
-    - O frontend precisa mostrar o script completo logo após esta chamada:
-      depois disso o token não pode mais ser recuperado, só trocado.
-    """
-    token = f"wh_{secrets.token_urlsafe(32)}"
-    user.webhook_token_hash = hash_token(token)
-    user.webhook_token_hint = token[-4:]
-    user.webhook_token_created_at = now_utc()
-    user.webhook_token_expires_at = now_utc() + timedelta(days=WEBHOOK_TOKEN_DAYS)  # backlog: validade
-    user.webhook_expiry_notified_at = None
-    await db.commit()
-    await db.refresh(user)
-
-    await log_audit(db, user.user_id, user.email, "gerar_token", "integracao", user.user_id,
-                    "Token do Google Forms gerado (o anterior, se havia, foi revogado)")
-    return {**_integration_status(user), "token": token}
-
-@api_router.delete("/integrations/google-forms/token")
-async def revoke_google_forms_token(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
-    user.webhook_token_hash = None
-    user.webhook_token_hint = ""
-    user.webhook_token_created_at = None
-    user.webhook_token_expires_at = None
-    await db.commit()
-    await db.refresh(user)
-
-    await log_audit(db, user.user_id, user.email, "revogar", "integracao", user.user_id, "Token do Google Forms revogado")
-    return _integration_status(user)
-
-# ---------------------------------------------------------------------------
 # Guarda obrigatória de prontuários (item 12 da auditoria)
 # ---------------------------------------------------------------------------
 # A Resolução CFP nº 001/2009 exige guardar o registro documental dos
@@ -3019,7 +2978,7 @@ def search_contacts(data) -> dict:
 
 async def _index_patient_search(db: AsyncSession, p: Patient, plain_name: str, *, phones=(), cpfs=()) -> None:
     """(Re)grava os tokens de busca do paciente. Chamado em toda criação,
-    edição, anonimização e cadastro via Google Forms, na MESMA transação da
+    edição, anonimização e cadastro pelo link do paciente, na MESMA transação da
     alteração: o índice nunca fica desatualizado em relação ao nome.
     P5: inclui telefone e CPF (antes só o nome era buscável)."""
     await db.flush()  # garante o id de um paciente recém-criado
@@ -3219,18 +3178,27 @@ async def get_patient(pid: str, user: User = Depends(get_active_user), db: Async
     await log_audit(db, user.user_id, user.email, "visualizar", "paciente", pid, "Ficha cadastral")
     return data
 
+async def _new_patient(db: AsyncSession, owner: User, data: PatientInput) -> tuple:
+    """Cria o paciente na sessão (sem commit): campos criptografados, termo de
+    consentimento com evidência e índice de busca. Um só lugar para o cadastro
+    manual, o envio do paciente pelo link e o cadastro incompleto completado pela
+    psicóloga: esquecer uma dessas etapas num dos caminhos gravaria dado em claro
+    ou deixaria o paciente fora da busca. Devolve (paciente, ação do consentimento)."""
+    patient = Patient(owner_id=owner.user_id, anonymized=False)
+    _apply_patient_input(patient, data)
+    consent_action = apply_consent(patient, data.consent_terms, owner)
+    db.add(patient)
+    # Escala: busca no servidor. P5: também por telefone e CPF.
+    await _index_patient_search(db, patient, data.full_name, **search_contacts(data))
+    return patient, consent_action
+
+
 @api_router.post("/patients")
 async def create_patient(data: PatientInput, user: User = Depends(get_writer), db: AsyncSession = Depends(get_db)):
     # Produto (assinatura): paciente NOVO exige gravação (get_writer). Corrigir o
     # cadastro de quem já existe (PUT) continua liberado: é direito do paciente
     # (LGPD art. 18, III) e serve também para revogar o consentimento.
-    novo_paciente = Patient(owner_id=user.user_id, anonymized=False)
-    _apply_patient_input(novo_paciente, data)
-    consent_action = apply_consent(novo_paciente, data.consent_terms, user)
-
-    db.add(novo_paciente)
-    # Escala: busca no servidor. P5: também por telefone e CPF.
-    await _index_patient_search(db, novo_paciente, data.full_name, **search_contacts(data))
+    novo_paciente, consent_action = await _new_patient(db, user, data)
     await db.commit()
     await db.refresh(novo_paciente)
 
@@ -3796,78 +3764,403 @@ async def export_audit(
         "Content-Disposition": f'attachment; filename="trilha_auditoria_{now_utc():%Y%m%d}.csv"'})
 
 
-# Webhook do Google Forms
-# (Header já importado no topo do arquivo)
+# ---------------------------------------------------------------------------
+# PRODUTO: cadastro pelo próprio paciente (link temporário)
+# ---------------------------------------------------------------------------
+# Substitui a integração com o Google Forms, REMOVIDA: lá os dados do paciente
+# passavam pelo Google, o token valia por um ano dentro de um script de
+# terceiro e a ficha chegava sem validação nenhuma.
+#
+# Fluxo:
+#   1. a psicóloga gera o link (POST /intake-links). Vale 30 minutos para
+#      COMEÇAR, para uma pessoa só. O banco guarda só o hash; o link vai no
+#      fragmento (/cadastro#token=...), que não aparece em logs nem na prévia
+#      automática do WhatsApp;
+#   2. o paciente abre a página (POST /intake/open: mostra quem recebe os dados
+#      e as regras; NÃO começa o tempo) e clica em "Começar" (POST /intake/start):
+#      10 minutos, e o link fica PRESO ao navegador dele por um segredo próprio
+#      (fill_secret, guardado só como hash). Se o link vazar depois disso,
+#      ninguém continua de outro aparelho;
+#   3. enquanto preenche, o que ele digita é salvo CRIPTOGRAFADO (PUT /intake/draft);
+#      recarregar a página ou cair a internet retoma de onde parou (POST /intake/resume);
+#   4. faltando até 3 minutos, ele pode pedir +10 minutos, até 10 vezes
+#      (acessibilidade, WCAG 2.2.1: quem precisa de mais tempo não fica de fora);
+#   5. enviou (POST /intake/submit): as MESMAS regras do cadastro manual (menos
+#      "Notas iniciais", da psicóloga) e vira paciente. Reenviar (clique duplo,
+#      rede caindo na resposta) não duplica: só UM envio reserva o link;
+#   6. o tempo acabou pela metade: a psicóloga vê o cadastro como INCOMPLETO,
+#      revisa e completa com o paciente (POST /intake-links/{id}/complete).
+#      Nada do que o paciente digitou se perde.
+# Segurança das rotas do paciente (públicas, sem login):
+#   - token e segredo vão no CORPO (POST/PUT), nunca na URL;
+#   - link desconhecido, cancelado ou vencido recebe a MESMA resposta (410),
+#     sem revelar qual é o caso (não dá para "sondar" links);
+#   - limite de tentativas por IP e por link, tamanho de cada campo limitado,
+#     proteção CSRF (cabeçalho próprio) e limite de tamanho do corpo valem também aqui;
+#   - o IP de quem enviou fica na trilha de auditoria da psicóloga: é a
+#     evidência do consentimento (LGPD art. 8º, §2º), e a página avisa isso;
+#   - o envio é aceito mesmo que a conta da psicóloga tenha entrado no modo
+#     somente leitura depois de gerar o link: o paciente já fez a parte dele, e
+#     os dados não podem se perder.
+INTAKE_START_MINUTES = 30
+INTAKE_FILL_MINUTES = 10
+INTAKE_EXTENSION_MINUTES = 10
+INTAKE_MAX_EXTENSIONS = 10           # WCAG 2.2.1: prorrogar ao menos 10 vezes
+INTAKE_EXTEND_WINDOW_SECONDS = 180   # pedir mais tempo vale nos últimos 3 minutos
+INTAKE_GRACE_SECONDS = 15            # atraso da rede no último salvamento/envio
+INTAKE_MAX_PENDING = 20              # links ainda não começados, por psicóloga
+INTAKE_KEEP_DAYS = 30                # depois disso, links encerrados saem da lista (manutenção)
+INTAKE_ACTOR = "paciente (link de cadastro)"
+INTAKE_INVALID = {"code": "intake_invalid",
+                  "msg": "Este link de cadastro não é válido ou já expirou. Peça um novo link à sua psicóloga."}
+INTAKE_DONE = {"code": "intake_done",
+               "msg": "Este cadastro já foi enviado. Obrigado! Se precisar corrigir algo, fale com a sua psicóloga."}
+INTAKE_OTHER_DEVICE = {"code": "intake_other_device",
+                       "msg": "Este cadastro foi começado em outro aparelho ou navegador. Continue nele, "
+                              "ou peça um novo link à sua psicóloga."}
 
-class WebhookPayload(BaseModel):
-    # Segurança (varredura, item 3): mesmos limites do cadastro manual, sem
-    # recusar o cadastro por erro de formato do paciente (ver WebhookPatientInput).
-    patient_data: WebhookPatientInput
 
-# Item 9: o token do webhook é o único segredo desta rota pública. O limite
-# impede tanto adivinhar tokens quanto inundar a base com pacientes falsos
-# caso o token vaze.
-# SEGURANÇA MÉDIA: o limite era só POR IP (30/min). Mas o Google Forms envia de
-# IPs do Google COMPARTILHADOS por muitos usuários: os formulários de vários
-# profissionais dividiam a mesma cota e se bloqueavam entre si, enquanto um
-# token vazado usado de IPs variados escapava do limite. Agora:
-#   - por TOKEN: 30/min (comporta com folga um formulário real);
-#   - por IP: 300/min, só contra enxurrada de tokens inventados.
-WEBHOOK_LIMIT_PER_TOKEN = 30
-WEBHOOK_LIMIT_PER_IP = 300
+class IntakeLinkInput(BaseModel):
+    # "Para quem é o link" (opcional): só a psicóloga vê; gravado criptografado.
+    label: str = Field(default="", max_length=60)
+
+    @field_validator("label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        value = (value or "").strip()
+        if "\x00" in value:
+            raise ValueError("Texto com caractere inválido.")
+        return value
 
 
-@api_router.post("/webhook/google-forms", dependencies=[Depends(rate_limit("webhook-ip", WEBHOOK_LIMIT_PER_IP, 60))])
-async def google_forms_webhook(payload: WebhookPayload, x_webhook_token: str = Header(..., max_length=128),
-                               db: AsyncSession = Depends(get_db)):
-    # Item 15: o banco só tem o HASH do token; comparamos hash com hash.
-    # A busca é por igualdade em coluna indexada, sem comparar caractere a
-    # caractere em Python, então não há vazamento útil por tempo de resposta.
-    token_hash = hash_token(x_webhook_token)
-    await enforce(f"webhook-token:{token_hash[:32]}", WEBHOOK_LIMIT_PER_TOKEN, 60)
-    stmt = select(User).where(User.webhook_token_hash == token_hash)
-    owner = (await db.execute(stmt)).scalar_one_or_none()
+class IntakeTokenInput(BaseModel):
+    token: str = Field(min_length=20, max_length=128)
 
-    if not owner or owner.closed_at is not None:
-        raise HTTPException(status_code=401, detail="Token de integração inválido ou revogado")
-    expires_at = _as_utc(owner.webhook_token_expires_at)
-    if expires_at and expires_at <= now_utc():
-        # Backlog: token com validade. O profissional já recebeu o aviso por e-mail.
-        raise HTTPException(status_code=401, detail=(
-            "Token de integração vencido. Gere um novo em Pacientes > Integrar Google Forms."))
-    # Produto (assinatura): o formulário cria paciente novo, então segue a regra
-    # de gravação da conta. A resposta explica o motivo a quem configurou o script.
-    if not billing.access_state(owner)["can_write"]:
-        raise HTTPException(status_code=402, detail=(
-            "A conta do profissional está no modo somente leitura (assinatura): o cadastro não foi recebido."))
 
-    # Não exigimos aqui o aceite da versão vigente da política (get_active_user):
-    # se a política mudar, bloquear o webhook faria o formulário do profissional
-    # perder cadastros de pacientes em silêncio. O token só pode ter sido gerado
-    # por alguém que já aceitou a política quando o gerou.
-    data = payload.patient_data
+class IntakeFillInput(IntakeTokenInput):
+    fill_secret: str = Field(min_length=20, max_length=128)
 
-    novo_paciente = Patient(owner_id=owner.user_id, anonymized=False)
-    _apply_patient_input(novo_paciente, data)  # item 13: mesmos campos criptografados do cadastro manual
-    db.add(novo_paciente)
-    # Escala: busca no servidor. P5: também por telefone e CPF.
-    await _index_patient_search(db, novo_paciente, data.full_name, **search_contacts(data))
-    # Termo por profissional: o consentimento marcado no formulário é
-    # registrado com a cópia do termo ATUAL do profissional. Por isso a tela de
-    # integração orienta a usar no formulário o mesmo texto de Configurações.
-    consent_action = apply_consent(novo_paciente, data.consent_terms, owner)
 
-    db.add(novo_paciente)
+class IntakeDraftInput(IntakeFillInput):
+    data: IntakeDraftData
+
+
+class IntakeSubmitInput(IntakeFillInput):
+    data: IntakeSubmitData
+
+
+def intake_status(intake: PatientIntake, now: Optional[datetime] = None) -> str:
+    """pending | in_progress | submitted | completed | incomplete | expired | revoked."""
+    now = now or now_utc()
+    if intake.revoked_at:
+        return "revoked"
+    if intake.submitted_at:
+        return "submitted" if intake.completed_by == "patient" else "completed"
+    if intake.started_at:
+        if now < _as_utc(intake.deadline_at):
+            return "in_progress"
+        return "incomplete" if intake.draft else "expired"
+    return "pending" if now < _as_utc(intake.expires_at) else "expired"
+
+
+def _intake_public(intake: PatientIntake) -> dict:
+    """O que a psicóloga vê na lista (sem o rascunho, que tem rota própria)."""
+    return {
+        "id": intake.id,
+        "label": decrypt_field(intake.label),
+        "status": intake_status(intake),
+        "created_at": _iso(_as_utc(intake.created_at)),
+        "expires_at": _iso(_as_utc(intake.expires_at)),
+        "started_at": _iso(_as_utc(intake.started_at)),
+        "deadline_at": _iso(_as_utc(intake.deadline_at)),
+        "submitted_at": _iso(_as_utc(intake.submitted_at)),
+        "draft_saved_at": _iso(_as_utc(intake.draft_saved_at)),
+        "has_draft": bool(intake.draft),
+        "patient_id": intake.patient_id or "",
+    }
+
+
+def _seconds_left(intake: PatientIntake, now: datetime) -> int:
+    return max(0, int((_as_utc(intake.deadline_at) - now).total_seconds()))
+
+
+async def _intake_by_token(db: AsyncSession, token: str) -> tuple:
+    """Link + dona. Desconhecido, cancelado ou de conta encerrada: a mesma resposta (410)."""
+    intake = (await db.execute(select(PatientIntake).where(
+        PatientIntake.token_hash == hash_token(token)))).scalar_one_or_none()
+    owner = await db.get(User, intake.owner_id) if intake else None
+    if intake is None or intake.revoked_at or owner is None or owner.closed_at is not None:
+        raise HTTPException(status_code=410, detail=INTAKE_INVALID)
+    return intake, owner
+
+
+def _check_fill_secret(intake: PatientIntake, fill_secret: str) -> None:
+    """O link começado só continua no navegador que começou (comparação em tempo constante)."""
+    if not intake.fill_secret_hash or not hmac.compare_digest(intake.fill_secret_hash, hash_token(fill_secret)):
+        raise HTTPException(status_code=403, detail=INTAKE_OTHER_DEVICE)
+
+
+def _require_fill_time(intake: PatientIntake, now: datetime, grace: int = 0) -> None:
+    """Dentro do tempo de preenchimento (com uma folga para a rede no último envio)."""
+    if intake.submitted_at:
+        raise HTTPException(status_code=410, detail=INTAKE_DONE)
+    if not intake.started_at or now >= _as_utc(intake.deadline_at) + timedelta(seconds=grace):
+        msg = ("O tempo para preencher acabou. O que você já preencheu foi enviado à sua psicóloga, "
+               "que vai completar o cadastro com você.") if intake.draft else (
+               "O tempo para preencher acabou. Peça um novo link à sua psicóloga.")
+        raise HTTPException(status_code=410, detail={"code": "intake_expired", "msg": msg})
+
+
+def _intake_draft(intake: PatientIntake) -> dict:
+    return json.loads(decrypt_field(intake.draft)) if intake.draft else {}
+
+
+async def _owned_intake(db: AsyncSession, intake_id: str, user: User) -> PatientIntake:
+    intake = (await db.execute(select(PatientIntake).where(
+        PatientIntake.id == intake_id, PatientIntake.owner_id == user.user_id))).scalar_one_or_none()
+    if intake is None:
+        raise HTTPException(status_code=404, detail="Link de cadastro não encontrado.")
+    return intake
+
+
+# --- Rotas da psicóloga ----------------------------------------------------
+@api_router.post("/intake-links", dependencies=[Depends(rate_limit("intake-create", 30, 3600))])
+async def create_intake_link(data: IntakeLinkInput, user: User = Depends(get_writer), db: AsyncSession = Depends(get_db)):
+    """Gera o link (só com gravação liberada: cadastrar paciente novo é gravar).
+    O link volta UMA vez, nesta resposta; o banco guarda só o hash."""
+    await enforce(f"intake-create-user:{user.user_id}", 30, 3600)
+    now = now_utc()
+    pending = await db.scalar(select(func.count()).select_from(PatientIntake).where(
+        PatientIntake.owner_id == user.user_id, PatientIntake.revoked_at.is_(None),
+        PatientIntake.started_at.is_(None), PatientIntake.expires_at > now))
+    if pending >= INTAKE_MAX_PENDING:
+        raise HTTPException(status_code=409, detail={
+            "code": "too_many_links",
+            "msg": f"Você já tem {INTAKE_MAX_PENDING} links esperando o paciente começar. "
+                   "Cancele algum ou espere vencerem (30 minutos)."})
+    token = secrets.token_urlsafe(32)  # 256 bits
+    intake = PatientIntake(owner_id=user.user_id, token_hash=hash_token(token), label=encrypt_field(data.label),
+                           expires_at=now + timedelta(minutes=INTAKE_START_MINUTES))
+    db.add(intake)
     await db.commit()
-    await db.refresh(novo_paciente)
+    await db.refresh(intake)
+    await log_audit(db, user.user_id, user.email, "link_cadastro", "cadastro", intake.id,
+                    f"Link de cadastro criado (vale {INTAKE_START_MINUTES} minutos para começar)")
+    return {**_intake_public(intake), "url": frontend_link("/cadastro", token)}
 
-    # Item 13: sem o nome do paciente no detalhe (antes: "Integração Google Forms: <nome>").
-    await log_audit(db, owner.user_id, owner.email, "criar", "paciente", novo_paciente.id, "Cadastro via Google Forms")
+
+@api_router.get("/intake-links")
+async def list_intake_links(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(PatientIntake).where(PatientIntake.owner_id == user.user_id)
+                             .order_by(desc(PatientIntake.created_at)).limit(50))).scalars().all()
+    return [_intake_public(row) for row in rows]
+
+
+@api_router.post("/intake-links/{intake_id}/revoke")
+async def revoke_intake_link(data: EndSessionsInput, intake_id: str = PathParam(max_length=40),
+                             user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Cancela o link (enviado por engano, paciente errado). O que o paciente já
+    tinha digitado é apagado junto: a tela pede confirmação antes."""
+    intake = await _owned_intake(db, intake_id, user)
+    if intake.submitted_at:
+        raise HTTPException(status_code=409, detail={"code": "intake_done", "msg": "Este cadastro já foi concluído."})
+    had_draft = bool(intake.draft)
+    intake.revoked_at = now_utc()
+    intake.draft = ""
+    intake.fill_secret_hash = None
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "link_cadastro", "cadastro", intake.id,
+                    "Link de cadastro cancelado" + (" (o que o paciente preencheu foi apagado)" if had_draft else ""))
+    return _intake_public(intake)
+
+
+@api_router.get("/intake-links/{intake_id}/draft")
+async def intake_link_draft(intake_id: str = PathParam(max_length=40), user: User = Depends(get_active_user),
+                            db: AsyncSession = Depends(get_db)):
+    """O que o paciente preencheu antes de o tempo acabar (cadastro incompleto).
+    Leitura de dado pessoal: fica na trilha de auditoria."""
+    intake = await _owned_intake(db, intake_id, user)
+    if intake_status(intake) != "incomplete":
+        raise HTTPException(status_code=409, detail={"code": "not_incomplete", "msg": "Este link não tem cadastro incompleto."})
+    await log_audit(db, user.user_id, user.email, "visualizar", "cadastro", intake.id,
+                    "Cadastro incompleto aberto para revisão")
+    return {"data": _intake_draft(intake)}
+
+
+@api_router.post("/intake-links/{intake_id}/complete")
+async def complete_intake(data: PatientInput, intake_id: str = PathParam(max_length=40),
+                          user: User = Depends(get_writer), db: AsyncSession = Depends(get_db)):
+    """A psicóloga completa o cadastro incompleto (com o paciente) e salva: vira
+    paciente e o rascunho é apagado. Mesmas regras do cadastro manual."""
+    intake = await _owned_intake(db, intake_id, user)
+    if intake_status(intake) != "incomplete":
+        raise HTTPException(status_code=409, detail={"code": "not_incomplete", "msg": "Este link não tem cadastro incompleto."})
+    claimed = await db.execute(update(PatientIntake).where(
+        PatientIntake.id == intake.id, PatientIntake.submitted_at.is_(None)).values(submitted_at=now_utc()))
+    if claimed.rowcount != 1:  # completado ao mesmo tempo em outra aba
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "intake_done", "msg": "Este cadastro já foi concluído."})
+    patient, consent_action = await _new_patient(db, user, data)
+    intake.completed_by = "professional"
+    intake.patient_id = patient.id
+    intake.draft = ""
+    await db.commit()
+    await db.refresh(patient)
+    await log_audit(db, user.user_id, user.email, "criar", "paciente", patient.id,
+                    "Cadastro de paciente (completado a partir do link de cadastro)")
     if consent_action:
-        await log_audit(db, owner.user_id, owner.email, consent_action, "paciente", novo_paciente.id,
-                        "Termo de consentimento registrado (Google Forms)")
+        await log_audit(db, user.user_id, user.email, consent_action, "paciente", patient.id,
+                        "Termo de consentimento registrado")
+    return patient_public(patient, user)
 
-    return {"status": "sucesso", "paciente_id": novo_paciente.id}
+
+@api_router.post("/intake-links/{intake_id}/discard")
+async def discard_intake(data: EndSessionsInput, intake_id: str = PathParam(max_length=40),
+                         user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Descarta o cadastro incompleto (ex.: paciente desistiu). Pede confirmação na tela."""
+    intake = await _owned_intake(db, intake_id, user)
+    if intake_status(intake) != "incomplete":
+        raise HTTPException(status_code=409, detail={"code": "not_incomplete", "msg": "Este link não tem cadastro incompleto."})
+    intake.draft = ""
+    intake.revoked_at = now_utc()
+    await db.commit()
+    await log_audit(db, user.user_id, user.email, "link_cadastro", "cadastro", intake.id, "Cadastro incompleto descartado")
+    return _intake_public(intake)
+
+
+# --- Rotas do paciente (públicas) ------------------------------------------
+@api_router.post("/intake/open", dependencies=[Depends(rate_limit("intake-open", 60, 600))])
+async def intake_open(data: IntakeTokenInput, db: AsyncSession = Depends(get_db)):
+    """Página do paciente: quem recebe os dados e as regras. NÃO começa o tempo
+    (a prévia automática de aplicativos de mensagem não consome o link)."""
+    intake, owner = await _intake_by_token(db, data.token)
+    status = intake_status(intake)
+    if status in ("submitted", "completed"):
+        raise HTTPException(status_code=410, detail=INTAKE_DONE)
+    if status not in ("pending", "in_progress"):
+        # Link que chegou a ser COMEÇADO: a mensagem explica o que houve com os dados
+        # (quem começou tem o link e o segredo do aparelho). Nunca começado, cancelado
+        # ou desconhecido: sempre a mesma resposta, sem revelar qual é o caso.
+        if intake.started_at:
+            _require_fill_time(intake, now_utc())
+        raise HTTPException(status_code=410, detail=INTAKE_INVALID)
+    return {
+        "status": status,
+        "professional_name": owner.name or "",
+        "start_until": _iso(_as_utc(intake.expires_at)),
+        "fill_minutes": INTAKE_FILL_MINUTES,
+        "extension_minutes": INTAKE_EXTENSION_MINUTES,
+        "max_extensions": INTAKE_MAX_EXTENSIONS,
+        "consent_text": consent_term_text(owner),
+    }
+
+
+@api_router.post("/intake/start", dependencies=[Depends(rate_limit("intake-start", 20, 600))])
+async def intake_start(data: IntakeTokenInput, db: AsyncSession = Depends(get_db)):
+    """"Começar": 10 minutos e o link preso a este navegador. Só UM começo vale
+    (atualização condicional no banco: dois cliques ou dois aparelhos ao mesmo
+    tempo não abrem duas sessões)."""
+    intake, owner = await _intake_by_token(db, data.token)
+    now = now_utc()
+    if intake.started_at:
+        raise HTTPException(status_code=409, detail=INTAKE_OTHER_DEVICE)
+    if intake_status(intake, now) != "pending":
+        raise HTTPException(status_code=410, detail=INTAKE_INVALID)
+    secret = secrets.token_urlsafe(32)
+    claimed = await db.execute(update(PatientIntake).where(
+        PatientIntake.id == intake.id, PatientIntake.started_at.is_(None)).values(
+        started_at=now, deadline_at=now + timedelta(minutes=INTAKE_FILL_MINUTES), fill_secret_hash=hash_token(secret)))
+    if claimed.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=INTAKE_OTHER_DEVICE)
+    await db.commit()
+    await log_audit(db, owner.user_id, INTAKE_ACTOR, "link_cadastro", "cadastro", intake.id,
+                    "O paciente começou a preencher o cadastro")
+    return {"fill_secret": secret, "seconds_left": INTAKE_FILL_MINUTES * 60, "extensions_left": INTAKE_MAX_EXTENSIONS}
+
+
+@api_router.post("/intake/resume", dependencies=[Depends(rate_limit("intake-resume", 60, 600))])
+async def intake_resume(data: IntakeFillInput, db: AsyncSession = Depends(get_db)):
+    """Recarregou a página ou a internet caiu: volta exatamente de onde parou."""
+    intake, _owner = await _intake_by_token(db, data.token)
+    _check_fill_secret(intake, data.fill_secret)
+    now = now_utc()
+    _require_fill_time(intake, now)
+    return {"data": _intake_draft(intake), "seconds_left": _seconds_left(intake, now),
+            "extensions_left": INTAKE_MAX_EXTENSIONS - (intake.extensions or 0)}
+
+
+@api_router.put("/intake/draft", dependencies=[Depends(rate_limit("intake-draft", 600, 600))])
+async def intake_save_draft(data: IntakeDraftInput, db: AsyncSession = Depends(get_db)):
+    """Salva o que o paciente já digitou (criptografado). Sem auditoria a cada
+    tecla: a trilha registra começo, prorrogação e envio."""
+    intake, _owner = await _intake_by_token(db, data.token)
+    _check_fill_secret(intake, data.fill_secret)
+    now = now_utc()
+    _require_fill_time(intake, now, grace=INTAKE_GRACE_SECONDS)
+    await enforce(f"intake-draft:{intake.id}", 300, 600)
+    payload = data.data.model_dump()
+    filled = any(value not in ("", None) for value in payload.values())
+    intake.draft = encrypt_field(json.dumps(payload, ensure_ascii=False)) if filled else ""
+    intake.draft_saved_at = now
+    await db.commit()
+    return {"saved_at": _iso(now), "seconds_left": _seconds_left(intake, now)}
+
+
+@api_router.post("/intake/extend", dependencies=[Depends(rate_limit("intake-extend", 30, 600))])
+async def intake_extend(data: IntakeFillInput, db: AsyncSession = Depends(get_db)):
+    """+10 minutos, só nos últimos 3 minutos e até 10 vezes (WCAG 2.2.1)."""
+    intake, owner = await _intake_by_token(db, data.token)
+    _check_fill_secret(intake, data.fill_secret)
+    now = now_utc()
+    _require_fill_time(intake, now)
+    if (intake.extensions or 0) >= INTAKE_MAX_EXTENSIONS:
+        raise HTTPException(status_code=409, detail={"code": "no_more_time",
+                                                     "msg": "O tempo já foi prorrogado o máximo de vezes."})
+    if _seconds_left(intake, now) > INTAKE_EXTEND_WINDOW_SECONDS:
+        raise HTTPException(status_code=409, detail={"code": "too_early",
+                                                     "msg": "Dá para pedir mais tempo nos últimos 3 minutos."})
+    intake.deadline_at = _as_utc(intake.deadline_at) + timedelta(minutes=INTAKE_EXTENSION_MINUTES)
+    intake.extensions = (intake.extensions or 0) + 1
+    await db.commit()
+    await log_audit(db, owner.user_id, INTAKE_ACTOR, "link_cadastro", "cadastro", intake.id,
+                    f"O paciente pediu mais tempo (+{INTAKE_EXTENSION_MINUTES} minutos)")
+    return {"seconds_left": _seconds_left(intake, now),
+            "extensions_left": INTAKE_MAX_EXTENSIONS - intake.extensions}
+
+
+@api_router.post("/intake/submit", dependencies=[Depends(rate_limit("intake-submit", 20, 600))])
+async def intake_submit(data: IntakeSubmitInput, db: AsyncSession = Depends(get_db)):
+    """Envia o cadastro: vira paciente da psicóloga, com o termo de consentimento
+    registrado como evidência (cópia do texto, data e o IP na trilha).
+
+    Idempotente: se a resposta se perdeu na rede e o paciente envia de novo,
+    a resposta é "já recebido", sem criar outro paciente. Só UM envio reserva o
+    link (atualização condicional), e a criação do paciente está na MESMA
+    transação: se ela falhar, a reserva é desfeita e o paciente pode reenviar.
+    """
+    intake, owner = await _intake_by_token(db, data.token)
+    _check_fill_secret(intake, data.fill_secret)
+    if intake.submitted_at and intake.completed_by == "patient":
+        return {"ok": True, "already": True}
+    now = now_utc()
+    _require_fill_time(intake, now, grace=INTAKE_GRACE_SECONDS)
+    claimed = await db.execute(update(PatientIntake).where(
+        PatientIntake.id == intake.id, PatientIntake.submitted_at.is_(None)).values(
+        submitted_at=now, completed_by="patient"))
+    if claimed.rowcount != 1:  # outro envio do mesmo paciente chegou antes
+        await db.rollback()
+        return {"ok": True, "already": True}
+    patient, consent_action = await _new_patient(db, owner, data.data)
+    intake.patient_id = patient.id
+    intake.draft = ""
+    await db.commit()
+    await log_audit(db, owner.user_id, INTAKE_ACTOR, "criar", "paciente", patient.id,
+                    "Cadastro enviado pelo paciente (link de cadastro)")
+    if consent_action:
+        await log_audit(db, owner.user_id, INTAKE_ACTOR, consent_action, "paciente", patient.id,
+                        "Termo de consentimento registrado pelo paciente (link de cadastro)")
+    return {"ok": True, "already": False}
 
 
 # ---------------------------------------------------------------------------
@@ -4476,6 +4769,9 @@ async def _close_account(db: AsyncSession, user: User) -> dict:
                      .execution_options(synchronize_session=False))
     await db.execute(delete(Session).where(Session.owner_id == user.user_id))
     await db.execute(delete(EmailToken).where(EmailToken.user_id == user.user_id))
+    # Produto (cadastro pelo paciente): links e rascunhos de cadastro não são
+    # prontuário: saem na hora.
+    await db.execute(delete(PatientIntake).where(PatientIntake.owner_id == user.user_id))
 
     user.closed_at = now
     user.purge_after = max(last_deadline or now, now + ACCESS_LOG_RETENTION)
@@ -4489,10 +4785,6 @@ async def _close_account(db: AsyncSession, user: User) -> dict:
     user.picture = ""
     user.consent_term_body = None
     user.draft_key = None
-    user.webhook_token_hash = None
-    user.webhook_token_hint = ""
-    user.webhook_token_created_at = None
-    user.webhook_token_expires_at = None
     user.mfa_secret = None
     user.mfa_enabled_at = None
     user.mfa_last_step = None
@@ -4580,24 +4872,22 @@ async def purge_closed_accounts(db: AsyncSession, now: Optional[datetime] = None
     return {"purged_patients": purged_patients, "purged_accounts": purged_accounts}
 
 
-async def notify_expiring_webhook_tokens(db: AsyncSession, now: Optional[datetime] = None) -> int:
-    """Avisa por e-mail (uma vez por token) quem tem o token do Google Forms
-    vencendo nos próximos WEBHOOK_EXPIRY_NOTICE_DAYS dias."""
+async def purge_patient_intakes(db: AsyncSession, now: Optional[datetime] = None) -> int:
+    """Produto (cadastro pelo paciente): apaga links encerrados há mais de
+    INTAKE_KEEP_DAYS dias (enviados, completados, cancelados, vencidos sem nada
+    digitado). Cadastro INCOMPLETO com dados fica até a psicóloga completar ou
+    descartar: os dados do paciente não podem se perder."""
     now = now or now_utc()
-    rows = (await db.execute(select(User).where(
-        User.closed_at.is_(None), User.webhook_token_hash.is_not(None),
-        User.webhook_token_expires_at.is_not(None),
-        User.webhook_token_expires_at > now,
-        User.webhook_token_expires_at <= now + timedelta(days=WEBHOOK_EXPIRY_NOTICE_DAYS),
-        User.webhook_expiry_notified_at.is_(None),
-    ))).scalars().all()
-    for user in rows:
-        expires_on = _as_utc(user.webhook_token_expires_at).strftime("%d/%m/%Y")
-        if await mailer.send_email(mailer.webhook_token_expiring(user.email, user.name or "", expires_on,
-                                                                 frontend_link("/pacientes"))):
-            user.webhook_expiry_notified_at = now
-            await db.commit()
-    return len(rows)
+    rows = (await db.execute(select(PatientIntake).where(
+        PatientIntake.created_at < now - timedelta(days=INTAKE_KEEP_DAYS)))).scalars().all()
+    purged = 0
+    for intake in rows:
+        if intake_status(intake, now) == "incomplete":
+            continue
+        await db.delete(intake)
+        purged += 1
+    await db.commit()
+    return purged
 
 
 # Rotina de manutenção: roda dentro da API (a cada MAINTENANCE_INTERVAL_HOURS)
@@ -4615,7 +4905,7 @@ async def run_maintenance() -> dict:
             return {"skipped": "outro processo está rodando a manutenção"}
         try:
             result = await purge_closed_accounts(db)
-            result["webhook_reminders"] = await notify_expiring_webhook_tokens(db)
+            result["purged_intakes"] = await purge_patient_intakes(db)
             return result
         finally:
             if postgres:

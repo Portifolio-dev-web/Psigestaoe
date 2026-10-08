@@ -248,17 +248,3 @@ def account_closed(to: str, name: str, deleted: int, retained: int, retained_unt
     text = f"{greeting}\n\n" + "\n\n".join(lines)
     html = _html("Conta encerrada", [escape(greeting)] + [escape(line) for line in lines])
     return OutgoingEmail(to, f"Conta encerrada no {APP_NAME}", text, html)
-
-
-def webhook_token_expiring(to: str, name: str, expires_on: str, link: str) -> OutgoingEmail:
-    greeting = _greeting(name)
-    text = (f"{greeting}\n\nO token da integração com o Google Forms vence em {expires_on}. Depois disso, "
-            "o formulário deixa de cadastrar pacientes no sistema.\n\nPara continuar, gere um token novo em "
-            f"Pacientes > Integrar Google Forms e atualize o script do formulário:\n{link}")
-    html = _html("Token do Google Forms perto do vencimento", [
-        escape(greeting),
-        f"O token da integração com o Google Forms vence em <b>{escape(expires_on)}</b>. Depois disso, "
-        "o formulário deixa de cadastrar pacientes no sistema.",
-        "Para continuar, gere um token novo em Pacientes &gt; Integrar Google Forms e atualize o script do formulário.",
-    ], ("Abrir o PsiGestão", link))
-    return OutgoingEmail(to, f"Token do Google Forms vence em {expires_on}", text, html)

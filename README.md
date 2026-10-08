@@ -125,8 +125,8 @@ links de cadastro e de senha caem no spam. Os links levam o token depois de `#`:
 não aparece nos logs do servidor nem de proxies.
 
 Manutenção automática: a API roda sozinha, a cada `MAINTENANCE_INTERVAL_HOURS` (padrão 6),
-a rotina que exclui o que sobrou das contas encerradas no fim da guarda legal e avisa
-por e-mail quem tem o token do Google Forms perto de vencer. Para rodar por um
+a rotina que exclui o que sobrou das contas encerradas no fim da guarda legal e apaga
+os links de cadastro do paciente encerrados há mais de 30 dias. Para rodar por um
 agendador externo: `docker compose run --rm api python maintenance.py` (uma trava no
 banco impede duas execuções ao mesmo tempo).
 
@@ -153,8 +153,6 @@ docker build --target production \
 A imagem escuta na porta `8080` (healthcheck em `/healthz`). O build:
 
 - não gera source maps (o código-fonte não fica legível no navegador);
-- não embute a URL do túnel de desenvolvimento: o webhook do Google Forms é
-  `REACT_APP_BACKEND_URL` + `/api/webhook/google-forms`;
 - envia cabeçalhos de segurança, inclusive uma CSP que só libera a API e o login
   do Google. Ao incluir um serviço externo novo (outro script, fonte ou API),
   acrescente o domínio dele na CSP do `nginx.conf`, senão o navegador o bloqueia.
@@ -179,6 +177,32 @@ A API precisa listar o endereço do frontend em `CORS_ORIGINS`.
   está sob guarda é apagado na hora; prontuários sob guarda (5 anos, Resolução CFP
   nº 001/2009) ficam criptografados, sem acesso de ninguém, e a rotina de manutenção
   os apaga no fim do prazo, junto com a trilha de auditoria da conta.
+
+## Cadastro pelo paciente (link temporário)
+
+Substitui a antiga integração com o Google Forms (removida, com as colunas `webhook_token_*`,
+na migração `20261009_patient_intake`). Em **Pacientes → Link de cadastro** a psicóloga gera
+um link e manda ao paciente (WhatsApp, e-mail). As regras ficam no servidor (`server.py`,
+seção "cadastro pelo paciente"); a página do paciente é `frontend/src/pages/PatientIntake.js`.
+
+- o link vale **30 minutos para começar**. Abrir a página não gasta o link (a prévia
+  automática do WhatsApp também abre o endereço);
+- em **Começar**, o paciente tem **10 minutos** e o cadastro fica preso àquele navegador.
+  Nos últimos 3 minutos ele pode pedir **+10 minutos, até 10 vezes** (WCAG 2.2.1);
+- o que ele digita é salvo sozinho, criptografado (`patient_intakes.draft`). Recarregar a
+  página, perder a internet ou abrir o link de novo no mesmo celular continua de onde parou;
+- tempo esgotado com algo preenchido: vira **cadastro incompleto**, que a psicóloga revisa
+  e completa ("Revisar e completar") ou descarta. Nada se perde;
+- o envio cria o paciente com as mesmas regras do cadastro manual e registra o termo de
+  consentimento (cópia do texto; data e IP na trilha de auditoria). Enviar de novo (resposta
+  perdida na rede) não duplica o paciente;
+- o token vai no fragmento (`/cadastro#token=...`) e o banco guarda só o hash. Link
+  desconhecido, cancelado ou vencido sem uso recebe sempre a mesma resposta (410);
+- limites: 20 links esperando o paciente por psicóloga, e limite por IP em todas as rotas
+  públicas (`/api/intake/*`, que também exigem o cabeçalho anti-CSRF);
+- a página do paciente não carrega o Google nem nada da conta da psicóloga;
+- a manutenção apaga os links encerrados há mais de 30 dias (os incompletos ficam até a
+  psicóloga completar ou descartar). Encerrar a conta apaga todos os links.
 
 ## Assinatura: planos, teste grátis, cortesia e somente leitura
 

@@ -10,6 +10,7 @@ import RouteAnnouncer from "@/components/RouteAnnouncer";
 import PublicPageShell from "@/components/PublicPageShell";
 import { IdleLockProvider } from "@/context/IdleLockContext";
 import { Loader2 } from "lucide-react";
+import { PATIENT_INTAKE_PATH, isPatientIntakePage } from "@/lib/patientIntakeRoute";
 
 // Complementares (desempenho): cada tela é carregada só quando é aberta
 // (React.lazy). Antes o app inteiro vinha num único arquivo de ~250 KB
@@ -27,6 +28,8 @@ const Settings = lazy(() => import("@/pages/Settings"));
 const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
 const Help = lazy(() => import("@/pages/Help"));
 const SimulatedCheckout = lazy(() => import("@/pages/SimulatedCheckout"));
+// Produto (cadastro pelo paciente): página pública do link de cadastro.
+const PatientIntake = lazy(() => import("@/pages/PatientIntake"));
 
 function LoadingScreen() {
   return (
@@ -136,6 +139,24 @@ function AppRouter() {
 }
 
 function App() {
+  // Produto (cadastro pelo paciente): o link do paciente abre SÓ a página dele, fora
+  // do AuthProvider (sem /auth/me nem nada da conta da psicóloga; ver lib/patientIntakeRoute.js).
+  // A Política de Privacidade abre em outra aba, já com o app completo.
+  if (isPatientIntakePage()) {
+    return (
+      <div className="App">
+        <BrowserRouter>
+          <RouteAnnouncer />
+          <Suspense fallback={<LoadingScreen />}>
+            <Routes>
+              <Route path={PATIENT_INTAKE_PATH} element={<PatientIntake />} />
+            </Routes>
+          </Suspense>
+          <Toaster position="top-center" richColors />
+        </BrowserRouter>
+      </div>
+    );
+  }
   return (
     <div className="App">
       <BrowserRouter>

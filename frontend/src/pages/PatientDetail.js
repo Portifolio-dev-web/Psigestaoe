@@ -36,7 +36,8 @@ const fmtDateTime = formatDateTime; // sempre na hora local (ver lib/datetime.js
 // Correção (varredura de UI, defeito 3): "14/05/1990 (36 anos)". Antes aparecia
 // "(— anos)" mesmo com a data de nascimento cadastrada, porque só o campo manual
 // "Idade" era usado. Agora a idade vem da data; o campo manual fica como reserva
-// (cadastros antigos ou vindos do Google Forms sem data). Sem nenhum dos dois,
+// (cadastros antigos, inclusive os da extinta integração com o Google Forms, sem
+// data). Sem nenhum dos dois,
 // mostra só a data, sem o "(— anos)".
 const birthLabel = (p) => {
   const age = ageFromBirthDate(p.birth_date) ?? (String(p.age || "").trim() || null);

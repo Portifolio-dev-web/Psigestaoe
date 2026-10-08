@@ -51,12 +51,16 @@ const ACTION_LABEL = {
   mfa_desativar: "Duas etapas desativada", mfa_codigos: "Novos códigos",
   // Produto (assinatura): pagamentos, atrasos, cancelamento e cortesia.
   assinatura: "Assinatura", cortesia: "Cortesia",
+  // Produto (cadastro pelo paciente): criar, cancelar e prorrogar o link de cadastro.
+  // ("Novo token"/"Integração" continuam para os registros antigos do Google Forms.)
+  link_cadastro: "Link de cadastro",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
   termos: "Política", termo: "Termo", integracao: "Integração", sessao: "Sessão",
   auditoria: "Auditoria",  // exportação da própria trilha (complementares)
   assinatura: "Assinatura",  // produto: assinatura
+  cadastro: "Link de cadastro",  // produto: cadastro pelo paciente
 };
 
 // Correção (varredura de UI, defeito 6): alguns detalhes da trilha guardam a

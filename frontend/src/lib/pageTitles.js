@@ -18,6 +18,7 @@ const PAGES = [
   [/^\/criar-senha\/?$/, "Criar sua senha"],
   [/^\/redefinir-senha\/?$/, "Criar nova senha"],
   [/^\/privacidade\/?$/, "Política de Privacidade"],
+  [/^\/cadastro\/?$/, "Cadastro do paciente"],  // produto: link de cadastro (página do paciente)
   [/^\/dashboard\/?$/, "Painel"],  // F3: em português (o endereço continua /dashboard)
   [/^\/pacientes\/?$/, "Pacientes"],
   [/^\/pacientes\/[^/]+\/?$/, "Ficha do paciente"],

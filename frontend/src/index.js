@@ -14,6 +14,7 @@ import "@fontsource/manrope/700.css";
 import "@fontsource/manrope/800.css";
 import "@/index.css";
 import App from "@/App";
+import { isPatientIntakePage } from "@/lib/patientIntakeRoute";
 
 // Desempenho (análise de componentes sem uso): o @tanstack/react-query envolvia
 // o app inteiro (QueryClientProvider), mas nenhuma tela usava useQuery nem
@@ -25,9 +26,16 @@ import App from "@/App";
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID || "COLOQUE_AQUI_O_SEU_CLIENT_ID";
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
+// Produto (cadastro pelo paciente): a página do link de cadastro (/cadastro) abre SEM
+// o provedor do Google. Ele baixa o script de login do Google assim que a página
+// carrega, e o IP do paciente iria para o Google sem motivo (o paciente não faz login).
 root.render(
-  // 3. Envolver o App com o Provider
-  <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+  isPatientIntakePage() ? (
     <App />
-  </GoogleOAuthProvider>,
+  ) : (
+    // 3. Envolver o App com o Provider
+    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+      <App />
+    </GoogleOAuthProvider>
+  ),
 );

@@ -10,7 +10,8 @@
 #   - exclui o que sobrou das contas ENCERRADAS quando termina a guarda legal
 #     (prontuários: 5 anos, Resolução CFP nº 001/2009; registros de acesso:
 #     6 meses, Marco Civil da Internet);
-#   - avisa por e-mail quem tem o token do Google Forms perto de vencer.
+#   - apaga os links de cadastro do paciente encerrados há mais de 30 dias
+#     (os incompletos ficam até a psicóloga completar ou descartar).
 # Útil quando a API fica desligada por longos períodos ou quando
 # MAINTENANCE_ENABLED=false. Pode rodar junto com a API: uma trava no banco
 # garante que só um processo execute a rotina por vez.

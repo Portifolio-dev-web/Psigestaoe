@@ -29,8 +29,10 @@ import os
 logger = logging.getLogger("psigestao.legal")
 
 # Mude a versão sempre que o conteúdo mudar de forma relevante.
-PRIVACY_POLICY_VERSION = "2026-09-30"
-PRIVACY_POLICY_UPDATED_AT = "30/09/2026"
+# 2026-10-09: cadastro pelo próprio paciente (link temporário) no lugar do Google
+# Forms; e correções de exatidão (as fontes não vêm mais do Google; nome real do cookie).
+PRIVACY_POLICY_VERSION = "2026-10-09"
+PRIVACY_POLICY_UPDATED_AT = "09/10/2026"
 
 # SEGURANÇA/LGPD (varredura, item 12): nome e CPF reais tinham sido escritos
 # aqui e no texto da seção 1. Este arquivo vai para o git e o texto é público
@@ -105,11 +107,16 @@ def privacy_policy() -> dict:
             "Profissionais: nome, e-mail, número de CRP, senha (guardada apenas como hash bcrypt, nunca em "
             "texto), nome e foto do perfil Google (somente se usar o login com Google), registros de acesso "
             "(endereço IP, data, hora e navegador) e a trilha de auditoria das ações realizadas no sistema.",
-            "Pacientes (inseridos pelo profissional ou pela integração com Google Forms que ele configurar): "
+            "Pacientes (inseridos pelo profissional ou pelo próprio paciente, num link de cadastro "
+            "temporário que o profissional envia): "
             "identificação (nome, CPF, RG, data de nascimento e idade), contato (telefone, e-mail, endereço e "
             "contato de emergência), escolaridade, estado civil, profissão, registro do consentimento, agenda "
             "de sessões e prontuário psicológico (evolução clínica e hipóteses diagnósticas). Dados de saúde "
             "são dados pessoais sensíveis (art. 5º, II, da LGPD) e recebem as proteções descritas no item 7.",
+            "Link de cadastro: vale 30 minutos para começar e, depois de começado, 10 minutos para preencher "
+            "(prorrogáveis). Enquanto o paciente preenche, o que ele digita é guardado criptografado; se o "
+            "tempo acabar antes do envio, o que foi preenchido chega ao profissional como cadastro incompleto. "
+            "A data, a hora e o endereço IP do envio são registrados como evidência do consentimento.",
         ]),
         ("4. Finalidades e bases legais", [
             "Criar e manter a conta do profissional e prestar o serviço contratado: execução de contrato "
@@ -128,9 +135,9 @@ def privacy_policy() -> dict:
         ("5. Compartilhamento", [
             "Fornecedores de infraestrutura (hospedagem e banco de dados), contratados como suboperadores, "
             "com obrigação de confidencialidade e segurança.",
-            "Google: somente quando o profissional usa o login com Google (autenticação) ou a integração com "
-            "Google Forms (os dados vão do formulário do profissional para o PsiGestão). As fontes da interface "
-            "são carregadas do Google Fonts, o que expõe ao Google o endereço IP do navegador.",
+            "Google: somente quando o profissional usa o login com Google (autenticação). A página de cadastro "
+            "do paciente não carrega nada do Google, e as fontes da interface são servidas pelo próprio "
+            "PsiGestão.",
             "Autoridades públicas, somente mediante requisição legal ou ordem judicial.",
             "Não há nenhum outro compartilhamento.",
         ]),
@@ -179,7 +186,7 @@ def privacy_policy() -> dict:
             "(art. 16, I, da LGPD).",
         ]),
         ("10. Cookies", [
-            "Usamos apenas um cookie estritamente necessário (access_token), do tipo httpOnly, que mantém você "
+            "Usamos apenas um cookie estritamente necessário (__Host-access_token), do tipo httpOnly, que mantém você "
             "conectado e não pode ser lido por scripts da página. Não usamos cookies de publicidade nem de "
             "rastreamento. O login com Google pode gravar cookies próprios do Google, regidos pela política "
             "de privacidade do Google.",

@@ -1,6 +1,6 @@
 // craco.config.js
 const path = require("path");
-const webpack = require("webpack");
+// (O require do webpack saiu junto com o EnvironmentPlugin da WEBHOOK_URL; ver configure.)
 require("dotenv").config();
 
 // ---------------------------------------------------------------------------
@@ -100,15 +100,10 @@ let webpackConfig = {
       '@': path.resolve(__dirname, 'src'),
     },
     configure: (webpackConfig, { env }) => {
-      // SEGURANÇA (varredura, item 12): antes este plugin rodava em TODO build e
-      // embutia no JavaScript publicado a URL do túnel ngrok do desenvolvimento
-      // (WEBHOOK_URL do frontend/.env), revelando um endereço que expõe a API da
-      // máquina de desenvolvimento na internet. Agora só no desenvolvimento,
-      // onde o túnel é necessário (o Google não alcança o localhost). Em
-      // produção o endereço do webhook é a própria API (ver pages/Patients.js).
-      if (env !== "production") {
-        webpackConfig.plugins.push(new webpack.EnvironmentPlugin({ WEBHOOK_URL: "" }));
-      } else {
+      // Produto (cadastro pelo paciente): saiu o EnvironmentPlugin da WEBHOOK_URL
+      // (túnel ngrok que levava o Google Forms até a API do desenvolvimento). A
+      // integração foi removida e nenhum endereço de túnel entra mais no código.
+      if (env === "production") {
         // Garantia extra além do GENERATE_SOURCEMAP=false acima.
         webpackConfig.devtool = false;
       }

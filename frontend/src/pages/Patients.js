@@ -6,14 +6,18 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Plus, Search, MoreVertical, Pencil, Trash2, ShieldOff, FileText, Users, Loader2,
-  Archive, ArchiveRestore, KeyRound,
+  Archive, ArchiveRestore, Link2,
 } from "lucide-react";
 
 // API & Utils
-import api, { API, formatApiErrorDetail } from "@/lib/api";
-import { LIMITS, cpfProblem, maskCPF, maskPhone, phoneProblem, todayISO } from "@/lib/validation";
+import api, { formatApiErrorDetail } from "@/lib/api";
+import { LIMITS } from "@/lib/validation";
+// Produto (cadastro pelo paciente): regras e campos da ficha compartilhados com o link de cadastro.
+import {
+  EMPTY_FORM, applyFieldChange, errorFields, isMinorForm, payloadForSubmit, validatePatientForm,
+} from "@/lib/patientForm";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
-import { ageFromBirthDate, formatDateOnly, formatDateTime } from "@/lib/datetime";
+import { formatDateOnly, formatDateTime } from "@/lib/datetime";
 import { countLabel } from "@/lib/utils";
 
 // UI Components
@@ -35,6 +39,10 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  ConsentQuestion, ConsentTermText, FieldError, FormErrorSummary, FormSection, PatientFormFields, fieldA11y, invalidClass,
+} from "@/components/PatientFormFields";
+import IntakeLinksDialog from "@/components/IntakeLinksDialog";
 
 // ============================================================================
 // CONSTANTS & HELPERS
@@ -42,111 +50,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 // Data sem hora tratada como texto, sem fuso (versão única em lib/datetime.js).
 const fmtDate = formatDateOnly;
 
-// PRODUTO: TODOS os campos do cadastro são obrigatórios. Mesma lista do
-// servidor (PATIENT_REQUIRED_LABELS em backend/server.py), que recusa a ficha
-// incompleta mesmo que alguém chame a API sem esta tela. [campo, rótulo, id do campo]
-// A idade não está aqui: é calculada pela data de nascimento.
-// Na mesma ordem da tela: o foco vai para o primeiro campo vazio que a pessoa vê.
-const REQUIRED_FIELDS = [
-  ["full_name", "Nome completo", "patient-name"],
-  ["cpf", "CPF", "patient-cpf"],
-  ["rg", "RG", "patient-rg"],
-  ["birth_date", "Data de nascimento", "patient-birth-date"],
-  ["marital_status", "Estado civil", "patient-marital-status"],
-  ["education", "Escolaridade", "patient-education"],
-  ["profession", "Profissão", "patient-profession"],
-  ["phone", "Telefone", "patient-phone"],
-  ["email", "E-mail", "patient-email"],
-  ["address", "Endereço", "patient-address"],
-  ["emergency_contact", "Contato de emergência", "patient-emergency"],
-  ["initial_notes", "Notas iniciais", "patient-notes"],
-];
-// ---------------------------------------------------------------------------
-// Fluxo clínico (C3): paciente MENOR de 18 anos (mesmas regras do servidor,
-// PATIENT_MINOR_REQUIRED_LABELS). Antes o cadastro exigia de uma criança estado
-// civil, profissão, RG, e-mail e telefone próprios, e não tinha o responsável
-// legal, que é quem consente o atendimento.
-//   - saem: estado civil e profissão;
-//   - ficam opcionais: RG, e-mail e telefone do menor (o contato é o do responsável);
-//   - entram, obrigatórios: nome, CPF, parentesco e telefone do responsável.
-// ---------------------------------------------------------------------------
-const ADULT_AGE = 18;
-const GUARDIAN_FIELDS = [
-  ["guardian_name", "Nome do responsável", "patient-guardian-name"],
-  ["guardian_cpf", "CPF do responsável", "patient-guardian-cpf"],
-  ["guardian_relationship", "Parentesco do responsável", "patient-guardian-relationship"],
-  ["guardian_phone", "Telefone do responsável", "patient-guardian-phone"],
-];
-const OPTIONAL_FOR_MINORS = ["rg", "phone", "email"];
-const HIDDEN_FOR_MINORS = ["marital_status", "profession"];
-const GUARDIAN_RELATIONSHIPS = ["Mãe", "Pai", "Avó", "Avô", "Tutor(a) legal", "Guardião(ã) legal", "Outro"];
-
-/** O paciente do formulário é menor de idade (pela data de nascimento)? */
-const isMinorForm = (form) => {
-  const age = ageFromBirthDate(form.birth_date);
-  return age !== null && age !== undefined && age < ADULT_AGE;
-};
-
-/** Campos obrigatórios na ORDEM DA TELA (o foco vai para o primeiro com problema). */
-function requiredFields(form) {
-  if (!isMinorForm(form)) return REQUIRED_FIELDS;
-  const identification = REQUIRED_FIELDS.filter(([key]) => ["full_name", "cpf", "birth_date", "education"].includes(key));
-  const rest = REQUIRED_FIELDS.filter(([key]) => ["address", "emergency_contact", "initial_notes"].includes(key));
-  return [...identification, ...GUARDIAN_FIELDS, ...rest];
-}
-
-// Espaços em branco contam como vazio (o `required` do navegador aceitaria "   ").
-const missingFields = (form) => requiredFields(form).filter(([key]) => !String(form[key] ?? "").trim());
-
-// ---------------------------------------------------------------------------
-// Acessibilidade (análise de UI, A4): erros do cadastro NO PRÓPRIO FORMULÁRIO.
-// Antes os erros apareciam só num aviso que sumia em 4 s ("Faltando: Nome,
-// CPF, RG..."), e os campos não ficavam marcados. Agora:
-//   - um resumo fixo no topo do formulário lista o que corrigir, com atalho
-//     para cada campo (e é lido pelo leitor de tela ao aparecer);
-//   - cada campo com problema fica marcado (borda vermelha + aria-invalid) e
-//     tem a própria mensagem, ligada a ele (aria-describedby);
-//   - a mensagem some assim que a pessoa mexe no campo.
-// A validação do navegador fica desligada (noValidate): ela mostrava um balão
-// só para o PRIMEIRO campo vazio, que some sozinho. Os `required` continuam,
-// para o leitor de tela anunciar "obrigatório". Quem decide é sempre o servidor.
-// ---------------------------------------------------------------------------
-const CONSENT_FIELD = ["consent_terms", "Termo de consentimento", "patient-consent-yes"];
-// Ordem da tela: o foco vai para o primeiro campo com problema (C3: muda para menores).
-const errorFields = (form) => [...requiredFields(form), CONSENT_FIELD];
-const EMPTY_MESSAGE = "Preencha este campo.";
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-/** { campo: mensagem } com TODOS os problemas do formulário (vazio = nenhum). */
-function validatePatientForm(form) {
-  const errors = {};
-  missingFields(form).forEach(([key]) => { errors[key] = EMPTY_MESSAGE; });
-  if (!errors.cpf && cpfProblem(form.cpf)) errors.cpf = cpfProblem(form.cpf);
-  if (!errors.phone && phoneProblem(form.phone)) errors.phone = phoneProblem(form.phone);
-  // C3: documentos e telefone do responsável seguem as mesmas regras.
-  if (!errors.guardian_cpf && cpfProblem(form.guardian_cpf)) errors.guardian_cpf = cpfProblem(form.guardian_cpf);
-  if (!errors.guardian_phone && phoneProblem(form.guardian_phone)) errors.guardian_phone = phoneProblem(form.guardian_phone);
-  // Antes conferidos pelo navegador (type="email", min/max da data), que agora não valida sozinho.
-  // C3: e-mail é opcional para menores; preenchido, precisa ser válido.
-  const email = String(form.email || "").trim();
-  if (!errors.email && email && !EMAIL_PATTERN.test(email)) errors.email = "E-mail inválido. Ex.: nome@exemplo.com.";
-  if (!errors.birth_date && (form.birth_date < "1900-01-01" || form.birth_date > todayISO())) {
-    errors.birth_date = "Data de nascimento inválida.";
-  }
-  // PRODUTO: a pergunta sobre o termo precisa de resposta (não há opção pré-marcada).
-  if (typeof form.consent_terms !== "boolean") errors.consent_terms = "Escolha “Concordo” ou “Não concordo”.";
-  return errors;
-}
-
-// consent_terms começa SEM resposta (null): a pessoa precisa escolher
-// "Concordo" ou "Não concordo" (antes "Não concordo" já vinha marcado).
-const EMPTY_FORM = {
-  full_name: "", cpf: "", rg: "", birth_date: "", age: "",
-  education: "", marital_status: "", profession: "", phone: "", email: "",
-  address: "", emergency_contact: "", initial_notes: "", consent_terms: null,
-  // C3: responsável legal (menores de 18 anos).
-  guardian_name: "", guardian_cpf: "", guardian_relationship: "", guardian_phone: "",
-};
+// Regras da ficha (campos obrigatórios, menores de idade, validação, máscaras):
+// em lib/patientForm.js. O link de cadastro do paciente (pages/PatientIntake.js)
+// usa as mesmas, e os campos do formulário ficam em components/PatientFormFields.js.
 
 // Listas de seleção: o componente único NativeSelect (análise de UI, F4),
 // com a mesma aparência dos campos de texto. Antes havia uma classe própria aqui.
@@ -167,17 +73,6 @@ const SORT_OPTIONS = [
   { id: "name", label: "Nome (A a Z)" },
   { id: "last_consultation", label: "Última consulta" },
 ];
-
-// SEGURANÇA (varredura, item 12): endereço do webhook no script do Google Forms.
-// Antes vinha de WEBHOOK_URL, embutida no JavaScript publicado em QUALQUER
-// build: a URL do túnel ngrok do desenvolvimento ia parar no código de produção.
-// Agora:
-//   - produção: o webhook é a própria API pública (REACT_APP_BACKEND_URL) + a rota;
-//   - desenvolvimento: vale WEBHOOK_URL (o túnel), porque o Google não alcança
-//     o localhost. No build de produção NODE_ENV vira "production", a condição
-//     é sempre falsa e o minificador apaga o trecho junto com a URL.
-const WEBHOOK_URL = (process.env.NODE_ENV === "development" && process.env.WEBHOOK_URL)
-  || `${API}/webhook/google-forms`;
 
 export default function Patients() {
   // ========================================================================
@@ -216,13 +111,14 @@ export default function Patients() {
   // Termo atual do profissional (para novos consentimentos).
   const [currentTerm, setCurrentTerm] = useState("");
 
-  // Item 15: estado da integração. O token só existe no navegador logo após ser
-  // gerado (`newToken`); depois disso não pode ser recuperado, só trocado.
-  const [integrationOpen, setIntegrationOpen] = useState(false);
-  const [copySuccess, setCopySuccess] = useState(false);
-  const [integration, setIntegration] = useState(null); // {configured, hint, created_at, expires_at, expired}
-  const [newToken, setNewToken] = useState("");
-  const [tokenBusy, setTokenBusy] = useState(false);
+  // Produto (cadastro pelo paciente): janela dos links de cadastro (substitui a
+  // integração com o Google Forms, que mandava os dados do paciente por fora,
+  // num script com token fixo) e o link cujo cadastro incompleto está sendo
+  // completado na ficha (null = cadastro manual ou edição).
+  const [intakeOpen, setIntakeOpen] = useState(false);
+  const [completingIntake, setCompletingIntake] = useState(null);
+  // Muda quando um cadastro incompleto é completado: a lista de links se atualiza.
+  const [intakeRefresh, setIntakeRefresh] = useState(0);
 
   // ========================================================================
   // HANDLERS - DATA LOADING
@@ -305,6 +201,7 @@ export default function Patients() {
   const { guard } = useWriteAccess();
   const openNew = guard(() => {
     setEditing(null);
+    setCompletingIntake(null);
     setForm(EMPTY_FORM);
     setFormErrors({}); // A4: formulário novo começa sem erros
     setSubmitError("");
@@ -327,6 +224,7 @@ export default function Patients() {
     try {
       const { data } = await api.get(`/patients/${p.id}`);
       setEditing(data);
+      setCompletingIntake(null);
       setFormErrors({}); // A4
       setSubmitError("");
       setForm({ ...EMPTY_FORM, ...data });
@@ -337,17 +235,33 @@ export default function Patients() {
     }
   };
 
-  // Segurança (varredura, item 2): CPF e telefone ganham máscara enquanto a
-  // pessoa digita (ver lib/validation.js).
-  // C3: CPF e telefone do responsável com as mesmas máscaras.
-  const MASKS = { cpf: maskCPF, phone: maskPhone, guardian_cpf: maskCPF, guardian_phone: maskPhone };
+  // Produto (cadastro pelo paciente): o tempo do link acabou com o cadastro pela
+  // metade. A ficha abre com o que o paciente preencheu; a psicóloga completa (de
+  // preferência com ele) e salva. A leitura fica na trilha de auditoria (servidor).
+  // Completar cria um paciente novo: no somente leitura, aparece a explicação.
+  const reviewIncomplete = guard(async (intake) => {
+    try {
+      const { data } = await api.get(`/intake-links/${intake.id}/draft`);
+      const draft = data.data || {};
+      setEditing(null);
+      setCompletingIntake(intake);
+      setFormErrors({});
+      setSubmitError("");
+      // A idade acompanha a data de nascimento (o rascunho guarda só a data).
+      setForm(applyFieldChange({ ...EMPTY_FORM, ...draft }, "birth_date", draft.birth_date || ""));
+      loadCurrentTerm();
+      setIntakeOpen(false);
+      setDialogOpen(true);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    }
+  });
+
+  // Segurança (varredura, item 2): CPF e telefone (também os do responsável, C3)
+  // ganham máscara enquanto a pessoa digita, e a idade acompanha a data de
+  // nascimento. As mesmas regras do link do paciente (applyFieldChange, lib/patientForm.js).
   const upd = (k) => (e) => {
-    setForm({
-      ...form,
-      [k]: k === "consent_terms" ? e.target.value === "true" : (MASKS[k] ? MASKS[k](e.target.value) : e.target.value),
-      // PRODUTO: a idade acompanha a data de nascimento (não é mais digitada).
-      ...(k === "birth_date" ? { age: String(ageFromBirthDate(e.target.value) ?? "") } : {}),
-    });
+    setForm(applyFieldChange(form, k, e.target.value));
     // A4: a pessoa mexeu no campo, a mensagem de erro dele sai (volta a ser
     // conferido no próximo "Salvar"). CPF e telefone continuam com o aviso ao vivo.
     setFormErrors((current) => {
@@ -378,9 +292,16 @@ export default function Patients() {
     }
     setSaving(true);
     // C3: para menores, estado civil e profissão não se aplicam (campos escondidos).
-    const payload = isMinorForm(form) ? { ...form, ...Object.fromEntries(HIDDEN_FOR_MINORS.map((key) => [key, ""])) } : form;
+    const payload = payloadForSubmit(form);
     try {
-      if (editing) {
+      if (completingIntake) {
+        // Produto (cadastro pelo paciente): completa o cadastro incompleto do link
+        // (vira paciente e o rascunho do link é apagado no servidor).
+        await api.post(`/intake-links/${completingIntake.id}/complete`, payload);
+        toast.success("Cadastro completado. O paciente já está na lista.");
+        setCompletingIntake(null);
+        setIntakeRefresh((n) => n + 1);
+      } else if (editing) {
         await api.put(`/patients/${editing.id}`, payload);
         toast.success("Paciente atualizado.");
       } else {
@@ -441,170 +362,11 @@ export default function Patients() {
   };
 
   // ========================================================================
-  // HANDLERS - INTEGRATION
-  // ========================================================================
-  const copyScript = () => {
-    navigator.clipboard.writeText(generatedScript);
-    setCopySuccess(true);
-    setTimeout(() => setCopySuccess(false), 2000);
-  };
-
-  const openIntegration = async () => {
-    setNewToken("");
-    setIntegration(null);
-    setIntegrationOpen(true);
-    try {
-      const { data } = await api.get("/integrations/google-forms");
-      setIntegration(data);
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
-    }
-  };
-
-  // Item 15: gerar um token novo revoga o anterior. O valor volta UMA vez e
-  // só fica neste estado enquanto a janela estiver aberta.
-  const generateToken = async () => {
-    setTokenBusy(true);
-    try {
-      const { data } = await api.post("/integrations/google-forms/token");
-      setNewToken(data.token);
-      setIntegration(data);
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
-    } finally {
-      setTokenBusy(false);
-    }
-  };
-
-  const revokeToken = async () => {
-    setTokenBusy(true);
-    try {
-      const { data } = await api.delete("/integrations/google-forms/token");
-      setNewToken("");
-      setIntegration(data);
-      toast.success("Integração revogada. O formulário deixa de enviar pacientes.");
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
-    } finally {
-      setTokenBusy(false);
-    }
-  };
-
-  const closeIntegration = (open) => {
-    setIntegrationOpen(open);
-    if (!open) setNewToken(""); // o token não fica guardado depois de fechar
-  };
-
-  // ========================================================================
   // DERIVED STATE
   // ========================================================================
   // ESCALA: a busca já vem filtrada do servidor (índice cego); não há mais
   // filtro local sobre a lista inteira.
   const filtered = patients || [];
-
-  const generatedScript = `
-const WEBHOOK_URL = "${WEBHOOK_URL}";
-const SECURITY_TOKEN = "${newToken}";
-
-function formatCPF(cpf) {
-  let v = String(cpf).replace(/\\D/g, "");
-  if (v.length === 11) {
-    return v.replace(/(\\d{3})(\\d{3})(\\d{3})(\\d{2})/, "$1.$2.$3-$4");
-  }
-  return cpf;
-}
-
-function formatPhone(phone) {
-  let v = String(phone).replace(/\\D/g, "");
-  if (v.length === 11) {
-    return v.replace(/(\\d{2})(\\d{5})(\\d{4})/, "($1) $2-$3");
-  } else if (v.length === 10) {
-    return v.replace(/(\\d{2})(\\d{4})(\\d{4})/, "($1) $2-$3");
-  }
-  return phone;
-}
-
-function onFormSubmit(e) {
-  const response = e.response;
-  const itemResponses = response.getItemResponses();
-
-  let patientData = {
-    full_name: "", cpf: "", rg: "", birth_date: "", age: "",
-    education: "", marital_status: "", profession: "", phone: "", email: "",
-    address: "", emergency_contact: "", initial_notes: "Cadastrado via Google Forms.",
-    consent_terms: false
-  };
-
-  itemResponses.forEach(itemResponse => {
-    const question = itemResponse.getItem().getTitle();
-    const answer = itemResponse.getResponse();
-    const normalizedQuestion = String(question).trim().toLowerCase();
-    const normalizedAnswer = String(answer).trim().toLowerCase();
-    const answerAsText = Array.isArray(answer) ? answer.join(", ") : String(answer).trim();
-
-    if (normalizedQuestion.includes("nome completo")) {
-      patientData.full_name = answerAsText;
-    } else if (normalizedQuestion.includes("cpf")) {
-      patientData.cpf = formatCPF(answerAsText);
-    } else if (
-      normalizedQuestion.includes("contato de emergência") ||
-      normalizedQuestion.includes("contato de emergencia") ||
-      normalizedQuestion.includes("risco iminente")
-    ) {
-      patientData.emergency_contact = answerAsText;
-    } else if (/\\brg\\b/.test(normalizedQuestion) || normalizedQuestion === "rg *") {
-      patientData.rg = answerAsText;
-    } else if (normalizedQuestion.includes("data de nascimento")) {
-      const [day, month, year] = String(answer).trim().split(/[/-]/);
-      patientData.birth_date = day && month && year
-        ? year + "-" + month.padStart(2, "0") + "-" + day.padStart(2, "0")
-        : String(answer).trim();
-    } else if (normalizedQuestion.includes("escolaridade")) {
-      patientData.education = answerAsText;
-    } else if (/\\bidade\\b/.test(normalizedQuestion) || normalizedQuestion === "idade *") {
-      patientData.age = answerAsText;
-    } else if (normalizedQuestion.includes("estado civil")) {
-      patientData.marital_status = answerAsText;
-    } else if (normalizedQuestion.includes("profissão") || normalizedQuestion.includes("profissao")) {
-      patientData.profession = answerAsText;
-    } else if (normalizedQuestion.includes("contato telefônico") || normalizedQuestion.includes("contato telefonico")) {
-      patientData.phone = formatPhone(answerAsText);
-    } else if (normalizedQuestion.includes("e-mail") || normalizedQuestion.includes("email")) {
-      patientData.email = answerAsText;
-    } else if (normalizedQuestion.includes("endereço completo") || normalizedQuestion.includes("endereco completo")) {
-      patientData.address = answerAsText;
-    } else if (
-      normalizedQuestion.includes("termo de consentimento") ||
-      normalizedQuestion.includes("consentimento livre e esclarecido") ||
-      normalizedQuestion.includes("estou de acordo")
-    ) {
-      // Aceita qualquer frase que contenha uma destas palavras
-      patientData.consent_terms = normalizedAnswer.includes("concordo") ||
-                                  normalizedAnswer.includes("sim") ||
-                                  normalizedAnswer.includes("aceito");
-    } else if (normalizedQuestion.includes("notas finais")) {
-      patientData.initial_notes = answer;
-    }
-  });
-
-  const payload = {
-    patient_data: patientData
-  };
-
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'x-webhook-token': SECURITY_TOKEN
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  const res = UrlFetchApp.fetch(WEBHOOK_URL, options);
-  console.log(res.getContentText());
-}
-  `.trim();
 
   // ========================================================================
   // RENDER
@@ -612,7 +374,7 @@ function onFormSubmit(e) {
 
   return (
     <div className="space-y-6">
-      <PatientHeader onNew={openNew} onIntegration={openIntegration} />
+      <PatientHeader onNew={openNew} onIntake={() => setIntakeOpen(true)} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <PatientSearch query={query} onQueryChange={setQuery} />
         <div className="flex flex-wrap items-center gap-2">
@@ -642,14 +404,13 @@ function onFormSubmit(e) {
 
       <PatientFormDialog open={dialogOpen} onOpenChange={setDialogOpen} editing={editing}
         form={form} onFormChange={upd} saving={saving} onSubmit={save} currentTerm={currentTerm}
-        errors={formErrors} submitError={submitError} />
+        errors={formErrors} submitError={submitError} completing={Boolean(completingIntake)} />
 
       <PatientConfirmDialog confirm={confirm} onConfirm={doAction} onOpenChange={(o) => !o && setConfirm(null)} />
 
-      <IntegrationDialog open={integrationOpen} onOpenChange={closeIntegration}
-        integration={integration} newToken={newToken} tokenBusy={tokenBusy}
-        onGenerate={generateToken} onRevoke={revokeToken}
-        generatedScript={generatedScript} copySuccess={copySuccess} onCopyScript={copyScript} />
+      {/* Produto (cadastro pelo paciente): links de cadastro (antes, "Integrar Google Forms"). */}
+      <IntakeLinksDialog open={intakeOpen} onOpenChange={setIntakeOpen} onReviewIncomplete={reviewIncomplete}
+        refreshKey={intakeRefresh} />
     </div>
   );
 }
@@ -658,7 +419,7 @@ function onFormSubmit(e) {
 // SUB-COMPONENTS
 // ============================================================================
 
-function PatientHeader({ onNew, onIntegration }) {
+function PatientHeader({ onNew, onIntake }) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
@@ -669,8 +430,10 @@ function PatientHeader({ onNew, onIntegration }) {
           zoom de 400%) os dois botões não cabem lado a lado, e "Novo paciente", a ação
           principal da tela, ficava cortado para fora. Agora ele desce para a linha de baixo. */}
       <div className="flex flex-wrap gap-2">
-        <Button onClick={onIntegration} variant="outline" className="gap-2 border-slate-300">
-          <FileText className="h-4 w-4" /> Integrar Google Forms
+        {/* Produto (cadastro pelo paciente): o paciente preenche a própria ficha num
+            link temporário (substitui a integração com o Google Forms). */}
+        <Button onClick={onIntake} variant="outline" className="gap-2 border-slate-300" data-testid="intake-links-btn">
+          <Link2 className="h-4 w-4" aria-hidden="true" /> Link de cadastro
         </Button>
         <Button onClick={onNew} className="gap-2 bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="new-patient-btn">
           <Plus className="h-4 w-4" /> Novo paciente
@@ -855,91 +618,23 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
   );
 }
 
-// UX (cadastro de paciente): uma seção do formulário. <fieldset> + <legend>:
-// o leitor de tela anuncia o grupo ("Contato") ao entrar nos campos dele.
-// Duas colunas no computador, uma no celular; `sm:col-span-2` ocupa a linha toda.
-function FormSection({ title, children }) {
-  return (
-    <fieldset>
-      <legend className="mb-3 w-full border-b border-slate-200 pb-1.5 text-xs font-semibold uppercase tracking-wide text-[#1E3A8A]">
-        {title}
-      </legend>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{children}</div>
-    </fieldset>
-  );
-}
-
-// A4: mensagem de erro de um campo. O id ("<campo>-error") é o que o campo
-// aponta em aria-describedby, para o leitor de tela ler a mensagem junto.
-function FieldError({ id, message }) {
-  return message ? <p id={`${id}-error`} className="mt-1 text-xs text-red-600">{message}</p> : null;
-}
-
-// A4: resumo dos erros no topo do formulário. role="alert": o leitor de tela lê
-// o resumo assim que ele aparece. Cada item leva o foco ao campo correspondente.
-function FormErrorSummary({ errors, submitError, fields }) {
-  const entries = fields.filter(([key]) => errors[key]);
-  if (!entries.length && !submitError) return null;
-  return (
-    <div id="patient-form-errors" role="alert" tabIndex={-1}
-      className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-      data-testid="patient-form-errors">
-      {submitError ? (
-        <p>{submitError}</p>
-      ) : (
-        <>
-          <p className="font-medium">
-            {entries.length === 1 ? "Corrija 1 campo para salvar:" : `Corrija ${entries.length} campos para salvar:`}
-          </p>
-          <ul className="mt-1.5 grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
-            {entries.map(([key, label, id]) => (
-              <li key={key}>
-                <a href={`#${id}`} className="underline underline-offset-2 hover:text-red-950"
-                  onClick={(e) => { e.preventDefault(); document.getElementById(id)?.focus(); }}>
-                  {label}
-                </a>
-                {errors[key] !== EMPTY_MESSAGE && <span>: {errors[key]}</span>}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-    </div>
-  );
-}
-
+// `completing`: a ficha veio de um link de cadastro incompleto (produto: cadastro pelo paciente).
 function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm,
-  errors = {}, submitError = "" }) {
+  errors = {}, submitError = "", completing = false }) {
   // Quem já consentiu vê a cópia do texto que aceitou; os demais, o termo atual.
   const consentText = editing?.consent_terms ? editing.consent_terms_text : currentTerm;
   const consentDate = editing?.consent_terms && editing.consent_given_at
     ? new Date(editing.consent_given_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
     : "";
-  // Segurança (varredura, item 2): limites iguais aos do servidor e aviso de
-  // CPF/telefone inválido já no campo. Um paciente vindo do Google Forms pode
-  // ter CPF digitado errado pelo próprio paciente: o aviso aparece ao editar.
-  // A4: o aviso ao vivo (enquanto digita) ou o erro do "Salvar" (ex.: campo vazio).
-  const cpfError = cpfProblem(form.cpf) || errors.cpf;
-  const phoneError = phoneProblem(form.phone) || errors.phone;
-  // A4: atributos de um campo com erro: marcado como inválido e com a mensagem
-  // ligada a ele. `hintId`: um texto de ajuda que já descreve o campo (ex.: a idade).
-  // C3: paciente menor de 18 anos (pela data de nascimento digitada).
+  // C3: paciente menor de 18 anos: quem responde ao termo é o responsável legal.
+  // (Os avisos de CPF/telefone e os limites dos campos estão em PatientFormFields.)
   const minor = isMinorForm(form);
-  const guardianCpfError = cpfProblem(form.guardian_cpf) || errors.guardian_cpf;
-  const guardianPhoneError = phoneProblem(form.guardian_phone) || errors.guardian_phone;
-  // "*" nos obrigatórios; "(opcional)" no que o menor pode não ter.
-  const mark = (key) => (minor && OPTIONAL_FOR_MINORS.includes(key) ? " (opcional)" : " *");
-  const fieldA11y = (key, id, hintId) => ({
-    "aria-invalid": errors[key] ? true : undefined,
-    "aria-describedby": [hintId, errors[key] ? `${id}-error` : null].filter(Boolean).join(" ") || undefined,
-  });
-  const invalidClass = (key) => (errors[key] ? "border-red-500 focus-visible:ring-red-500" : "");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* UX (cadastro de paciente): mais largo no computador (duas colunas). */}
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle className="font-head">{editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
+          <DialogTitle className="font-head">{completing ? "Completar cadastro" : editing ? "Editar paciente" : "Novo paciente"}</DialogTitle>
           {/* Item 13: antes só o CPF (e o texto dizia "AES-256", que não é o algoritmo usado). */}
           <DialogDescription>
             {/* Produto: campos com * são obrigatórios. C3: para menores, alguns ficam opcionais. */}
@@ -956,269 +651,27 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
             (nome, e-mail, endereço) nos campos do paciente. */}
         {/* noValidate (A4): os erros são mostrados pelo próprio formulário (ver validatePatientForm). */}
         <form onSubmit={onSubmit} className="space-y-6" autoComplete="off" noValidate>
-          <FormErrorSummary errors={errors} submitError={submitError} fields={errorFields(form)} />
-          <FormSection title="Identificação">
-            <div className="sm:col-span-2">
-              <Label htmlFor="patient-name">Nome completo *</Label>
-              <Input
-                id="patient-name"
-                {...fieldA11y("full_name", "patient-name")}
-                required
-                maxLength={LIMITS.patientName}
-                value={form.full_name}
-                onChange={onFormChange("full_name")}
-                className={`mt-1.5 ${invalidClass("full_name")}`}
-                data-testid="patient-name-input"
-              />
-              <FieldError id="patient-name" message={errors.full_name} />
-            </div>
-
-            <div>
-              <Label htmlFor="patient-cpf">CPF *</Label>
-              <Input
-                id="patient-cpf"
-                required
-                inputMode="numeric"
-                maxLength={LIMITS.cpf}
-                value={form.cpf}
-                onChange={onFormChange("cpf")}
-                className={`mt-1.5 ${cpfError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-                aria-invalid={Boolean(cpfError)}
-                aria-describedby={cpfError ? "patient-cpf-error" : undefined}
-                data-testid="patient-cpf-input"
-                placeholder="000.000.000-00"
-              />
-              <FieldError id="patient-cpf" message={cpfError} />
-            </div>
-
-            <div>
-              <Label htmlFor="patient-rg">RG{mark("rg")}</Label>
-              <Input
-                id="patient-rg"
-                {...fieldA11y("rg", "patient-rg")}
-                required={!minor}
-                maxLength={LIMITS.rg}
-                value={form.rg}
-                onChange={onFormChange("rg")}
-                className={`mt-1.5 ${invalidClass("rg")}`}
-                data-testid="patient-rg-input"
-              />
-              <FieldError id="patient-rg" message={errors.rg} />
-            </div>
-
-            <div>
-              <Label htmlFor="patient-birth-date">Data de nascimento *</Label>
-              <Input
-                id="patient-birth-date"
-                {...fieldA11y("birth_date", "patient-birth-date", "patient-age-hint")}
-                required
-                type="date"
-                min="1900-01-01"
-                max={todayISO()}
-                value={form.birth_date}
-                onChange={onFormChange("birth_date")}
-                className={`mt-1.5 ${invalidClass("birth_date")}`}
-                data-testid="patient-birthdate-input"
-              />
-              <FieldError id="patient-birth-date" message={errors.birth_date} />
-              {/* PRODUTO: a idade é calculada pela data de nascimento. Antes havia um
-                  campo "Idade" (primeiro digitado, depois só de leitura) que ocupava
-                  uma linha inteira para repetir a data; agora ela aparece aqui. */}
-              <p id="patient-age-hint" className="mt-1 text-xs text-slate-500" aria-live="polite" data-testid="patient-age-hint">
-                {form.age !== "" && form.age != null ? `Idade: ${form.age} ${Number(form.age) === 1 ? "ano" : "anos"}` : "A idade é calculada pela data."}
-              </p>
-            </div>
-
-            {/* C3: estado civil e profissão não se aplicam a menores de 18 anos. */}
-            {!minor && (
-            <div>
-              <Label htmlFor="patient-marital-status">Estado civil *</Label>
-              <NativeSelect
-                id="patient-marital-status"
-                {...fieldA11y("marital_status", "patient-marital-status")}
-                required
-                value={form.marital_status}
-                onChange={onFormChange("marital_status")}
-                className="mt-1.5" selectClassName={invalidClass("marital_status")}
-              >
-                <option value="">Selecione...</option>
-                <option value="Solteiro(a)">Solteiro(a)</option>
-                <option value="Casado(a)">Casado(a)</option>
-                <option value="Divorciado(a)">Divorciado(a)</option>
-                <option value="Viúvo(a)">Viúvo(a)</option>
-                <option value="União estável">União estável</option>
-              </NativeSelect>
-              <FieldError id="patient-marital-status" message={errors.marital_status} />
-            </div>
-            )}
-
-            <div>
-              {/* Correção (varredura de UI, defeito 5): o "*" aparecia sem o campo ser
-                  exigido. Agora TODOS os campos são obrigatórios (aqui e no servidor). */}
-              <Label htmlFor="patient-education">Escolaridade *</Label>
-              <NativeSelect
-                id="patient-education"
-                {...fieldA11y("education", "patient-education")}
-                required
-                value={form.education}
-                onChange={onFormChange("education")}
-                className="mt-1.5" selectClassName={invalidClass("education")}
-              >
-                <option value="">Selecione...</option>
-                <option value="Fundamental - Incompleto">Fundamental - Incompleto</option>
-                <option value="Fundamental - Completo">Fundamental - Completo</option>
-                <option value="Médio - Incompleto">Médio - Incompleto</option>
-                <option value="Médio - Completo">Médio - Completo</option>
-                <option value="Superior - Incompleto">Superior - Incompleto</option>
-                <option value="Superior - Completo">Superior - Completo</option>
-                <option value="Pós Graduação - Completo">Pós Graduação - Completo</option>
-              </NativeSelect>
-              <FieldError id="patient-education" message={errors.education} />
-            </div>
-
-            {!minor && (
-            <div>
-              <Label htmlFor="patient-profession">Profissão *</Label>
-              <Input
-                id="patient-profession"
-                {...fieldA11y("profession", "patient-profession")}
-                required
-                maxLength={LIMITS.profession}
-                value={form.profession}
-                onChange={onFormChange("profession")}
-                className={`mt-1.5 ${invalidClass("profession")}`}
-                data-testid="patient-profession-input"
-              />
-              <FieldError id="patient-profession" message={errors.profession} />
-            </div>
-            )}
-          </FormSection>
-
-          {/* C3: responsável legal, obrigatório para menores de 18 anos. */}
-          {minor && (
-            <FormSection title="Responsável legal">
-              <p className="rounded-md bg-blue-50 px-3 py-2 text-sm text-[#0F2C59] sm:col-span-2" data-testid="patient-minor-note">
-                Paciente menor de 18 anos: o responsável legal é o contato de referência e quem consente o atendimento.
-              </p>
-              <div className="sm:col-span-2">
-                <Label htmlFor="patient-guardian-name">Nome do responsável *</Label>
-                <Input id="patient-guardian-name" {...fieldA11y("guardian_name", "patient-guardian-name")} required
-                  maxLength={LIMITS.patientName} value={form.guardian_name} onChange={onFormChange("guardian_name")}
-                  className={`mt-1.5 ${invalidClass("guardian_name")}`} data-testid="patient-guardian-name-input" />
-                <FieldError id="patient-guardian-name" message={errors.guardian_name} />
-              </div>
-              <div>
-                <Label htmlFor="patient-guardian-cpf">CPF do responsável *</Label>
-                <Input id="patient-guardian-cpf" required inputMode="numeric" maxLength={LIMITS.cpf}
-                  value={form.guardian_cpf} onChange={onFormChange("guardian_cpf")} placeholder="000.000.000-00"
-                  aria-invalid={Boolean(guardianCpfError)} aria-describedby={guardianCpfError ? "patient-guardian-cpf-error" : undefined}
-                  className={`mt-1.5 ${guardianCpfError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-                  data-testid="patient-guardian-cpf-input" />
-                <FieldError id="patient-guardian-cpf" message={guardianCpfError} />
-              </div>
-              <div>
-                <Label htmlFor="patient-guardian-relationship">Parentesco *</Label>
-                <NativeSelect id="patient-guardian-relationship" {...fieldA11y("guardian_relationship", "patient-guardian-relationship")}
-                  required value={form.guardian_relationship} onChange={onFormChange("guardian_relationship")}
-                  className="mt-1.5" selectClassName={invalidClass("guardian_relationship")}>
-                  <option value="">Selecione...</option>
-                  {GUARDIAN_RELATIONSHIPS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </NativeSelect>
-                <FieldError id="patient-guardian-relationship" message={errors.guardian_relationship} />
-              </div>
-              <div>
-                <Label htmlFor="patient-guardian-phone">Telefone do responsável *</Label>
-                <Input id="patient-guardian-phone" required type="tel" inputMode="tel" maxLength={LIMITS.phone}
-                  value={form.guardian_phone} onChange={onFormChange("guardian_phone")} placeholder="(11) 91234-5678"
-                  aria-invalid={Boolean(guardianPhoneError)} aria-describedby={guardianPhoneError ? "patient-guardian-phone-error" : undefined}
-                  className={`mt-1.5 ${guardianPhoneError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-                  data-testid="patient-guardian-phone-input" />
-                <FieldError id="patient-guardian-phone" message={guardianPhoneError} />
-              </div>
-            </FormSection>
+          {/* Produto (cadastro pelo paciente): de onde vieram os dados já preenchidos. */}
+          {completing && (
+            <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="intake-completing-note">
+              O tempo do link acabou antes de o paciente terminar. Os campos preenchidos vieram dele: confira
+              com o paciente o que falta (inclusive a resposta sobre o termo) antes de salvar.
+            </p>
           )}
-
-          <FormSection title="Contato">
-            <div>
-              <Label htmlFor="patient-phone">Telefone{mark("phone")}</Label>
-              <Input
-                id="patient-phone"
-                required={!minor}
-                type="tel"
-                inputMode="tel"
-                maxLength={LIMITS.phone}
-                value={form.phone}
-                onChange={onFormChange("phone")}
-                className={`mt-1.5 ${phoneError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-                aria-invalid={Boolean(phoneError)}
-                aria-describedby={phoneError ? "patient-phone-error" : undefined}
-                data-testid="patient-phone-input"
-                placeholder="(11) 91234-5678"
-              />
-              <FieldError id="patient-phone" message={phoneError} />
-            </div>
-
-            <div>
-              <Label htmlFor="patient-email">E-mail{mark("email")}</Label>
-              <Input
-                id="patient-email"
-                {...fieldA11y("email", "patient-email")}
-                required={!minor}
-                type="email"
-                inputMode="email"
-                maxLength={LIMITS.email}
-                value={form.email}
-                onChange={onFormChange("email")}
-                className={`mt-1.5 ${invalidClass("email")}`}
-                data-testid="patient-email-input"
-              />
-              <FieldError id="patient-email" message={errors.email} />
-            </div>
-
-            <div className="sm:col-span-2">
-              <Label htmlFor="patient-address">Endereço *</Label>
-              <Input
-                id="patient-address"
-                {...fieldA11y("address", "patient-address")}
-                required
-                maxLength={LIMITS.address}
-                value={form.address}
-                onChange={onFormChange("address")}
-                className={`mt-1.5 ${invalidClass("address")}`}
-                placeholder="Rua, número, bairro, cidade"
-                data-testid="patient-address-input"
-              />
-              <FieldError id="patient-address" message={errors.address} />
-            </div>
-
-            <div className="sm:col-span-2">
-              <Label htmlFor="patient-emergency">Contato de emergência *</Label>
-              <Input
-                id="patient-emergency"
-                {...fieldA11y("emergency_contact", "patient-emergency")}
-                required
-                maxLength={LIMITS.emergencyContact}
-                value={form.emergency_contact}
-                onChange={onFormChange("emergency_contact")}
-                className={`mt-1.5 ${invalidClass("emergency_contact")}`}
-                placeholder="Nome, parentesco e telefone"
-                data-testid="patient-emergency-input"
-              />
-              <FieldError id="patient-emergency" message={errors.emergency_contact} />
-            </div>
-          </FormSection>
+          <FormErrorSummary errors={errors} submitError={submitError} fields={errorFields(form)} />
+          <PatientFormFields form={form} errors={errors} onFormChange={onFormChange} />
 
           <FormSection title="Informações clínicas">
             <div className="sm:col-span-2">
               <Label htmlFor="patient-notes">Notas iniciais *</Label>
               <Textarea
                 id="patient-notes"
-                {...fieldA11y("initial_notes", "patient-notes")}
+                {...fieldA11y(errors, "initial_notes", "patient-notes")}
                 required
                 maxLength={LIMITS.patientNotes}
                 value={form.initial_notes}
                 onChange={onFormChange("initial_notes")}
-                className={`mt-1.5 ${invalidClass("initial_notes")}`}
+                className={`mt-1.5 ${invalidClass(errors, "initial_notes")}`}
                 placeholder="Motivo da procura, encaminhamento, observações da triagem"
                 data-testid="patient-notes-input"
                 rows={3}
@@ -1229,54 +682,10 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
 
           <FormSection title="Consentimento">
             <div className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
-              <div>
-                <p className="text-sm font-semibold text-[#0F172A]">Termo de consentimento livre e esclarecido</p>
-                {consentText ? (
-                  // Acessibilidade (varredura de UI): texto com rolagem precisa receber foco
-                  // (tabIndex), senão quem usa só o teclado não consegue rolar e ler o termo inteiro.
-                  <p tabIndex={0} role="region" aria-label="Texto do termo de consentimento"
-                    className="psi-scroll mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">{consentText}</p>
-                ) : (
-                  <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-[#1E3A8A]" /></div>
-                )}
-                {consentDate && (
-                  <p className="mt-2 text-xs font-medium text-emerald-700">Consentimento registrado em {consentDate}.</p>
-                )}
-              </div>
-              {/* PRODUTO: a resposta é obrigatória e explícita. Antes "Não concordo" já
-                  vinha marcado, e a ficha podia ser salva sem a pergunta ser respondida.
-                  Celular: opções com área de toque maior (linha inteira, 44 px). */}
-              <fieldset className="space-y-1">
-                {/* C3: para menores, quem concorda é o responsável legal. */}
-                <legend className="text-sm font-medium text-[#0F172A]">
-                  {minor ? "O responsável legal concorda com o termo? *" : "O paciente concorda com o termo? *"}
-                </legend>
-                <FieldError id="patient-consent" message={errors.consent_terms} />
-                <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
-                  <input
-                    id="patient-consent-yes"
-                    type="radio"
-                    name="consent_terms"
-                    value="true"
-                    checked={form.consent_terms === true}
-                    onChange={onFormChange("consent_terms")}
-                    required
-                    {...fieldA11y("consent_terms", "patient-consent")}
-                  />
-                  Concordo
-                </label>
-                <label className="flex min-h-[44px] items-center gap-2 text-sm text-slate-700 sm:min-h-0 sm:py-1">
-                  <input
-                    type="radio"
-                    name="consent_terms"
-                    value="false"
-                    checked={form.consent_terms === false}
-                    onChange={onFormChange("consent_terms")}
-                    {...fieldA11y("consent_terms", "patient-consent")}
-                  />
-                  Não concordo
-                </label>
-              </fieldset>
+              <ConsentTermText text={consentText} consentDate={consentDate} />
+              {/* C3: para menores, quem concorda é o responsável legal. */}
+              <ConsentQuestion form={form} errors={errors} onFormChange={onFormChange}
+                legend={minor ? "O responsável legal concorda com o termo? *" : "O paciente concorda com o termo? *"} />
             </div>
           </FormSection>
 
@@ -1320,115 +729,6 @@ function PatientConfirmDialog({ confirm, onConfirm, onOpenChange }) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  );
-}
-
-// Item 15: o token não é mais carregado junto com a tela. O profissional gera
-// um token aqui, copia o script na hora (o token não pode ser visto de novo)
-// e pode trocá-lo ou revogá-lo a qualquer momento.
-function IntegrationDialog({ open, onOpenChange, integration, newToken, tokenBusy, onGenerate, onRevoke,
-  generatedScript, copySuccess, onCopyScript }) {
-  const createdAt = integration?.created_at
-    ? new Date(integration.created_at).toLocaleDateString("pt-BR")
-    : "";
-  // Backlog (token com validade): o token vence (padrão 1 ano). Perto do fim, e
-  // depois de vencido, a tela avisa; o profissional também recebe um e-mail.
-  const expiresAt = integration?.expires_at ? new Date(integration.expires_at) : null;
-  const daysLeft = expiresAt ? Math.ceil((expiresAt - Date.now()) / 86400000) : null;
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="font-head text-xl">Integração com Google Forms</DialogTitle>
-          <DialogDescription>
-            Vincule os cadastros do Forms direto na sua plataforma de forma segura e criptografada.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4 text-sm text-slate-700">
-          {!integration ? (
-            <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-[#1E3A8A]" /></div>
-          ) : (
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
-              <div className="flex items-start gap-3">
-                <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-[#1E3A8A]" />
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-[#0F172A]">
-                    {integration.configured
-                      ? `${integration.expired ? "Integração parada" : "Integração ativa"} · token terminado em …${integration.hint}${createdAt ? ` · gerado em ${createdAt}` : ""}`
-                      : "Nenhum token de integração ativo"}
-                  </p>
-                  {integration.configured && expiresAt && (
-                    <p className={`mt-1 text-xs font-medium ${integration.expired ? "text-red-700" : daysLeft <= 30 ? "text-amber-800" : "text-slate-600"}`}
-                      role={integration.expired || daysLeft <= 30 ? "alert" : undefined} data-testid="integration-expiry">
-                      {integration.expired
-                        ? `Token vencido em ${expiresAt.toLocaleDateString("pt-BR")}: o formulário parou de cadastrar pacientes. Gere um novo token e atualize o script.`
-                        : daysLeft <= 30
-                          ? `Vence em ${expiresAt.toLocaleDateString("pt-BR")} (${daysLeft === 1 ? "amanhã" : `em ${daysLeft} dias`}). Gere um novo token antes disso.`
-                          : `Válido até ${expiresAt.toLocaleDateString("pt-BR")}.`}
-                    </p>
-                  )}
-                  <p className="mt-1 text-xs text-slate-500">
-                    Por segurança, o token é exibido só no momento em que é gerado. Gerar um novo token desativa o anterior
-                    (atualize o script no formulário depois disso).
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button size="sm" onClick={onGenerate} disabled={tokenBusy} className="bg-[#1E3A8A] hover:bg-[#0F2C59]"
-                  data-testid="generate-webhook-token">
-                  {tokenBusy
-                    ? <Loader2 className="h-4 w-4 animate-spin" />
-                    : integration.configured ? "Gerar novo token e script" : "Gerar token e script"}
-                </Button>
-                {integration.configured && (
-                  <Button size="sm" variant="outline" onClick={onRevoke} disabled={tokenBusy}
-                    className="border-red-200 text-red-600 hover:bg-red-50">
-                    Revogar integração
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {newToken && (
-            <>
-              <div className="space-y-2">
-                <p><strong>Passo 1:</strong> No seu Google Forms, clique nos 3 pontos verticais (canto superior direito) e acesse <strong>Apps Script</strong>.</p>
-                <p><strong>Passo 2:</strong> Apague o código padrão e cole o seu script de integração pessoal gerado abaixo. <strong>Copie agora:</strong> depois de fechar esta janela o token não poderá ser exibido de novo.</p>
-              </div>
-
-              <div className="relative rounded-md bg-slate-900 p-4">
-                <Button
-                  size="sm"
-                  onClick={onCopyScript}
-                  className="absolute right-2 top-2 bg-slate-700 hover:bg-slate-600 text-white"
-                >
-                  {copySuccess ? "Copiado!" : "Copiar Script"}
-                </Button>
-                <pre className="overflow-x-auto text-xs text-green-400">
-                  <code>{generatedScript}</code>
-                </pre>
-              </div>
-
-              <div className="space-y-2">
-                <p><strong>Passo 3:</strong> No menu central, salve o projeto no <strong>Drive</strong>.</p>
-                <p><strong>Passo 4:</strong> No menu lateral esquerdo do painel do Google, clique no ícone de <strong>Relógio (Acionadores)</strong>.</p>
-                <p><strong>Passo 5:</strong> Clique em "Adicionar Acionador" e configure para rodar a função <code>onFormSubmit</code> no evento <strong>"Ao enviar o formulário"</strong> e, em Configurações de notificação de falha, escolha <strong>Receber notificações imediatamente</strong>.</p>
-                <p className="mt-2 text-xs text-slate-500">* Atenção: este código contém seu token de segurança pessoal. Não o compartilhe publicamente. Se ele vazar, gere um novo token aqui.</p>
-              </div>
-            </>
-          )}
-
-          {/* Termo por profissional: o consentimento marcado no formulário é
-              registrado com a cópia do termo configurado no sistema. */}
-          <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            Use no formulário o mesmo texto do seu Termo de consentimento (Privacidade &amp; LGPD). O consentimento
-            marcado no formulário é registrado com esse texto e a data do envio.
-          </p>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 

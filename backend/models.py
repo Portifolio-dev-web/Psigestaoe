@@ -26,7 +26,7 @@ def now_utc():
 # Índices (ESCALA)
 # ---------------------------------------------------------------------------
 # Antes, fora as chaves primárias, só existiam índices em users.email e
-# users.webhook_token_hash. Toda listagem ("pacientes DESTE profissional,
+# no token do (hoje removido) Google Forms. Toda listagem ("pacientes DESTE profissional,
 # mais recentes primeiro") lia a tabela inteira e ordenava em memória, e o
 # Postgres NÃO cria índice sozinho para chaves estrangeiras: cada exclusão em
 # cascata varria as tabelas filhas.
@@ -68,23 +68,11 @@ class User(Base):
     # NULL = usa o modelo padrão (DEFAULT_CONSENT_TERM_BODY em server.py).
     consent_term_body = Column(Text, nullable=True)
 
-    # Item 15 da auditoria: token do webhook do Google Forms.
-    # Antes: coluna `webhook_token` com o token em TEXTO PURO, gerado para todo
-    # usuário, sem como trocar e devolvido em toda chamada de /auth/me.
-    # Agora: só o hash SHA-256 fica no banco (quem lê o banco não consegue usar
-    # o token), o token é mostrado UMA vez ao ser gerado e pode ser trocado ou
-    # revogado. `webhook_token_hint` guarda os 4 últimos caracteres, só para
-    # o profissional reconhecer qual token está ativo.
-    webhook_token_hash = Column(String, unique=True, index=True, nullable=True)
-    webhook_token_hint = Column(String, default="")
-    webhook_token_created_at = Column(DateTime(timezone=True), nullable=True)
-    # SEGURANÇA (backlog: "token do webhook sem validade"): o token passa a
-    # vencer (WEBHOOK_TOKEN_DAYS, padrão 1 ano). Um token esquecido num
-    # formulário antigo, ou vazado, deixa de funcionar sozinho. O profissional
-    # recebe um e-mail perto do vencimento (`webhook_expiry_notified_at`
-    # evita mandar o aviso mais de uma vez para o mesmo token).
-    webhook_token_expires_at = Column(DateTime(timezone=True), nullable=True)
-    webhook_expiry_notified_at = Column(DateTime(timezone=True), nullable=True)
+    # PRODUTO (cadastro pelo paciente): a integração com o Google Forms (token
+    # de webhook permanente, dados do paciente passando pelo Google) foi
+    # REMOVIDA. As colunas webhook_token_* saíram na migração
+    # 20261009_patient_intake, o que invalidou todos os tokens existentes. O
+    # substituto é o link de cadastro temporário (PatientIntake, abaixo).
 
     # PRODUTO (bloqueio por inatividade): minutos sem uso até a tela travar e
     # exigir a senha de novo. Escolhido pelo profissional em Configurações
@@ -344,6 +332,53 @@ class PatientSearchToken(Base):
     __table_args__ = (
         # A busca: "pacientes DESTE profissional que têm este token".
         Index("ix_patient_search_owner_token", "owner_id", "token"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cadastro pelo próprio paciente (link temporário)
+# ---------------------------------------------------------------------------
+class PatientIntake(Base):
+    """Link de cadastro que a psicóloga envia ao paciente (substitui o Google Forms).
+
+    Regras (server.py, seção "link de cadastro"):
+      - o link vale para COMEÇAR por 30 minutos (expires_at) e para uma pessoa;
+      - o cronômetro só começa quando o paciente clica em "Começar" (abrir a
+        página não conta: a prévia automática do WhatsApp não consome o link);
+      - começou: 10 minutos (deadline_at), prorrogáveis em +10 até 10 vezes
+        (acessibilidade, WCAG 2.2.1), e o link fica PRESO àquele navegador
+        (fill_secret): se vazar, ninguém continua de outro aparelho;
+      - o que o paciente digita é salvo CRIPTOGRAFADO aqui (draft) enquanto ele
+        preenche: recarregar a página ou cair a internet não perde nada;
+      - enviado: vira paciente (patient_id) e o rascunho é apagado;
+      - o tempo acabou com o cadastro pela metade: a psicóloga recebe o que foi
+        digitado como "incompleto" e completa com o paciente (nada se perde).
+
+    Como as outras credenciais, o banco guarda só o HASH do link e do segredo
+    do navegador: o link verdadeiro existe apenas na mensagem enviada ao paciente.
+    """
+    __tablename__ = "patient_intakes"
+
+    id = Column(String, primary_key=True, default=lambda: f"cad_{uuid.uuid4().hex[:12]}")
+    owner_id = Column(String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
+    token_hash = Column(String, unique=True, index=True, nullable=False)
+    label = Column(Text, default="")            # [CRIPTOGRAFADO] "para quem é" (só a psicóloga vê)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+    expires_at = Column(DateTime(timezone=True), nullable=False)    # prazo para COMEÇAR
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    deadline_at = Column(DateTime(timezone=True), nullable=True)    # prazo para TERMINAR
+    extensions = Column(Integer, default=0)
+    fill_secret_hash = Column(String, nullable=True)
+    draft = Column(Text, default="")            # [CRIPTOGRAFADO] JSON do que já foi digitado
+    draft_saved_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    completed_by = Column(String, nullable=True)  # "patient" (enviou) ou "professional" (completou o incompleto)
+    patient_id = Column(String, ForeignKey("patients.id", ondelete="SET NULL"), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        # Lista de links da psicóloga, mais recentes primeiro.
+        Index("ix_patient_intakes_owner_created", "owner_id", "created_at"),
     )
 
 

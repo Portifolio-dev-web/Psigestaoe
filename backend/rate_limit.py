@@ -6,7 +6,8 @@
 # tentativas ilimitadas. Isso permitia:
 #   - força bruta de senha no /auth/login;
 #   - criação em massa de contas no /auth/register;
-#   - flood de pacientes falsos pelo webhook do Google Forms.
+#   - flood de pacientes falsos pelo webhook do Google Forms (hoje removido; o
+#     link de cadastro do paciente tem os próprios limites).
 #
 # ESCALA (workers): dois armazenamentos para o contador.
 #   - Memória (padrão, desenvolvimento): janela deslizante dentro de UM

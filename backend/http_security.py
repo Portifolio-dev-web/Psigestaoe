@@ -223,7 +223,7 @@ async def integrity_error_handler(_request: Request, exc: IntegrityError) -> JSO
 # anexa sozinho a qualquer requisição para a API, inclusive as disparadas por
 # OUTRO site que a vítima esteja visitando. As rotas com corpo JSON já estavam
 # protegidas (outro site não consegue enviar JSON sem passar pelo CORS), mas
-# as rotas POST sem corpo (logout, gerar token do Google Forms, arquivar,
+# as rotas POST sem corpo (logout, gerar token do Google Forms, hoje removido, arquivar,
 # desarquivar e ANONIMIZAR, que é irreversível) dependiam só do SameSite do
 # cookie, que não protege contra outros subdomínios do mesmo domínio.
 #
@@ -238,8 +238,11 @@ async def integrity_error_handler(_request: Request, exc: IntegrityError) -> JSO
 CSRF_HEADER = b"x-requested-with"
 CSRF_HEADER_VALUE = b"psigestao"
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-# O webhook do Google Forms é chamado pelos servidores do Google, sem cookie
-# e sem Origin: a autenticação dele é o token no cabeçalho X-Webhook-Token.
+# Avisos de servidores externos (hoje: o meio de pagamento, /api/webhook/billing/...)
+# chegam sem cookie e sem Origin; cada um se autentica pelo próprio meio (token ou
+# assinatura). O antigo webhook do Google Forms foi removido. As rotas do link de
+# cadastro do paciente (/api/intake/...) NÃO ficam aqui: são chamadas pela página do
+# PsiGestão e continuam com a proteção CSRF.
 CSRF_EXEMPT_PREFIXES = ("/api/webhook/",)
 
 
