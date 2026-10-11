@@ -134,8 +134,9 @@ export default function AdminActionDialog({ action, account, hasPassword, trialO
     } catch (err) {
       const detail = err.response?.data?.detail;
       const message = formatApiErrorDetail(detail) || err.message;
-      // Confirmação errada: o erro fica no campo, que é limpo e recebe o foco.
-      if (detail?.code === "admin_confirm_invalid" || err.response?.status === 429) {
+      // Confirmação errada (ou código já usado, AD5): o erro fica no campo, que é
+      // limpo e recebe o foco.
+      if (["admin_confirm_invalid", "admin_code_used"].includes(detail?.code) || err.response?.status === 429) {
         setErrors({ confirm: message });
         setConfirm("");
         requestAnimationFrame(() => confirmRef.current?.focus());

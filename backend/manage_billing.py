@@ -13,10 +13,12 @@
 #   python manage_billing.py cortesia conceder fulana@exemplo.com --motivo "Usuária fundadora"
 #   python manage_billing.py cortesia revogar fulana@exemplo.com
 #   python manage_billing.py situacao fulana@exemplo.com
+#   python manage_billing.py admin verificar   (confere ADMIN_EMAILS; análise da administração, AD4)
 # Em produção: docker compose exec api python manage_billing.py ...
 # ---------------------------------------------------------------------------
 import argparse
 import asyncio
+import difflib
 import json
 import sys
 
@@ -49,8 +51,41 @@ def describe(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _yes(flag: bool) -> str:
+    return "sim" if flag else "NÃO"
+
+
+async def check_admins(db) -> int:
+    """AD4: para cada e-mail de ADMIN_EMAILS, o que falta para a administração
+    aparecer. Quando não há conta, sugere um e-mail cadastrado PARECIDO (o erro
+    mais comum é de digitação, no cadastro ou na variável). Roda no console do
+    servidor: quem vê a saída já tem acesso ao banco."""
+    report = await server.admin_config_report(db)
+    if not report:
+        print("ADMIN_EMAILS está vazio: a administração está desligada.")
+        return 1
+    all_emails = None
+    for item in report:
+        print(f"{item['email']}: {'PRONTO' if item['ready'] else 'NÃO ESTÁ PRONTO'}")
+        if not item["account"]:
+            if all_emails is None:
+                all_emails = [e.lower() for e in (await db.execute(select(User.email))).scalars().all()]
+            similar = difflib.get_close_matches(item["email"], all_emails, n=1, cutoff=0.85)
+            hint = f" Existe uma conta parecida: {similar[0]} (erro de digitação?)" if similar else ""
+            print(f"  - conta: não existe. Cadastre-se com este e-mail.{hint}")
+            continue
+        print(f"  - e-mail comprovado: {_yes(item['email_verified'])}")
+        print(f"  - verificação em duas etapas: {_yes(item['mfa_enabled'])}"
+              + ("" if item["mfa_enabled"] else " (ative em Configurações > Minha conta)"))
+        print(f"  - conta ativa (não encerrada nem suspensa): {_yes(item['active'])}")
+    print("Mudou ADMIN_EMAILS? Reinicie a API (docker compose up -d api).")
+    return 0 if all(item["ready"] for item in report) else 1
+
+
 async def run(args) -> int:
     async with server.AsyncSessionLocal() as db:
+        if args.command == "admin":
+            return await check_admins(db)
         if args.command == "cortesia":
             try:
                 state = await server.set_courtesy(db, args.email, args.acao == "conceder", args.motivo or "")
@@ -78,6 +113,8 @@ def main() -> None:
     status = commands.add_parser("situacao", help="mostra a situação da assinatura de uma conta")
     status.add_argument("email")
     status.add_argument("--json", action="store_true", help="saída em JSON")
+    admin = commands.add_parser("admin", help="confere ADMIN_EMAILS (conta, e-mail comprovado, duas etapas)")
+    admin.add_argument("acao", choices=["verificar"])
     sys.exit(asyncio.run(run(parser.parse_args())))
 
 

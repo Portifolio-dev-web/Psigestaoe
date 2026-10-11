@@ -256,7 +256,11 @@ filtro por situação. Ações: **conceder/revogar cortesia**, **prorrogar o tes
 Para liberar, ponha o seu e-mail em `ADMIN_EMAILS` (no `.env`; vários separados por
 vírgula) e reinicie a API (`docker compose up -d api`). Depois entre com essa conta,
 ative a verificação em duas etapas (Configurações → Minha conta) e o item
-**Administração** aparece no menu.
+**Administração** aparece no menu. Se não aparecer, confira o que falta com
+`docker compose exec api python manage_billing.py admin verificar` (diz, para cada
+e-mail da lista, se a conta existe, se o e-mail foi comprovado e se tem duas etapas, e
+aponta um e-mail cadastrado parecido quando o erro é de digitação). Na subida, a API
+também avisa no log quantos e-mails da lista não estão prontos.
 
 Proteções (todas no servidor):
 
@@ -266,8 +270,11 @@ Proteções (todas no servidor):
   entra pelo Google confirma com o código do aplicativo), com limite de tentativas;
 - **nenhum dado de paciente** na tela: só o número de pacientes de cada conta;
 - tudo na trilha de auditoria **das duas contas** (a afetada vê "pela administração";
-  a do administrador guarda quem fez, inclusive cada consulta à lista), e a pessoa
-  recebe um **e-mail** explicando a mudança (com o motivo, na suspensão);
+  a do administrador guarda quem fez e as consultas à lista, no máximo uma por 15 min),
+  e a pessoa recebe um **e-mail** explicando a mudança (com o motivo, na suspensão);
+- **todas as administradoras recebem um aviso de segurança por e-mail a cada ação**, e
+  a dona da conta é avisada depois de 3 confirmações erradas em 15 min: uma conta de
+  administração invadida aparece na caixa de e-mail, não só na trilha;
 - a busca vai no corpo de um POST (nome/e-mail fora dos logs de acesso);
 - não dá para suspender nem desconectar a própria conta nem a de outro administrador.
 

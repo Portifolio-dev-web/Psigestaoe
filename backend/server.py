@@ -225,6 +225,8 @@ async def lifespan(_app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
     # Varredura, itens 8 e 15: um REDIS_URL errado apareceria só como "sem limite".
     await rate_limiting.check_redis()
+    # Análise da administração (AD4): ADMIN_EMAILS que não bate com nenhuma conta pronta.
+    await _log_admin_status()
     # Segurança média: rotina de manutenção (expurgo de contas encerradas no fim
     # da guarda e limpeza dos links de cadastro antigos). Ver run_maintenance.
     maintenance = asyncio.create_task(_maintenance_loop()) if MAINTENANCE_ENABLED else None
@@ -4236,6 +4238,7 @@ ADMIN_TRIAL_DAYS = (7, 14, 30, 60, 90)
 # produto; acima disso a lista considera as contas mais recentes.
 ADMIN_MAX_ACCOUNTS = 5000
 ADMIN_STATUSES = ("all", "trialing", "active", "past_due", "read_only", "courtesy", "suspended")
+ADMIN_VIEW_LOG_MINUTES = 15  # AD6: no máximo um registro de consulta por intervalo
 ADMIN_NOT_FOUND = "Não encontrado."
 ADMIN_MFA_REQUIRED = {
     "code": "admin_mfa_required",
@@ -4301,6 +4304,29 @@ async def get_admin(user: User = Depends(get_active_user)) -> User:
     return user
 
 
+# Análise da administração (AD5): o mesmo código do aplicativo não vale duas
+# vezes (_check_mfa_code). Quem só entra pelo Google e faz duas ações em menos
+# de 30 s recebia "Código incorreto", sem saber que bastava esperar o próximo.
+ADMIN_CODE_USED = {
+    "code": "admin_code_used",
+    "msg": "Este código já foi usado. Espere o próximo código do aplicativo (até 30 segundos) e tente de novo. "
+           "Nada foi alterado.",
+}
+# AD3: confirmações erradas seguidas (em 15 min) que disparam o aviso por e-mail.
+ADMIN_ALERT_FAILURES = 3
+
+
+async def _admin_recipients(db: AsyncSession) -> list:
+    """AD3: as contas que SÃO administradoras (lista do servidor + e-mail
+    comprovado + conta ativa). Um e-mail digitado errado em ADMIN_EMAILS, sem
+    conta, nunca recebe aviso nenhum (seria mandar dados a um estranho)."""
+    emails = list(admin_access.admin_emails())
+    if not emails:
+        return []
+    users = (await db.execute(select(User).where(func.lower(User.email).in_(emails)))).scalars().all()
+    return [user for user in users if admin_access.is_admin(user)]
+
+
 async def _confirm_admin(db: AsyncSession, admin: User, confirm: str) -> None:
     """Confere a senha (ou o código do aplicativo) antes de CADA ação.
     10 tentativas a cada 15 min por administrador; cada erro fica na trilha."""
@@ -4308,10 +4334,29 @@ async def _confirm_admin(db: AsyncSession, admin: User, confirm: str) -> None:
     if admin.password_hash:
         ok = await verify_password_async(confirm, admin.password_hash)
     else:
-        ok = await _check_mfa_code(db, admin, confirm.strip()) is not None
+        code = confirm.strip()
+        ok = await _check_mfa_code(db, admin, code) is not None
+        # AD5: código certo, mas já usado numa ação anterior -> mensagem própria
+        # (não é tentativa de adivinhar: não conta como erro nem vai para a trilha).
+        if not ok and admin.mfa_last_step is not None and admin.mfa_secret:
+            step = totp.verify(decrypt_field(admin.mfa_secret), code)
+            if step is not None and step <= admin.mfa_last_step:
+                raise HTTPException(status_code=403, detail=ADMIN_CODE_USED)
     if not ok:
         await log_audit(db, admin.user_id, admin.email, "admin_confirmacao_falha", "administracao", admin.user_id,
                         "Ação de administração recusada: confirmação incorreta")
+        # AD3: na 3ª confirmação errada em 15 min, a dona da conta é avisada por
+        # e-mail (alguém pode estar usando a sessão dela). Só na 3ª: um aviso por rajada.
+        # Enviado AQUI (await), e não em BackgroundTasks: a rota termina em erro (403),
+        # e o FastAPI não roda tarefas de fundo de uma resposta de erro.
+        recent = await db.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.owner_id == admin.user_id, AuditLog.action == "admin_confirmacao_falha",
+            AuditLog.timestamp >= now_utc() - timedelta(minutes=15)))
+        if recent == ADMIN_ALERT_FAILURES:
+            await mailer.send_email(_security_notice(
+                admin, "Confirmações erradas na administração",
+                f"Houve {ADMIN_ALERT_FAILURES} tentativas seguidas de confirmar ações de administração com a "
+                "senha ou o código errados, na sua conta."))
         raise HTTPException(status_code=403, detail={
             "code": "admin_confirm_invalid",
             "msg": ("Senha incorreta." if admin.password_hash else "Código incorreto.") + " Nada foi alterado."})
@@ -4385,8 +4430,60 @@ async def _admin_done(db: AsyncSession, background: BackgroundTasks, admin: User
     await log_audit(db, admin.user_id, admin.email, action, "administracao", target.user_id, detail)
     background.add_task(mailer.send_email, mailer.admin_notice(
         target.email, target.name or "", subject, lines, legal.contact_info()["support_email"]))
+    # Análise da administração (AD3): TODAS as administradoras (inclusive quem
+    # agiu) recebem um aviso de segurança. Antes, se uma conta de administração
+    # fosse invadida, as suspensões e cortesias só apareciam na trilha. O aviso
+    # identifica a conta afetada pelo ID (o nome e o e-mail ficam na tela).
+    what = (f"A conta de administração {admin.email} fez uma ação no PsiGestão: {detail}. "
+            f"Conta afetada: {target.user_id}.")
+    for recipient in await _admin_recipients(db):
+        background.add_task(mailer.send_email, _security_notice(recipient, "Ação feita na administração", what))
     counts, last = await _admin_stats(db, [target.user_id])
     return _admin_account(target, admin, counts.get(target.user_id, 0), last.get(target.user_id))
+
+
+async def admin_config_report(db: AsyncSession) -> list:
+    """Análise da administração (AD4): para cada e-mail de ADMIN_EMAILS, se a
+    conta existe e cumpre os requisitos (e-mail comprovado, duas etapas, ativa).
+    Usado na subida da API (só contagens no log) e por
+    `python manage_billing.py admin verificar` (no console do servidor)."""
+    emails = sorted(admin_access.admin_emails())
+    if not emails:
+        return []
+    users = {user.email.strip().lower(): user for user in (await db.execute(
+        select(User).where(func.lower(User.email).in_(emails)))).scalars().all()}
+    report = []
+    for email in emails:
+        user = users.get(email)
+        report.append({
+            "email": email,
+            "account": user is not None,
+            "email_verified": bool(user and user.email_verified_at),
+            "mfa_enabled": bool(user and user.mfa_enabled_at),
+            "active": bool(user and user.closed_at is None and user.suspended_at is None),
+            "ready": bool(user) and admin_access.is_admin(user) and user.mfa_enabled_at is not None,
+        })
+    return report
+
+
+async def _log_admin_status() -> None:
+    """AD4: na subida, avisa se algum e-mail de ADMIN_EMAILS não está pronto
+    (ex.: digitado diferente do cadastro). O log leva só CONTAGENS, nunca e-mails."""
+    if not admin_access.admin_emails():
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            report = await admin_config_report(db)
+    except Exception:  # banco fora do ar na subida: a API sobe mesmo assim
+        logger.warning("Não foi possível conferir ADMIN_EMAILS na subida.", exc_info=True)
+        return
+    ready = sum(1 for item in report if item["ready"])
+    if ready < len(report):
+        logger.warning("ADMIN_EMAILS: %d e-mail(s) configurado(s), %d pronto(s) para a administração "
+                       "(conta com e-mail comprovado e duas etapas). Confira com: "
+                       "python manage_billing.py admin verificar", len(report), ready)
+    else:
+        logger.info("ADMIN_EMAILS: %d administrador(es) pronto(s).", ready)
 
 
 def _br_day(value: datetime) -> str:
@@ -4432,8 +4529,17 @@ async def admin_list_users(data: AdminListInput, admin: User = Depends(get_admin
     counts, last = await _admin_stats(db, [u.user_id for u in page_users])
     # LGPD (art. 37): consultar dados das contas é tratamento; fica na trilha do
     # administrador (sem o termo buscado, que pode ser um nome).
-    await log_audit(db, admin.user_id, admin.email, "visualizar", "administracao", admin.user_id,
-                    "Lista de contas consultada" + (" (com busca)" if term else ""))
+    # Análise da administração (AD6): uma vez a cada ADMIN_VIEW_LOG_MINUTES por tipo
+    # (lista / busca). Antes cada clique em filtro ou página gravava um registro, e
+    # as ações de verdade se perdiam no meio. A trilha continua dizendo que houve
+    # consulta naquele intervalo.
+    detail = "Lista de contas consultada" + (" (com busca)" if term else "")
+    logged_recently = await db.scalar(select(exists().where(
+        AuditLog.owner_id == admin.user_id, AuditLog.action == "visualizar",
+        AuditLog.entity_type == "administracao", AuditLog.detail == detail,
+        AuditLog.timestamp >= now - timedelta(minutes=ADMIN_VIEW_LOG_MINUTES))))
+    if not logged_recently:
+        await log_audit(db, admin.user_id, admin.email, "visualizar", "administracao", admin.user_id, detail)
     return {
         "items": [_admin_account(u, admin, counts.get(u.user_id, 0), last.get(u.user_id), now) for u in page_users],
         "total": total, "page": page, "pages": pages, "page_size": ADMIN_PAGE_SIZE, "summary": summary,

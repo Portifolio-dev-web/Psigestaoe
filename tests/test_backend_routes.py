@@ -3268,3 +3268,100 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
         actions = {log["action"] for log in logs if "administração" in log["detail"]}
         assert {"encerrar_sessoes", "suspender", "reativar"} <= actions
         assert any(log["detail"] == "Entrada recusada: conta suspensa (senha)" for log in logs)
+
+
+# Análise da administração, lote 1 (AD3 a AD6)
+def _mails(to, subject_part):
+    return [mail for mail in mailer.outbox if mail.to == to and subject_part in mail.subject]
+
+
+@pytest.mark.anyio
+async def test_admin_actions_alert_every_admin_and_repeated_failures(client, monkeypatch):
+    """AD3: cada ação avisa TODAS as administradoras com conta pronta (nunca um
+    e-mail da lista sem conta); 3 confirmações erradas em 15 min avisam a dona."""
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    await target_client.aclose()
+    await _enable_mfa(client)
+    mailer.outbox.clear()
+    assert (await _admin_action(client, target_id, "courtesy", grant=True)).status_code == 200
+    assert len(_mails(ADMIN_EMAIL, "Ação feita na administração")) == 1
+    # "outra.admin@example.com" está em ADMIN_EMAILS mas não tem conta: não recebe nada.
+    assert not [mail for mail in mailer.outbox if mail.to == "outra.admin@example.com"]
+
+    async with _patient_client() as other:
+        assert (await register_account(other, "outra.admin@example.com")).status_code == 200
+    mailer.outbox.clear()
+    assert (await _admin_action(client, target_id, "courtesy", grant=False)).status_code == 200
+    for admin_email in (ADMIN_EMAIL, "outra.admin@example.com"):
+        alert = _mails(admin_email, "Ação feita na administração")
+        assert len(alert) == 1 and target_id in alert[0].text and "Cortesia revogada" in alert[0].text
+
+    mailer.outbox.clear()
+    for _ in range(4):
+        wrong = await client.post(f"/api/admin/users/{target_id}/courtesy", json={"confirm": "errada", "grant": True})
+        assert wrong.status_code == 403
+    assert len(_mails(ADMIN_EMAIL, "Confirmações erradas na administração")) == 1  # só na 3ª
+
+
+@pytest.mark.anyio
+async def test_admin_config_report_and_cli_hint(client, monkeypatch, capsys):
+    """AD4: o que falta para cada e-mail de ADMIN_EMAILS, e a dica de e-mail parecido."""
+    import manage_billing
+
+    target_client, _target_id = await _admin_setup(client, monkeypatch)
+    await target_client.aclose()
+    async with client.session_factory() as db:
+        report = {item["email"]: item for item in await server.admin_config_report(db)}
+    assert report[ADMIN_EMAIL]["account"] and report[ADMIN_EMAIL]["email_verified"]
+    assert report[ADMIN_EMAIL]["ready"] is False  # falta a verificação em duas etapas
+    assert report["outra.admin@example.com"]["account"] is False
+    await _enable_mfa(client)
+    async with client.session_factory() as db:
+        report = {item["email"]: item for item in await server.admin_config_report(db)}
+    assert report[ADMIN_EMAIL]["ready"] is True
+
+    # O caso real: o e-mail da lista tem uma letra diferente do cadastro.
+    monkeypatch.setenv("ADMIN_EMAILS", "dona.sistemma@example.com")
+    async with client.session_factory() as db:
+        assert await manage_billing.check_admins(db) == 1
+    out = capsys.readouterr().out
+    assert "NÃO ESTÁ PRONTO" in out and f"Existe uma conta parecida: {ADMIN_EMAIL}" in out
+    monkeypatch.setenv("ADMIN_EMAILS", ADMIN_EMAIL)
+    async with client.session_factory() as db:
+        assert await manage_billing.check_admins(db) == 0
+    assert "PRONTO" in capsys.readouterr().out
+
+
+@pytest.mark.anyio
+async def test_admin_code_already_used_has_own_message(client, monkeypatch):
+    """AD5: quem confirma com o código do aplicativo e repete o mesmo código
+    recebe 'código já usado', e isso não conta como confirmação errada."""
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    await target_client.aclose()
+    secret, _codes = await _enable_mfa(client)
+    async with client.session_factory() as db:  # administradora que só entra pelo Google
+        await db.execute(update(User).where(User.email == ADMIN_EMAIL).values(password_hash=None))
+        await db.commit()
+    code = totp.code_at(secret, totp.current_step() + 1)
+    first = await client.post(f"/api/admin/users/{target_id}/courtesy", json={"confirm": code, "grant": True})
+    assert first.status_code == 200, first.text
+    again = await client.post(f"/api/admin/users/{target_id}/courtesy", json={"confirm": code, "grant": False})
+    assert again.status_code == 403 and again.json()["detail"]["code"] == "admin_code_used"
+    wrong = await client.post(f"/api/admin/users/{target_id}/courtesy", json={"confirm": "000000", "grant": False})
+    assert wrong.json()["detail"]["code"] == "admin_confirm_invalid"
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert sum(log["action"] == "admin_confirmacao_falha" for log in logs) == 1  # só o código errado
+
+
+@pytest.mark.anyio
+async def test_admin_list_views_are_logged_once_per_interval(client, monkeypatch):
+    """AD6: filtros e páginas não enchem a trilha; um registro por intervalo e por tipo."""
+    target_client, _target_id = await _admin_setup(client, monkeypatch)
+    await target_client.aclose()
+    await _enable_mfa(client)
+    for body in ({}, {"status": "courtesy"}, {"page": 2}, {"q": "comum"}, {"q": "outra"}):
+        assert (await client.post("/api/admin/users/search", json=body)).status_code == 200
+    logs = (await client.get("/api/audit")).json()["items"]
+    details = [log["detail"] for log in logs if log["entity_type"] == "administracao" and log["action"] == "visualizar"]
+    assert details.count("Lista de contas consultada") == 1
+    assert details.count("Lista de contas consultada (com busca)") == 1
