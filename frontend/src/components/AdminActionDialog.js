@@ -64,9 +64,11 @@ export const ADMIN_ACTIONS = {
     title: "Suspender conta",
     endpoint: "suspension",
     body: { suspend: true },
-    effect: "A pessoa sai de todos os aparelhos e não consegue mais entrar; os links de cadastro de pacientes dela "
-      + "param de funcionar. Os dados e prontuários continuam guardados, sem nenhuma alteração. Enquanto estiver "
-      + "suspensa, ela não acessa os prontuários: use só em caso de fraude ou abuso.",
+    // AD2: suspensão em MODO RESTRITO (ela ainda exporta e encerra a conta).
+    effect: "A pessoa sai de todos os aparelhos. Ao entrar de novo, só consegue exportar os dados (ficha de cada "
+      + "paciente e tudo), cuidar da segurança da conta e encerrá-la; não registra, não agenda e os links de "
+      + "cadastro de pacientes dela param. Nada é apagado. Use só nas hipóteses dos Termos de Uso (fraude, uso "
+      + "por outra pessoa, violação grave ou ordem judicial). Atraso de pagamento não é motivo.",
     reason: { label: "Motivo da suspensão", max: 200, min: 5, required: true, placeholder: "Ex.: uso indevido da conta" },
     submit: "Suspender conta",
     destructive: true,

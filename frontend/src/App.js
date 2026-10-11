@@ -26,6 +26,10 @@ const PatientDetail = lazy(() => import("@/pages/PatientDetail"));
 const Agenda = lazy(() => import("@/pages/Agenda"));
 const Settings = lazy(() => import("@/pages/Settings"));
 const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
+// Análise da administração (AD1): Termos de Uso, públicos como a política.
+const TermsOfUse = lazy(() => import("@/pages/TermsOfUse"));
+// AD2: a tela da conta suspensa (modo restrito), carregada só quando precisa.
+const SuspendedAccount = lazy(() => import("@/components/SuspendedAccount"));
 const Help = lazy(() => import("@/pages/Help"));
 const SimulatedCheckout = lazy(() => import("@/pages/SimulatedCheckout"));
 // Produto (administração): controle das contas (só administradores; ver pages/Admin.js).
@@ -66,13 +70,17 @@ function ProtectedRoute({ children }) {
 
   appMountedRef.current = true;
   const locked = Boolean(user.locked);
+  // Análise da administração (AD2): conta suspensa vê SÓ a tela do modo restrito
+  // (exportar, segurança e encerramento), em qualquer endereço. O servidor recusa
+  // o resto (SUSPENDED_ALLOWED_ROUTES); a tela só não oferece o que não funciona.
+  const content = user.suspended ? <SuspendedAccount /> : children;
   // PRODUTO (bloqueio por inatividade): bloqueio DURANTE o uso. O sistema
   // continua montado por baixo (nada do que estava aberto se perde), mas
   // invisível e `inert`: sem foco de teclado, cliques ou leitor de tela.
   return (
     <IdleLockProvider>
       <div inert={locked} aria-hidden={locked || undefined} className={locked ? "invisible" : undefined}>
-        {children}
+        {content}
       </div>
       {locked && <LockScreen />}
     </IdleLockProvider>
@@ -123,6 +131,7 @@ function AppRouter() {
       <Route path="/redefinir-senha" element={<EmailLinkPassword purpose="password_reset" />} />
       {/* Pública para todos (logado ou não): a política deve poder ser lida antes do aceite. */}
       <Route path="/privacidade" element={<PrivacyPolicy />} />
+      <Route path="/termos" element={<TermsOfUse />} />
       <Route element={<AppBranch />}>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/pacientes" element={<Patients />} />

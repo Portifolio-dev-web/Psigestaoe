@@ -424,23 +424,49 @@ _DUMMY_PASSWORD_HASH = "$2b$12$XB8K8.SvfzFWF1bUeVOQX.NidjFnFzv5OIXghYUeKyKF/F/P5
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "12"))
 
 
-# Produto (administração): conta suspensa. A mensagem só aparece DEPOIS da
-# senha (ou do Google) conferida: quem não sabe a senha continua vendo o
-# "E-mail ou senha inválidos" de sempre e não descobre que a conta existe.
+# ---------------------------------------------------------------------------
+# PRODUTO (análise da administração, AD2): MODO RESTRITO da conta suspensa.
+#
+# Antes, suspensa = ninguém entrava. A psicóloga ficava sem os prontuários
+# (guarda obrigatória, Resolução CFP nº 001/2009) e sem atender os pedidos dos
+# pacientes (LGPD art. 18); a administração, por desenho, também não vê esses
+# dados, e ninguém conseguia atender o paciente.
+# Agora a conta suspensa ENTRA (com senha e duas etapas, como sempre), mas o
+# servidor só libera esta lista FECHADA: exportar (a conta inteira, a ficha de
+# um paciente, a trilha), ver a lista de pacientes para escolher qual exportar,
+# cuidar da segurança da conta e encerrá-la. Qualquer outra rota responde 403
+# `account_suspended`, inclusive as que forem criadas depois: uma rota nova
+# nasce BLOQUEADA aqui (fail-closed), e liberar é uma decisão explícita.
+# A mensagem de suspensão só aparece depois do login (senha certa): quem não
+# sabe a senha não descobre que a conta existe nem que está suspensa.
+# ---------------------------------------------------------------------------
+SUSPENDED_ALLOWED_ROUTES = frozenset({
+    # sessão e aceite dos documentos
+    ("GET", "/api/auth/me"), ("POST", "/api/auth/logout"), ("POST", "/api/auth/accept-terms"),
+    ("POST", "/api/auth/lock"), ("POST", "/api/auth/unlock"), ("POST", "/api/auth/activity"),
+    # segurança da própria conta (senha, duas etapas, aparelhos conectados)
+    ("POST", "/api/auth/password"), ("POST", "/api/auth/mfa/setup"), ("POST", "/api/auth/mfa/enable"),
+    ("POST", "/api/auth/mfa/disable"), ("POST", "/api/auth/mfa/recovery-codes"),
+    ("GET", "/api/auth/sessions"), ("POST", "/api/auth/sessions/{session_id}/end"),
+    ("POST", "/api/auth/sessions/end-others"),
+    # guarda do prontuário e pedidos dos pacientes: achar o paciente e exportar
+    ("GET", "/api/patients"), ("POST", "/api/patients/search"), ("GET", "/api/patients/{pid}/export"),
+    ("GET", "/api/account/export"),
+    # transparência (o que a administração fez) e encerramento da conta (LGPD art. 18)
+    ("GET", "/api/audit"), ("GET", "/api/audit/export"), ("POST", "/api/account/close"),
+})
 SUSPENDED_DETAIL = {
     "code": "account_suspended",
-    "msg": "Esta conta está suspensa. O motivo foi enviado para o seu e-mail; para resolver, "
-           "fale com o suporte do PsiGestão (Ajuda).",
+    "msg": "Sua conta está suspensa: só é possível exportar os dados, cuidar da segurança da conta e "
+           "encerrá-la. O motivo foi enviado para o seu e-mail; para contestar, fale com o suporte (Ajuda).",
 }
 
 
-async def _refuse_if_suspended(db: AsyncSession, user: User, how: str) -> None:
-    """Recusa a entrada de conta suspensa e registra a tentativa na trilha dela."""
-    if user.suspended_at is None:
-        return
-    await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
-                    f"Entrada recusada: conta suspensa ({how})")
-    raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
+def _suspended_route_allowed(request: Request) -> bool:
+    """A rota pedida está na lista do modo restrito? (pelo molde da rota, ex.:
+    /api/patients/{pid}/export, e pelo método; rota sem molde = bloqueada)."""
+    route = request.scope.get("route")
+    return (request.method, getattr(route, "path", "")) in SUSPENDED_ALLOWED_ROUTES
 
 
 async def open_login_session(db: AsyncSession, user: User) -> str:
@@ -450,10 +476,6 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
     da agenda, e a definição de baixo sobrescreveria esta (o mesmo tipo de
     bug corrigido no item 1).
     """
-    # Produto (administração): última barreira. Todos os caminhos de entrada
-    # (senha, duas etapas, Google, cadastro) passam por aqui.
-    if user.suspended_at is not None:
-        raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
     # ESCALA: cada login cria uma linha, e sessões que expiram sem logout
     # ficavam para sempre, fazendo a tabela crescer sem limite. A cada login
     # apagamos as vencidas DESTE usuário (consulta curta, pelo índice user_id).
@@ -472,6 +494,10 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
                        # para o profissional reconhecer (e encerrar) um acesso estranho.
                        device=describe_user_agent(_audit_user_agent.get()), ip_address=_audit_ip.get()))
     await db.commit()
+    # AD2: entrada em conta suspensa fica registrada à parte (a sessão nasce em modo restrito).
+    if user.suspended_at is not None:
+        await log_audit(db, user.user_id, user.email, "entrar", "sessao", user.user_id,
+                        "Entrada em conta suspensa (modo restrito: exportação, segurança e encerramento)")
 
     payload = {
         "sub": user.user_id,
@@ -1370,6 +1396,10 @@ def public_user(u: User) -> dict:
         # Produto (assinatura): situação da conta (teste, assinante, atraso,
         # somente leitura, cortesia), preços e se o pagamento on-line existe.
         "subscription": billing.public_state(u),
+        # AD2: conta suspensa (a tela do modo restrito mostra a data e o motivo,
+        # o mesmo texto que a pessoa recebeu por e-mail). None = conta normal.
+        "suspended": ({"at": _iso(_as_utc(u.suspended_at)), "reason": u.suspended_reason or ""}
+                      if u.suspended_at else None),
         # Produto (administração): mostra "Administração" no menu. A permissão de
         # verdade é conferida em CADA rota /api/admin (get_admin).
         "is_admin": admin_access.is_admin(u),
@@ -1454,9 +1484,11 @@ async def _authenticated_session(request: Request, db: AsyncSession) -> UserSess
     """
     token = request.cookies.get(auth_cookie_name())  # varredura, item 18: nome com __Host- em produção
     sess = await _session_from_token(token, db) if token else None
-    # Produto (administração): conta suspensa não usa sessão nenhuma. A suspensão
-    # já apaga as sessões; esta checagem é a segunda trava.
-    if sess and sess.user and sess.user.suspended_at is None:  # usuário carregado junto (joinedload)
+    if sess and sess.user:  # usuário já carregado junto com a sessão (joinedload)
+        # AD2: conta suspensa só usa as rotas do modo restrito (todas as rotas
+        # com login passam por aqui, inclusive /auth/me, sair e desbloquear).
+        if sess.user.suspended_at is not None and not _suspended_route_allowed(request):
+            raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
         return sess
     raise HTTPException(status_code=401, detail="Usuário não autenticado")
 
@@ -1832,8 +1864,6 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
                             f"Entrada recusada: {reason} ({describe_user_agent(_audit_user_agent.get())})")
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
-    await _refuse_if_suspended(db, user, "senha")  # produto: administração
-
     if user.mfa_enabled_at is not None:
         # Segurança (backlog: MFA): senha certa, mas a sessão só nasce depois
         # do código do aplicativo (POST /auth/login/mfa). Nada de cookie aqui.
@@ -2062,8 +2092,6 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
             detail += "; senha sem e-mail comprovado descartada e sessões anteriores encerradas"
         await log_audit(db, user.user_id, user.email, "vincular", "usuario", user.user_id, detail)
 
-    await _refuse_if_suspended(db, user, "Google")  # produto: administração
-
     # 4. Geração da NOSSA sessão. Nunca dependemos da sessão do Google a longo prazo.
     set_auth_cookie(response, await open_login_session(db, user))
     # Auditoria de login (antes nem o cadastro pelo Google ficava registrado).
@@ -2107,7 +2135,8 @@ async def accept_terms(data: AcceptTermsInput, user: User = Depends(get_current_
     await db.refresh(user)
 
     await log_audit(db, user.user_id, user.email, "aceitar", "termos", user.user_id,
-                    f"Política de Privacidade versão {legal.PRIVACY_POLICY_VERSION}")
+                    # AD1: um aceite cobre os dois documentos (mesma versão).
+                    f"Política de Privacidade e Termos de Uso versão {legal.PRIVACY_POLICY_VERSION}")
     return public_user(user)
 
 @api_router.get("/legal/privacy-policy")
@@ -2115,6 +2144,14 @@ async def get_privacy_policy():
     # Pública (sem login): quem vai se cadastrar precisa poder ler a política
     # ANTES de aceitá-la. Texto e versão vêm de legal.py (fonte única).
     return legal.privacy_policy()
+
+
+@api_router.get("/legal/terms-of-use")
+async def get_terms_of_use():
+    # Análise da administração (AD1): Termos de Uso, públicos como a política
+    # (quem vai se cadastrar lê ANTES de aceitar). Mesma versão da política:
+    # um aceite (POST /auth/accept-terms) cobre os dois documentos.
+    return legal.terms_of_use()
 
 
 @api_router.get("/legal/contact")
@@ -2657,8 +2694,6 @@ async def login_mfa(data: MfaLoginInput, background: BackgroundTasks, response: 
     user = await db.get(User, user_id)
     if user is None or user.closed_at is not None or user.mfa_enabled_at is None:
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
-    # Produto (administração): suspensa entre a senha e o código.
-    await _refuse_if_suspended(db, user, "verificação em duas etapas")
 
     method = await _check_mfa_code(db, user, data.code)
     device = describe_user_agent(_audit_user_agent.get())
@@ -4638,9 +4673,12 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
         subject = "Sua conta foi suspensa"
         lines = ["A sua conta no PsiGestão foi suspensa pela administração.",
                  f"Motivo: {data.reason}",
-                 "Enquanto estiver suspensa, não é possível entrar no sistema e os links de cadastro de pacientes "
-                 "não funcionam. Os seus dados e prontuários continuam guardados, sem nenhuma alteração.",
-                 "Se você acha que houve engano, fale com o suporte."]
+                 # AD2: o que ela ainda pode fazer (modo restrito), e que nada foi apagado.
+                 "Enquanto estiver suspensa, você entra no sistema só para exportar os seus dados e os dos seus "
+                 "pacientes (guarda do prontuário e pedidos dos pacientes), cuidar da segurança da conta ou "
+                 "encerrá-la. Não é possível registrar, agendar nem usar links de cadastro de pacientes. "
+                 "Os seus dados e prontuários continuam guardados, sem nenhuma alteração.",
+                 "Para contestar a suspensão, fale com o suporte (página Ajuda do PsiGestão)."]
     else:
         target.suspended_at = None
         target.suspended_reason = ""

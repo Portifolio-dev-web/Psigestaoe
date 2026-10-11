@@ -226,6 +226,11 @@ export default function Login() {
               implícito não vale como evidência. O aceite explícito acontece no
               cadastro ou na tela de aceite (TermsGate). */}
           <p className="mt-3 text-center text-xs">
+            {/* AD1: os Termos de Uso também ficam a um clique. */}
+            <Link to="/termos" className="text-slate-500 hover:text-[#1E3A8A] hover:underline" data-testid="login-terms-link">
+              Termos de Uso
+            </Link>
+            <span className="mx-2 text-slate-300" aria-hidden="true">·</span>
             <Link to="/privacidade" className="text-slate-500 hover:text-[#1E3A8A] hover:underline" data-testid="login-privacy-link">
               Política de Privacidade
             </Link>

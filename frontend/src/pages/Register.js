@@ -54,7 +54,7 @@ export default function Register() {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!terms) {
-      setTermsError("Para continuar, marque que leu e aceita a Política de Privacidade.");
+      setTermsError("Para continuar, marque que leu e aceita os Termos de Uso e a Política de Privacidade.");
       document.getElementById("terms")?.focus();
       return;
     }
@@ -134,15 +134,21 @@ export default function Register() {
                   existiam. Agora o link abre a política real, em nova aba para não
                   perder o formulário preenchido. O backend registra o aceite com a
                   versão vigente e a data. */}
+              {/* AD1: os Termos de Uso entraram junto (mesma versão, um aceite). */}
               <Label htmlFor="terms" className="text-xs leading-relaxed text-slate-600">
-                Li e aceito a{" "}
+                Li e aceito os{" "}
+                <Link to="/termos" target="_blank" rel="noopener noreferrer"
+                  className="font-medium text-[#1E3A8A] underline underline-offset-2" data-testid="register-terms-link">
+                  Termos de Uso
+                </Link>
+                {" "}e a{" "}
                 <Link to="/privacidade" target="_blank" rel="noopener noreferrer"
                   // Acessibilidade (varredura de UI): link no meio do texto precisa de algo além
                   // da cor (daltonismo, baixa visão): fica sempre sublinhado.
                   className="font-medium text-[#1E3A8A] underline underline-offset-2" data-testid="register-privacy-link">
                   Política de Privacidade
                 </Link>
-                , que explica como o PsiGestão trata os meus dados e os dados dos meus pacientes (LGPD).
+                , que explicam as regras do serviço e como o PsiGestão trata os meus dados e os dos meus pacientes (LGPD).
               </Label>
             </div>
             {/* F1: a mensagem fica aqui, ligada à caixa (aria-describedby), até a pessoa marcar. */}

@@ -278,11 +278,21 @@ Proteções (todas no servidor):
 - a busca vai no corpo de um POST (nome/e-mail fora dos logs de acesso);
 - não dá para suspender nem desconectar a própria conta nem a de outro administrador.
 
-**Suspensão**: encerra todas as sessões, recusa o login (a mensagem só aparece depois da
-senha certa, para não revelar quais contas existem) e desliga os links de cadastro do
-paciente daquela conta. **Os dados e prontuários continuam guardados, sem alteração**;
-reativar devolve tudo como estava. Enquanto suspensa, a psicóloga não acessa os
-prontuários: use só em caso de fraude ou abuso.
+**Suspensão (modo restrito)**: encerra todas as sessões e desliga os links de cadastro do
+paciente daquela conta. A psicóloga continua entrando, mas vê só a tela "Conta suspensa" e
+o servidor libera só uma lista fechada de rotas (`SUSPENDED_ALLOWED_ROUTES` em `server.py`):
+baixar a ficha de um paciente e todos os dados, baixar a trilha, cuidar da segurança da conta
+e encerrá-la. Assim ela cumpre a guarda do prontuário (CFP) e os pedidos dos pacientes (LGPD
+art. 18). Qualquer outra rota responde 403 `account_suspended`, inclusive rotas novas
+(fail-closed). **Nada é apagado**; reativar devolve tudo como estava. As hipóteses de
+suspensão estão nos Termos de Uso (fraude, uso por outra pessoa, violação grave, ordem
+judicial); atraso de pagamento não é uma delas (leva ao somente leitura).
+
+**Documentos legais**: Política de Privacidade (`/privacidade`) e Termos de Uso (`/termos`),
+os dois em `backend/legal.py`, com a **mesma versão** (`PRIVACY_POLICY_VERSION`) e um aceite
+único (data e IP na trilha). Mudou um deles de forma relevante? Mude a versão: todos aceitam
+de novo no próximo acesso. Os textos são modelos fiéis ao sistema e devem ser revisados por
+um advogado antes de valer para clientes pagantes.
 
 ## Backup e a chave de criptografia
 

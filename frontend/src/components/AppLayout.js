@@ -117,10 +117,17 @@ export default function AppLayout() {
         >
           <LogOut className="h-[18px] w-[18px]" strokeWidth={1.6} /> Sair
         </Button>
-        {/* Conformidade: a política fica sempre a um clique (LGPD, art. 9º: acesso facilitado). */}
+        {/* Conformidade: a política fica sempre a um clique (LGPD, art. 9º: acesso facilitado).
+            AD1 + WCAG 2.5.8: com os Termos de Uso, são dois links empilhados; cada um tem
+            24 px de altura (min-h-6), senão os alvos de toque ficam pequenos e colados. */}
         <NavLink to="/privacidade" onClick={() => setOpen(false)}
-          className="mt-2 block px-3 text-[11px] text-blue-200/70 hover:text-white hover:underline">
+          className="mt-2 flex min-h-6 items-center px-3 text-[11px] text-blue-200/70 hover:text-white hover:underline">
           Política de Privacidade
+        </NavLink>
+        {/* AD1: os Termos de Uso, também a um clique. */}
+        <NavLink to="/termos" onClick={() => setOpen(false)}
+          className="flex min-h-6 items-center px-3 text-[11px] text-blue-200/70 hover:text-white hover:underline">
+          Termos de Uso
         </NavLink>
       </div>
     </div>

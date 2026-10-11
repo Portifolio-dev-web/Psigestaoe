@@ -3236,15 +3236,38 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
         assert any(mail.to == "psicologa.comum@example.com" and "Uso indevido da conta" in mail.text
                    for mail in mailer.outbox)
 
-        # Suspensa: sessão aberta morre; login com a senha certa é recusado com o
-        # motivo; senha ERRADA continua com a resposta de sempre (não revela nada).
+        # AD2: suspensa = MODO RESTRITO. A sessão aberta morre; ela entra de novo
+        # (senha certa), mas só exporta, cuida da segurança e encerra a conta.
+        # Senha ERRADA continua com a resposta de sempre (não revela a suspensão).
         assert (await target_client.get("/api/auth/me")).status_code == 401
-        refused = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
-                                                                     "password": "Senha-segura-123"})
-        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "account_suspended"
         wrong = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
                                                                    "password": "Senha-errada-999"})
         assert wrong.status_code == 401 and "suspensa" not in wrong.text
+        login = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                   "password": "Senha-segura-123"})
+        assert login.status_code == 200, login.text
+        me = (await target_client.get("/api/auth/me")).json()
+        assert me["suspended"]["reason"] == "Uso indevido da conta" and me["suspended"]["at"]
+        # Guarda do prontuário e pedidos dos pacientes: acha o paciente e exporta.
+        listed_patients = (await target_client.get("/api/patients")).json()["items"]
+        assert len(listed_patients) == 1
+        pid = listed_patients[0]["id"]
+        pdf = await target_client.get(f"/api/patients/{pid}/export", params={"format": "pdf"})
+        assert pdf.status_code == 200
+        assert (await target_client.get("/api/account/export")).status_code == 200
+        assert (await target_client.get("/api/audit")).status_code == 200
+        # Todo o resto fica bloqueado, inclusive ler a ficha e o painel (lista fechada).
+        for method, path, body in (("POST", "/api/patients", patient_data("Paciente Novo")),
+                                   ("GET", f"/api/patients/{pid}", None),
+                                   ("GET", f"/api/patients/{pid}/records", None),
+                                   ("GET", "/api/dashboard/stats", None),
+                                   ("GET", "/api/sessions", None),
+                                   ("POST", "/api/intake-links", {"label": ""}),
+                                   ("GET", "/api/consent-term", None),
+                                   ("POST", "/api/billing/checkout", {"plan": "monthly"})):
+            blocked = await target_client.request(method, path, json=body)
+            assert blocked.status_code == 403, (path, blocked.status_code, blocked.text)
+            assert blocked.json()["detail"]["code"] == "account_suspended", path
         # O link de cadastro dela para de funcionar (mesma resposta de link inválido).
         async with _patient_client() as patient:
             closed = await patient.post("/api/intake/open", json={"token": token})
@@ -3267,7 +3290,7 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
         logs = (await target_client.get("/api/audit")).json()["items"]
         actions = {log["action"] for log in logs if "administração" in log["detail"]}
         assert {"encerrar_sessoes", "suspender", "reativar"} <= actions
-        assert any(log["detail"] == "Entrada recusada: conta suspensa (senha)" for log in logs)
+        assert any(log["detail"].startswith("Entrada em conta suspensa (modo restrito") for log in logs)
 
 
 # Análise da administração, lote 1 (AD3 a AD6)
@@ -3365,3 +3388,32 @@ async def test_admin_list_views_are_logged_once_per_interval(client, monkeypatch
     details = [log["detail"] for log in logs if log["entity_type"] == "administracao" and log["action"] == "visualizar"]
     assert details.count("Lista de contas consultada") == 1
     assert details.count("Lista de contas consultada (com busca)") == 1
+
+
+
+# Análise da administração, lote 2 (AD1): Termos de Uso e política atualizada
+@pytest.mark.anyio
+async def test_terms_of_use_are_public_and_share_the_policy_version(client):
+    terms = await client.get("/api/legal/terms-of-use")  # sem login: lidos ANTES do aceite
+    assert terms.status_code == 200
+    body = terms.json()
+    assert body["version"] == legal.PRIVACY_POLICY_VERSION  # um aceite cobre os dois
+    titles = [section["title"] for section in body["sections"]]
+    assert "8. Suspensão da conta" in titles and any("operador" in t for t in titles)
+    text_terms = " ".join(p for section in body["sections"] for p in section["paragraphs"])
+    # Fiel ao sistema: preços e prazos da configuração, suspensão em modo restrito.
+    assert f"{billing.TRIAL_DAYS} dias de teste grátis" in text_terms and "R$ 59,00" in text_terms
+    assert "Atraso de pagamento não é motivo de suspensão" in text_terms and "modo restrito" in text_terms
+    assert not re.search(r"\d{3}\.\d{3}\.\d{3}[-.]\d{2}", text_terms)
+
+    policy = (await client.get("/api/legal/privacy-policy")).json()
+    text_policy = " ".join(p for section in policy["sections"] for p in section["paragraphs"])
+    assert any(section["title"] == "8. Administração da plataforma" for section in policy["sections"])
+    assert "não vê nenhum dado de paciente" in text_policy and "envio de e-mail" in text_policy
+    assert "Termos de Uso" in text_policy
+
+    # O aceite registra os dois documentos.
+    await register_account(client, "aceite.termos@example.com")
+    await client.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["action"] == "aceitar" and "Termos de Uso" in log["detail"] for log in logs)

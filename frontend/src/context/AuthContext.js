@@ -38,9 +38,12 @@ export function AuthProvider({ children }) {
     // Produto (assinatura): o servidor recusou uma gravação (somente leitura):
     // a situação da conta mudou (ex.: o teste acabou com a tela aberta).
     window.addEventListener("psi:read-only", checkAuth);
+    // AD2: conta suspensa durante o uso -> recarrega (aparece o modo restrito).
+    window.addEventListener("psi:account-suspended", checkAuth);
     return () => {
       window.removeEventListener("psi:terms-required", checkAuth);
       window.removeEventListener("psi:read-only", checkAuth);
+      window.removeEventListener("psi:account-suspended", checkAuth);
     };
   }, [checkAuth]);
 

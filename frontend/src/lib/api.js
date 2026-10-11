@@ -83,6 +83,11 @@ async function request(method, path, body) {
     // não devem disparar isso.
     // Produto (assinatura): gravação recusada no modo somente leitura. O AuthContext
     // atualiza a situação da conta e o WriteAccessContext explica o motivo.
+    // Análise da administração (AD2): a conta foi suspensa com a tela aberta. O
+    // AuthContext recarrega a conta e a tela do modo restrito aparece sozinha.
+    if (res.status === 403 && data?.detail?.code === "account_suspended") {
+      window.dispatchEvent(new Event("psi:account-suspended"));
+    }
     if (res.status === 402 && data?.detail?.code === "read_only") {
       window.dispatchEvent(new CustomEvent("psi:read-only", { detail: data.detail }));
     }

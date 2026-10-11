@@ -82,6 +82,9 @@ const TOPICS = [
         "Ative a verificação em duas etapas e confira os “Aparelhos conectados”, ambos em Configurações > Minha conta."],
       ["Como baixar os meus dados?",
         "O prontuário de um paciente sai em PDF ou JSON pela ficha (“Exportar prontuário”). Todos os dados da conta: Configurações > Minha conta > “Baixar todos os meus dados (ZIP)”."],
+      // Análise da administração (AD2): o que acontece numa suspensão.
+      ["Minha conta foi suspensa. E agora?",
+        "Você recebeu um e-mail com o motivo. Ao entrar, você continua podendo baixar a ficha de cada paciente e todos os dados, a trilha de auditoria, cuidar da segurança da conta e encerrá-la; nada foi apagado. Para contestar, use o contato do suporte nesta página. As regras estão nos Termos de Uso."],
     ],
   },
 ];
@@ -160,6 +163,10 @@ function ContactCard() {
       )}
       <Link to="/privacidade" className="mt-4 inline-block rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
         Ler a Política de Privacidade
+      </Link>
+      {/* AD1 */}
+      <Link to="/termos" className="ml-4 mt-4 inline-block rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+        Ler os Termos de Uso
       </Link>
     </Card>
   );
