@@ -386,7 +386,8 @@ export default function Patients() {
       {total !== null && patients !== null && (
         <p className="-mt-2 text-sm text-slate-500" role="status" data-testid="patients-total">
           {countLabel(total, showArchived ? "paciente arquivado" : "paciente", showArchived ? "pacientes arquivados" : "pacientes")}
-          {debouncedQuery.trim().length >= 2 ? " encontrados na busca" : ""}
+          {/* Concordância: "1 paciente encontrado", "3 pacientes encontrados". */}
+          {debouncedQuery.trim().length >= 2 ? (total === 1 ? " encontrado na busca" : " encontrados na busca") : ""}
         </p>
       )}
       <PatientContent patients={patients} filtered={filtered} navigate={navigate} showArchived={showArchived}

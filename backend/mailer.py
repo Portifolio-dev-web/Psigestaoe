@@ -235,6 +235,19 @@ def security_notice(to: str, name: str, subject: str, what: str, when: str, wher
     return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
 
 
+def admin_notice(to: str, name: str, subject: str, lines: list[str], support_email: str = "") -> OutgoingEmail:
+    """Produto (administração): a administração mexeu na conta (cortesia, teste,
+    sessões, suspensão). Transparência (LGPD art. 9º): a pessoa sempre fica
+    sabendo o que mudou e por quê, sem precisar abrir o sistema.
+    O remetente costuma ser "não responda": o contato é o do suporte (SUPPORT_EMAIL)."""
+    greeting = _greeting(name)
+    footer = (f"Dúvidas? Escreva para {support_email}." if support_email
+              else f"Dúvidas? Veja os contatos na Ajuda do {APP_NAME} (abre sem login).")
+    text = f"{greeting}\n\n" + "\n\n".join(lines) + f"\n\n{footer}"
+    html = _html(subject, [escape(greeting)] + [escape(line) for line in lines], footer=footer)
+    return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
+
+
 def account_closed(to: str, name: str, deleted: int, retained: int, retained_until: Optional[str]) -> OutgoingEmail:
     greeting = _greeting(name)
     lines = [f"Sua conta no {APP_NAME} foi encerrada. Ninguém consegue mais entrar nela.",

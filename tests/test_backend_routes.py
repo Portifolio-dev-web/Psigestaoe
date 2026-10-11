@@ -3069,3 +3069,202 @@ async def test_intake_maintenance_keeps_incomplete_and_account_close_removes_lin
     assert closed.status_code == 200, closed.text
     async with client.session_factory() as db:
         assert (await db.execute(select(PatientIntake))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Produto: administração (tela /administracao; regras em server.py e admin_access.py)
+# ---------------------------------------------------------------------------
+from contextlib import aclosing  # noqa: E402 (fecha o 2º navegador no fim do bloco)
+
+ADMIN_EMAIL = "dona.sistema@example.com"
+ADMIN_PASSWORD = "Senha-segura-123"
+
+
+async def _admin_setup(client, monkeypatch):
+    """Conta de administração (ADMIN_EMAILS) com duas etapas, e uma psicóloga
+    comum (com 1 paciente), logada num SEGUNDO navegador."""
+    monkeypatch.setenv("ADMIN_EMAILS", f" {ADMIN_EMAIL.upper()} , outra.admin@example.com")
+    target_client = _patient_client()
+    confirm = await register_account(target_client, "psicologa.comum@example.com")
+    assert confirm.status_code == 200
+    created = await target_client.post("/api/patients", json=patient_data("Paciente Sigiloso"))
+    assert created.status_code == 200, created.text
+    target_id = (await target_client.get("/api/auth/me")).json()["user_id"]
+    assert (await register_account(client, ADMIN_EMAIL)).status_code == 200
+    return target_client, target_id
+
+
+async def _admin_action(client, target_id, action, **body):
+    return await client.post(f"/api/admin/users/{target_id}/{action}", json={"confirm": ADMIN_PASSWORD, **body})
+
+
+@pytest.mark.anyio
+async def test_admin_area_is_hidden_and_requires_mfa(client, monkeypatch):
+    """Só ADMIN_EMAILS entra (os outros recebem 404) e só com duas etapas ativa."""
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    async with aclosing(target_client):  # já aberto: só fecha no fim
+        # Psicóloga comum: a área não existe para ela (nem a lista, nem as ações).
+        assert (await target_client.post("/api/admin/users/search", json={})).status_code == 404
+        assert (await target_client.post(f"/api/admin/users/{target_id}/courtesy",
+                                         json={"confirm": "x", "grant": True})).status_code == 404
+        assert (await target_client.get("/api/auth/me")).json()["is_admin"] is False
+
+    me = (await client.get("/api/auth/me")).json()
+    assert me["is_admin"] is True  # e-mail da lista, sem diferença de maiúsculas e espaços
+    denied = await client.post("/api/admin/users/search", json={})
+    assert denied.status_code == 403 and denied.json()["detail"]["code"] == "admin_mfa_required"
+    await _enable_mfa(client)
+    assert (await client.post("/api/admin/users/search", json={})).status_code == 200
+
+    # Tirar o e-mail da variável tira a administração na hora (nada fica no banco).
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    assert (await client.post("/api/admin/users/search", json={})).status_code == 404
+    assert (await client.get("/api/auth/me")).json()["is_admin"] is False
+
+    # Fail-closed: item que não é e-mail impede a subida.
+    monkeypatch.setenv("ADMIN_EMAILS", "dona@example.com,nao-e-email")
+    with pytest.raises(SystemExit):
+        server.admin_access.validate_config("production")
+
+
+@pytest.mark.anyio
+async def test_admin_list_shows_accounts_without_patient_data(client, monkeypatch):
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    await target_client.aclose()
+    await _enable_mfa(client)
+    listed = await client.post("/api/admin/users/search", json={})
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["total"] == 2 and body["summary"]["all"] == 2 and body["summary"]["trialing"] == 2
+    row = next(item for item in body["items"] if item["user_id"] == target_id)
+    assert row["patients"] == 1 and row["status"] == "trialing" and row["last_access_at"]
+    assert row["is_self"] is False and row["is_admin"] is False
+    # Nenhum dado de paciente sai na lista: só o número.
+    assert "Paciente Sigiloso" not in listed.text and "123.456.789-09" not in listed.text
+    own = next(item for item in body["items"] if item["is_self"])
+    assert own["is_admin"] is True and own["mfa_enabled"] is True
+
+    # Busca por nome/e-mail (curingas do LIKE valem como texto) e filtro por situação.
+    found = (await client.post("/api/admin/users/search", json={"q": "COMUM"})).json()
+    assert [item["user_id"] for item in found["items"]] == [target_id]
+    assert (await client.post("/api/admin/users/search", json={"q": "%"})).json()["total"] == 0
+    assert (await client.post("/api/admin/users/search", json={"status": "courtesy"})).json()["total"] == 0
+    assert (await client.post("/api/admin/users/search", json={"status": "qualquer"})).status_code == 422
+
+    # A consulta fica na trilha do administrador (sem o termo buscado).
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["detail"] == "Lista de contas consultada (com busca)" for log in logs)
+    assert not any("COMUM" in (log.get("detail") or "") for log in logs)
+
+
+@pytest.mark.anyio
+async def test_admin_courtesy_trial_and_confirmation(client, monkeypatch):
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    await _enable_mfa(client)
+    mailer.outbox.clear()
+
+    # Sem a senha certa, nada muda (e a tentativa fica na trilha do administrador).
+    wrong = await client.post(f"/api/admin/users/{target_id}/courtesy",
+                              json={"confirm": "senha-errada", "grant": True})
+    assert wrong.status_code == 403 and wrong.json()["detail"]["code"] == "admin_confirm_invalid"
+    async with client.session_factory() as db:
+        assert (await db.get(User, target_id)).courtesy_at is None
+
+    granted = await _admin_action(client, target_id, "courtesy", grant=True, reason="Usuária fundadora")
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["status"] == "courtesy" and granted.json()["courtesy_reason"] == "Usuária fundadora"
+    again = await _admin_action(client, target_id, "courtesy", grant=True)
+    assert again.status_code == 409
+    # Com cortesia, prorrogar o teste não faz sentido.
+    assert (await _admin_action(client, target_id, "trial", days=14)).status_code == 409
+
+    # A psicóloga vê na própria trilha e recebe um e-mail.
+    async with aclosing(target_client):  # já aberto: só fecha no fim
+        me = (await target_client.get("/api/auth/me")).json()
+        assert me["subscription"]["state"] == "courtesy"
+        logs = (await target_client.get("/api/audit")).json()["items"]
+        assert any(log["action"] == "cortesia" and log["detail"] == "Cortesia concedida pela administração (Usuária fundadora)"
+                   for log in logs)
+    assert any(mail.to == "psicologa.comum@example.com" and "cortesia" in mail.text for mail in mailer.outbox)
+
+    assert (await _admin_action(client, target_id, "courtesy", grant=False)).json()["status"] == "trialing"
+
+    # Prorrogar o teste: conta a partir do fim atual; só valores da lista.
+    async with client.session_factory() as db:
+        before = billing.trial_end(await db.get(User, target_id))
+    extended = await _admin_action(client, target_id, "trial", days=30, reason="Pediu mais tempo")
+    assert extended.status_code == 200, extended.text
+    async with client.session_factory() as db:
+        after = billing.trial_end(await db.get(User, target_id))
+    assert abs((after - before) - timedelta(days=30)) < timedelta(minutes=1)
+    assert (await _admin_action(client, target_id, "trial", days=1000)).status_code == 422
+    # Quem já teve assinatura paga não volta ao teste (a cortesia é o caminho).
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.user_id == target_id).values(
+            paid_until=datetime.now(timezone.utc) - timedelta(days=40)))
+        await db.commit()
+    refused = await _admin_action(client, target_id, "trial", days=7)
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "had_subscription"
+
+
+@pytest.mark.anyio
+async def test_admin_end_sessions_and_suspension(client, monkeypatch):
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    await _enable_mfa(client)
+    own_id = (await client.get("/api/auth/me")).json()["user_id"]
+    async with aclosing(target_client):  # já aberto: só fecha no fim
+        intake = await target_client.post("/api/intake-links", json={"label": ""})
+        token = intake.json()["url"].split("#token=", 1)[1]
+
+        # Encerrar sessões: a psicóloga cai fora de todos os aparelhos.
+        ended = await _admin_action(client, target_id, "end-sessions", reason="Suspeita de senha vazada")
+        assert ended.status_code == 200, ended.text
+        assert (await target_client.get("/api/auth/me")).status_code == 401
+        login = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                   "password": "Senha-segura-123"})
+        assert login.status_code == 200
+
+        # Suspender exige motivo; a própria conta e outra administração são protegidas.
+        assert (await _admin_action(client, target_id, "suspension", suspend=True)).status_code == 422
+        assert (await _admin_action(client, own_id, "suspension", suspend=True,
+                                    reason="Teste de proteção")).json()["detail"]["code"] == "admin_self"
+        assert (await _admin_action(client, own_id, "end-sessions")).json()["detail"]["code"] == "admin_self"
+        mailer.outbox.clear()
+        suspended = await _admin_action(client, target_id, "suspension", suspend=True, reason="Uso indevido da conta")
+        assert suspended.status_code == 200, suspended.text
+        assert suspended.json()["status"] == "suspended"
+        assert any(mail.to == "psicologa.comum@example.com" and "Uso indevido da conta" in mail.text
+                   for mail in mailer.outbox)
+
+        # Suspensa: sessão aberta morre; login com a senha certa é recusado com o
+        # motivo; senha ERRADA continua com a resposta de sempre (não revela nada).
+        assert (await target_client.get("/api/auth/me")).status_code == 401
+        refused = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                     "password": "Senha-segura-123"})
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "account_suspended"
+        wrong = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                   "password": "Senha-errada-999"})
+        assert wrong.status_code == 401 and "suspensa" not in wrong.text
+        # O link de cadastro dela para de funcionar (mesma resposta de link inválido).
+        async with _patient_client() as patient:
+            closed = await patient.post("/api/intake/open", json={"token": token})
+            assert closed.status_code == 410 and closed.json()["detail"]["code"] == "intake_invalid"
+        # Os dados continuam guardados.
+        async with client.session_factory() as db:
+            kept = (await db.execute(select(Patient).where(Patient.owner_id == target_id))).scalars().all()
+            assert len(kept) == 1
+
+        listed = (await client.post("/api/admin/users/search", json={"status": "suspended"})).json()
+        assert [item["user_id"] for item in listed["items"]] == [target_id]
+        assert listed["items"][0]["suspended_reason"] == "Uso indevido da conta"
+
+        # Reativar devolve o acesso.
+        reactivated = await _admin_action(client, target_id, "suspension", suspend=False)
+        assert reactivated.status_code == 200 and reactivated.json()["status"] == "trialing"
+        login = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                   "password": "Senha-segura-123"})
+        assert login.status_code == 200
+        logs = (await target_client.get("/api/audit")).json()["items"]
+        actions = {log["action"] for log in logs if "administração" in log["detail"]}
+        assert {"encerrar_sessoes", "suspender", "reativar"} <= actions
+        assert any(log["detail"] == "Entrada recusada: conta suspensa (senha)" for log in logs)

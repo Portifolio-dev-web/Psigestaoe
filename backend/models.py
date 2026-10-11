@@ -165,6 +165,15 @@ class User(Base):
     billing_subscription_id = Column(String, nullable=True, index=True)
     billing_updated_at = Column(DateTime(timezone=True), nullable=True)
 
+    # PRODUTO (administração): conta suspensa pela tela de administração
+    # (fraude, abuso). Suspensa, ninguém entra nela (todas as sessões são
+    # encerradas e o login é recusado) e os links de cadastro do paciente param
+    # de funcionar. Os dados continuam guardados, sem alteração: reativar
+    # devolve tudo como estava. O motivo vai no e-mail que a pessoa recebe.
+    # Migração: alembic/versions/20261010_admin.py
+    suspended_at = Column(DateTime(timezone=True), nullable=True)
+    suspended_reason = Column(String, default="")
+
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     # Relacionamentos

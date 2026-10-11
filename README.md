@@ -226,7 +226,8 @@ A situação é **calculada pelas datas** (fim do teste, "pago até", início do
 aviso do meio de pagamento, a conta entra sozinha na tolerância e depois no somente
 leitura.
 
-**Cortesia** (só pela linha de comando do servidor, registrada na trilha da conta):
+**Cortesia**: pela tela **Administração** (abaixo) ou pela linha de comando do servidor
+(as duas registram na trilha da conta):
 
 ```
 docker compose exec api python manage_billing.py cortesia conceder fulana@exemplo.com --motivo "Usuária fundadora"
@@ -243,6 +244,38 @@ em `billing_provider()` no `server.py`. Os avisos chegam em
 `POST /api/webhook/billing/<meio>`; cada aviso vale uma vez (tabela `billing_events`).
 Ao contratar o meio real, inclua-o na Política de Privacidade (`legal.py`) como
 suboperador.
+
+## Administração (controle das contas)
+
+Tela **Administração** (`/administracao`): lista as contas das psicólogas com a situação
+da assinatura, o número de pacientes, o último acesso e se usam duas etapas, com busca e
+filtro por situação. Ações: **conceder/revogar cortesia**, **prorrogar o teste grátis**
+(7 a 90 dias), **encerrar as sessões** (desconecta de todos os aparelhos) e
+**suspender/reativar** a conta.
+
+Para liberar, ponha o seu e-mail em `ADMIN_EMAILS` (no `.env`; vários separados por
+vírgula) e reinicie a API (`docker compose up -d api`). Depois entre com essa conta,
+ative a verificação em duas etapas (Configurações → Minha conta) e o item
+**Administração** aparece no menu.
+
+Proteções (todas no servidor):
+
+- quem é administrador vem **só** de `ADMIN_EMAILS`, nunca do banco nem de uma rota; a
+  conta precisa ter o e-mail comprovado. Quem não é administrador recebe 404;
+- **verificação em duas etapas obrigatória** e **a senha de novo a cada ação** (quem só
+  entra pelo Google confirma com o código do aplicativo), com limite de tentativas;
+- **nenhum dado de paciente** na tela: só o número de pacientes de cada conta;
+- tudo na trilha de auditoria **das duas contas** (a afetada vê "pela administração";
+  a do administrador guarda quem fez, inclusive cada consulta à lista), e a pessoa
+  recebe um **e-mail** explicando a mudança (com o motivo, na suspensão);
+- a busca vai no corpo de um POST (nome/e-mail fora dos logs de acesso);
+- não dá para suspender nem desconectar a própria conta nem a de outro administrador.
+
+**Suspensão**: encerra todas as sessões, recusa o login (a mensagem só aparece depois da
+senha certa, para não revelar quais contas existem) e desliga os links de cadastro do
+paciente daquela conta. **Os dados e prontuários continuam guardados, sem alteração**;
+reativar devolve tudo como estava. Enquanto suspensa, a psicóloga não acessa os
+prontuários: use só em caso de fraude ou abuso.
 
 ## Backup e a chave de criptografia
 

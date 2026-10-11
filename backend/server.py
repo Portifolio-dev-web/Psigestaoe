@@ -39,7 +39,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
-from sqlalchemy import delete, desc, exists, func, select, text, tuple_, update
+from sqlalchemy import delete, desc, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -48,6 +48,7 @@ from xml.sax.saxutils import escape
 
 import legal
 import billing  # produto: assinatura (regras em billing.py)
+import admin_access  # produto: administração (quem é administrador: ADMIN_EMAILS)
 import mailer
 import observability
 import totp
@@ -363,6 +364,8 @@ require_shared_rate_limit(ENVIRONMENT)
 # Produto (assinatura): configuração inválida, ou pagamento SIMULADO em
 # produção (liberaria assinaturas sem cobrar), impede a subida.
 billing.validate_config(ENVIRONMENT)
+# Produto (administração): ADMIN_EMAILS com algo que não é e-mail impede a subida.
+admin_access.validate_config(ENVIRONMENT)
 
 # Aviso de conformidade: dados do controlador/encarregado em branco na política.
 legal.warn_if_incomplete(ENVIRONMENT)
@@ -419,6 +422,25 @@ _DUMMY_PASSWORD_HASH = "$2b$12$XB8K8.SvfzFWF1bUeVOQX.NidjFnFzv5OIXghYUeKyKF/F/P5
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "12"))
 
 
+# Produto (administração): conta suspensa. A mensagem só aparece DEPOIS da
+# senha (ou do Google) conferida: quem não sabe a senha continua vendo o
+# "E-mail ou senha inválidos" de sempre e não descobre que a conta existe.
+SUSPENDED_DETAIL = {
+    "code": "account_suspended",
+    "msg": "Esta conta está suspensa. O motivo foi enviado para o seu e-mail; para resolver, "
+           "fale com o suporte do PsiGestão (Ajuda).",
+}
+
+
+async def _refuse_if_suspended(db: AsyncSession, user: User, how: str) -> None:
+    """Recusa a entrada de conta suspensa e registra a tentativa na trilha dela."""
+    if user.suspended_at is None:
+        return
+    await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
+                    f"Entrada recusada: conta suspensa ({how})")
+    raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
+
+
 async def open_login_session(db: AsyncSession, user: User) -> str:
     """Cria a sessão no banco e devolve o JWT assinado que aponta para ela.
 
@@ -426,6 +448,10 @@ async def open_login_session(db: AsyncSession, user: User) -> str:
     da agenda, e a definição de baixo sobrescreveria esta (o mesmo tipo de
     bug corrigido no item 1).
     """
+    # Produto (administração): última barreira. Todos os caminhos de entrada
+    # (senha, duas etapas, Google, cadastro) passam por aqui.
+    if user.suspended_at is not None:
+        raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
     # ESCALA: cada login cria uma linha, e sessões que expiram sem logout
     # ficavam para sempre, fazendo a tabela crescer sem limite. A cada login
     # apagamos as vencidas DESTE usuário (consulta curta, pelo índice user_id).
@@ -1342,6 +1368,9 @@ def public_user(u: User) -> dict:
         # Produto (assinatura): situação da conta (teste, assinante, atraso,
         # somente leitura, cortesia), preços e se o pagamento on-line existe.
         "subscription": billing.public_state(u),
+        # Produto (administração): mostra "Administração" no menu. A permissão de
+        # verdade é conferida em CADA rota /api/admin (get_admin).
+        "is_admin": admin_access.is_admin(u),
         "has_password": bool(u.password_hash),
         # Segurança (backlog): verificação em duas etapas e e-mail comprovado.
         "mfa_enabled": u.mfa_enabled_at is not None,
@@ -1423,7 +1452,9 @@ async def _authenticated_session(request: Request, db: AsyncSession) -> UserSess
     """
     token = request.cookies.get(auth_cookie_name())  # varredura, item 18: nome com __Host- em produção
     sess = await _session_from_token(token, db) if token else None
-    if sess and sess.user:  # usuário já carregado junto com a sessão (joinedload)
+    # Produto (administração): conta suspensa não usa sessão nenhuma. A suspensão
+    # já apaga as sessões; esta checagem é a segunda trava.
+    if sess and sess.user and sess.user.suspended_at is None:  # usuário carregado junto (joinedload)
         return sess
     raise HTTPException(status_code=401, detail="Usuário não autenticado")
 
@@ -1799,6 +1830,8 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
                             f"Entrada recusada: {reason} ({describe_user_agent(_audit_user_agent.get())})")
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
+    await _refuse_if_suspended(db, user, "senha")  # produto: administração
+
     if user.mfa_enabled_at is not None:
         # Segurança (backlog: MFA): senha certa, mas a sessão só nasce depois
         # do código do aplicativo (POST /auth/login/mfa). Nada de cookie aqui.
@@ -2026,6 +2059,8 @@ async def google_auth(data: GoogleAuthInput, response: Response, db: AsyncSessio
         if password_discarded:
             detail += "; senha sem e-mail comprovado descartada e sessões anteriores encerradas"
         await log_audit(db, user.user_id, user.email, "vincular", "usuario", user.user_id, detail)
+
+    await _refuse_if_suspended(db, user, "Google")  # produto: administração
 
     # 4. Geração da NOSSA sessão. Nunca dependemos da sessão do Google a longo prazo.
     set_auth_cookie(response, await open_login_session(db, user))
@@ -2457,15 +2492,21 @@ async def billing_webhook(request: Request, provider_name: str = PathParam(max_l
     return {"ok": True}
 
 
+def _apply_courtesy(user: User, granted: bool, reason: str) -> str:
+    """Liga/desliga a cortesia (comando do servidor e tela de administração)."""
+    reason = (reason or "").strip()[:120]
+    user.courtesy_at = now_utc() if granted else None
+    user.courtesy_reason = reason if granted else ""
+    return reason
+
+
 async def set_courtesy(db: AsyncSession, email: str, granted: bool, reason: str = "") -> dict:
     """Cortesia (manage_billing.py): acesso completo sem cobrança, até ser revogada.
     Só pelo servidor, com registro na trilha da própria conta."""
     user = (await db.execute(select(User).where(func.lower(User.email) == email.strip().lower()))).scalar_one_or_none()
     if user is None:
         raise LookupError(f"Nenhuma conta com o e-mail {email}.")
-    reason = (reason or "").strip()[:120]
-    user.courtesy_at = now_utc() if granted else None
-    user.courtesy_reason = reason if granted else ""
+    reason = _apply_courtesy(user, granted, reason)
     await db.commit()
     await db.refresh(user)
     detail = ("Cortesia concedida" + (f" ({reason})" if reason else "")) if granted else "Cortesia revogada"
@@ -2614,6 +2655,8 @@ async def login_mfa(data: MfaLoginInput, background: BackgroundTasks, response: 
     user = await db.get(User, user_id)
     if user is None or user.closed_at is not None or user.mfa_enabled_at is None:
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
+    # Produto (administração): suspensa entre a senha e o código.
+    await _refuse_if_suspended(db, user, "verificação em duas etapas")
 
     method = await _check_mfa_code(db, user, data.code)
     device = describe_user_agent(_audit_user_agent.get())
@@ -3889,7 +3932,9 @@ async def _intake_by_token(db: AsyncSession, token: str) -> tuple:
     intake = (await db.execute(select(PatientIntake).where(
         PatientIntake.token_hash == hash_token(token)))).scalar_one_or_none()
     owner = await db.get(User, intake.owner_id) if intake else None
-    if intake is None or intake.revoked_at or owner is None or owner.closed_at is not None:
+    # Produto (administração): conta suspensa também desliga os links dela.
+    if (intake is None or intake.revoked_at or owner is None or owner.closed_at is not None
+            or owner.suspended_at is not None):
         raise HTTPException(status_code=410, detail=INTAKE_INVALID)
     return intake, owner
 
@@ -4161,6 +4206,345 @@ async def intake_submit(data: IntakeSubmitInput, db: AsyncSession = Depends(get_
         await log_audit(db, owner.user_id, INTAKE_ACTOR, consent_action, "paciente", patient.id,
                         "Termo de consentimento registrado pelo paciente (link de cadastro)")
     return {"ok": True, "already": False}
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO: ADMINISTRAÇÃO (tela /administracao no frontend)
+# ---------------------------------------------------------------------------
+# Quem administra o PsiGestão controla as contas das psicólogas: cortesia,
+# prorrogar o teste grátis, encerrar as sessões e suspender/reativar.
+# Proteções (todas aqui no servidor; a tela só mostra):
+#   1. quem é administrador vem da configuração do SERVIDOR (ADMIN_EMAILS,
+#      admin_access.py), nunca do banco nem de uma rota;
+#   2. verificação em duas etapas OBRIGATÓRIA para usar a administração;
+#   3. CADA ação pede de novo a senha (ou, para quem só entra pelo Google, o
+#      código do aplicativo): um computador esquecido aberto não basta, e há
+#      limite de tentativas;
+#   4. NENHUM dado de paciente: a lista mostra a conta e só o NÚMERO de pacientes;
+#   5. tudo na trilha de auditoria, nas DUAS contas: a afetada vê o que mudou
+#      (como "administração do PsiGestão") e a do administrador guarda quem fez;
+#      e a pessoa recebe um e-mail explicando a mudança;
+#   6. quem não é administrador recebe 404: a área não se anuncia;
+#   7. administrador não suspende nem desconecta a própria conta nem a de outro
+#      administrador (evita trancar o sistema por engano ou por conta invadida).
+# ---------------------------------------------------------------------------
+ADMIN_ACTOR = "administração do PsiGestão"  # como a ação aparece na trilha da conta afetada
+ADMIN_PAGE_SIZE = 25
+ADMIN_TRIAL_DAYS = (7, 14, 30, 60, 90)
+# A situação da assinatura é CALCULADA (billing.access_state), então o filtro por
+# situação roda aqui, sobre as contas carregadas. Folgado para o tamanho do
+# produto; acima disso a lista considera as contas mais recentes.
+ADMIN_MAX_ACCOUNTS = 5000
+ADMIN_STATUSES = ("all", "trialing", "active", "past_due", "read_only", "courtesy", "suspended")
+ADMIN_NOT_FOUND = "Não encontrado."
+ADMIN_MFA_REQUIRED = {
+    "code": "admin_mfa_required",
+    "msg": "Ative a verificação em duas etapas (Configurações > Minha conta) para usar a administração.",
+}
+
+
+def _clean_admin_text(value: str) -> str:
+    """Motivo digitado pelo administrador: sem caractere nulo e numa linha só
+    (vai para o e-mail e para a trilha)."""
+    value = (value or "").strip()
+    if "\x00" in value:
+        raise ValueError("Texto com caractere inválido.")
+    return " ".join(value.split())
+
+
+class AdminConfirmInput(BaseModel):
+    # Confirmação de CADA ação: a senha atual do administrador (ou, para quem
+    # só entra pelo Google, o código de 6 dígitos do aplicativo autenticador).
+    confirm: str = Field(min_length=1, max_length=128)
+
+
+class AdminReasonInput(AdminConfirmInput):
+    reason: str = Field(default="", max_length=200)
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        return _clean_admin_text(value)
+
+
+class AdminCourtesyInput(AdminReasonInput):
+    grant: bool
+
+
+class AdminTrialInput(AdminReasonInput):
+    days: int
+
+    @field_validator("days")
+    @classmethod
+    def allowed_days(cls, value: int) -> int:
+        if value not in ADMIN_TRIAL_DAYS:
+            raise ValueError("Escolha 7, 14, 30, 60 ou 90 dias.")
+        return value
+
+
+class AdminSuspensionInput(AdminReasonInput):
+    suspend: bool
+
+    @model_validator(mode="after")
+    def reason_when_suspending(self):
+        if self.suspend and len(self.reason) < 5:
+            raise ValueError("Escreva o motivo da suspensão (a pessoa recebe por e-mail).")
+        return self
+
+
+async def get_admin(user: User = Depends(get_active_user)) -> User:
+    """Administrador (ADMIN_EMAILS) com a verificação em duas etapas ativa."""
+    if not admin_access.is_admin(user):
+        raise HTTPException(status_code=404, detail=ADMIN_NOT_FOUND)
+    if user.mfa_enabled_at is None:
+        raise HTTPException(status_code=403, detail=ADMIN_MFA_REQUIRED)
+    return user
+
+
+async def _confirm_admin(db: AsyncSession, admin: User, confirm: str) -> None:
+    """Confere a senha (ou o código do aplicativo) antes de CADA ação.
+    10 tentativas a cada 15 min por administrador; cada erro fica na trilha."""
+    await enforce(f"admin-confirm:{admin.user_id}", 10, 900)
+    if admin.password_hash:
+        ok = await verify_password_async(confirm, admin.password_hash)
+    else:
+        ok = await _check_mfa_code(db, admin, confirm.strip()) is not None
+    if not ok:
+        await log_audit(db, admin.user_id, admin.email, "admin_confirmacao_falha", "administracao", admin.user_id,
+                        "Ação de administração recusada: confirmação incorreta")
+        raise HTTPException(status_code=403, detail={
+            "code": "admin_confirm_invalid",
+            "msg": ("Senha incorreta." if admin.password_hash else "Código incorreto.") + " Nada foi alterado."})
+
+
+async def _admin_target(db: AsyncSession, user_id: str) -> User:
+    target = await db.get(User, user_id)
+    if target is None or target.closed_at is not None:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    return target
+
+
+def _admin_protected(admin: User, target: User, own_msg: str) -> None:
+    """Suspender e desconectar não valem para a própria conta nem para outro administrador."""
+    if target.user_id == admin.user_id:
+        raise HTTPException(status_code=409, detail={"code": "admin_self", "msg": own_msg})
+    if admin_access.is_admin(target):
+        raise HTTPException(status_code=409, detail={
+            "code": "admin_protected",
+            "msg": "Esta é uma conta de administração. Para mexer nela, tire o e-mail de ADMIN_EMAILS no servidor."})
+
+
+async def _admin_stats(db: AsyncSession, user_ids: list) -> tuple:
+    """Número de pacientes (sem os anonimizados) e o último acesso de cada conta.
+    Só CONTAGENS e datas: nenhum dado de paciente sai daqui."""
+    if not user_ids:
+        return {}, {}
+    counts = dict((await db.execute(
+        select(Patient.owner_id, func.count()).where(Patient.owner_id.in_(user_ids), Patient.anonymized == False)  # noqa: E712
+        .group_by(Patient.owner_id))).all())
+    logins = dict((await db.execute(
+        select(AuditLog.owner_id, func.max(AuditLog.timestamp)).where(
+            AuditLog.owner_id.in_(user_ids), AuditLog.action == "entrar").group_by(AuditLog.owner_id))).all())
+    activity = dict((await db.execute(
+        select(UserSession.user_id, func.max(UserSession.last_activity_at)).where(
+            UserSession.user_id.in_(user_ids)).group_by(UserSession.user_id))).all())
+    last = {uid: max((d for d in (_as_utc(logins.get(uid)), _as_utc(activity.get(uid))) if d), default=None)
+            for uid in user_ids}
+    return counts, last
+
+
+def _admin_account(user: User, admin: User, patients: int, last_access, now: Optional[datetime] = None) -> dict:
+    """Uma linha da lista da administração (sem nada de paciente além do número)."""
+    state = billing.access_state(user, now)
+    return {
+        "user_id": user.user_id,
+        "name": user.name or "",
+        "email": user.email,
+        "created_at": _iso(_as_utc(user.created_at)),
+        "last_access_at": _iso(last_access),
+        "patients": int(patients or 0),
+        "mfa_enabled": user.mfa_enabled_at is not None,
+        "email_verified": user.email_verified_at is not None,
+        "status": "suspended" if user.suspended_at else state["state"],
+        "subscription": {key: state[key] for key in (
+            "state", "plan", "trial_ends_at", "paid_until", "days_left", "grace_ends_at", "reason",
+            "cancel_at_period_end")},
+        "courtesy_reason": user.courtesy_reason or "",
+        "has_paid": user.paid_until is not None,
+        "suspended_at": _iso(_as_utc(user.suspended_at)),
+        "suspended_reason": user.suspended_reason or "",
+        "is_admin": admin_access.is_admin(user),
+        "is_self": user.user_id == admin.user_id,
+    }
+
+
+async def _admin_done(db: AsyncSession, background: BackgroundTasks, admin: User, target: User, *, action: str,
+                      entity: str, detail: str, subject: str, lines: list) -> dict:
+    """Depois de uma ação: trilha das duas contas, e-mail à pessoa e a linha atualizada."""
+    await log_audit(db, target.user_id, ADMIN_ACTOR, action, entity, target.user_id, detail)
+    await log_audit(db, admin.user_id, admin.email, action, "administracao", target.user_id, detail)
+    background.add_task(mailer.send_email, mailer.admin_notice(
+        target.email, target.name or "", subject, lines, legal.contact_info()["support_email"]))
+    counts, last = await _admin_stats(db, [target.user_id])
+    return _admin_account(target, admin, counts.get(target.user_id, 0), last.get(target.user_id))
+
+
+def _br_day(value: datetime) -> str:
+    return _as_utc(value).astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y")
+
+
+class AdminListInput(BaseModel):
+    q: str = Field(default="", max_length=120)
+    status: str = Field(default="all", max_length=20)
+    page: int = Field(default=1, ge=1, le=1000)
+
+
+# POST (e não GET com ?q=): a busca leva nome ou e-mail de uma pessoa, e a URL
+# completa fica nos logs do proxy/servidor. Mesmo motivo de /patients/search.
+@api_router.post("/admin/users/search", dependencies=[Depends(rate_limit("admin-read", 60, 60))])
+async def admin_list_users(data: AdminListInput, admin: User = Depends(get_admin),
+                           db: AsyncSession = Depends(get_db)):
+    """Contas (sem as encerradas), das mais novas para as mais antigas, com busca
+    por nome ou e-mail e filtro por situação. `summary`: quantas há em cada situação."""
+    q, state_filter, page = data.q, data.status, data.page
+    if state_filter not in ADMIN_STATUSES:
+        raise HTTPException(status_code=422, detail="Filtro de situação inválido.")
+    stmt = select(User).where(User.closed_at.is_(None))
+    term = " ".join(q.split()).lower()
+    if term:
+        # Curingas do LIKE digitados na busca valem como texto.
+        pattern = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        stmt = stmt.where(or_(func.lower(User.email).like(pattern, escape="\\"),
+                              func.lower(func.coalesce(User.name, "")).like(pattern, escape="\\")))
+    users = (await db.execute(stmt.order_by(desc(User.created_at)).limit(ADMIN_MAX_ACCOUNTS))).scalars().all()
+    now = now_utc()
+    status_of = {u.user_id: ("suspended" if u.suspended_at else billing.access_state(u, now)["state"]) for u in users}
+    summary = {key: 0 for key in ADMIN_STATUSES}
+    summary["all"] = len(users)
+    for value in status_of.values():
+        summary[value] = summary.get(value, 0) + 1
+    if state_filter != "all":
+        users = [u for u in users if status_of[u.user_id] == state_filter]
+    total = len(users)
+    pages = max(1, -(-total // ADMIN_PAGE_SIZE))
+    page = min(page, pages)
+    page_users = users[(page - 1) * ADMIN_PAGE_SIZE: page * ADMIN_PAGE_SIZE]
+    counts, last = await _admin_stats(db, [u.user_id for u in page_users])
+    # LGPD (art. 37): consultar dados das contas é tratamento; fica na trilha do
+    # administrador (sem o termo buscado, que pode ser um nome).
+    await log_audit(db, admin.user_id, admin.email, "visualizar", "administracao", admin.user_id,
+                    "Lista de contas consultada" + (" (com busca)" if term else ""))
+    return {
+        "items": [_admin_account(u, admin, counts.get(u.user_id, 0), last.get(u.user_id), now) for u in page_users],
+        "total": total, "page": page, "pages": pages, "page_size": ADMIN_PAGE_SIZE, "summary": summary,
+        "trial_days_options": list(ADMIN_TRIAL_DAYS),
+    }
+
+
+@api_router.post("/admin/users/{user_id}/courtesy", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
+async def admin_courtesy(data: AdminCourtesyInput, background: BackgroundTasks, user_id: str = PathParam(max_length=40),
+                         admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
+    """Concede ou revoga a cortesia (acesso completo, sem cobrança, até ser revogada)."""
+    await _confirm_admin(db, admin, data.confirm)
+    target = await _admin_target(db, user_id)
+    if data.grant == (target.courtesy_at is not None):
+        raise HTTPException(status_code=409, detail={"code": "no_change", "msg": (
+            "Esta conta já tem cortesia." if data.grant else "Esta conta não tem cortesia.")})
+    reason = _apply_courtesy(target, data.grant, data.reason)
+    await db.commit()
+    await db.refresh(target)
+    if data.grant:
+        detail = "Cortesia concedida pela administração" + (f" ({reason})" if reason else "")
+        lines = ["A sua conta no PsiGestão recebeu acesso de cortesia: todos os recursos liberados, sem cobrança."]
+        subject = "Cortesia liberada"
+    else:
+        detail = "Cortesia revogada pela administração" + (f" ({data.reason})" if data.reason else "")
+        lines = ["A cortesia da sua conta no PsiGestão foi encerrada. Agora valem as regras normais da assinatura: "
+                 "sem um plano ativo, a conta fica em modo somente leitura (você continua vendo e exportando tudo)."]
+        subject = "Cortesia encerrada"
+    return await _admin_done(db, background, admin, target, action="cortesia", entity="assinatura", detail=detail,
+                             subject=subject, lines=lines)
+
+
+@api_router.post("/admin/users/{user_id}/trial", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
+async def admin_extend_trial(data: AdminTrialInput, background: BackgroundTasks, user_id: str = PathParam(max_length=40),
+                             admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
+    """Mais dias de teste grátis, contados do fim atual (ou de hoje, se já acabou)."""
+    await _confirm_admin(db, admin, data.confirm)
+    target = await _admin_target(db, user_id)
+    if target.courtesy_at is not None:
+        raise HTTPException(status_code=409, detail={"code": "no_change",
+                                                     "msg": "Esta conta tem cortesia: prorrogar o teste não muda nada."})
+    if target.paid_until is not None:
+        # billing.access_state: o teste só vale para quem nunca teve período pago.
+        raise HTTPException(status_code=409, detail={"code": "had_subscription", "msg": (
+            "Esta conta já teve assinatura paga, e o teste grátis não vale mais para ela. "
+            "Se quiser liberar sem cobrança, use a cortesia.")})
+    target.trial_ends_at = max(now_utc(), billing.trial_end(target)) + timedelta(days=data.days)
+    await db.commit()
+    await db.refresh(target)
+    until = _br_day(target.trial_ends_at)
+    detail = f"Teste grátis prorrogado pela administração por {data.days} dias (até {until})" + (f": {data.reason}" if data.reason else "")
+    return await _admin_done(db, background, admin, target, action="prorrogar_teste", entity="assinatura",
+                             detail=detail, subject="Teste grátis prorrogado",
+                             lines=[f"O seu teste grátis no PsiGestão foi prorrogado por {data.days} dias: "
+                                    f"agora vai até {until}. Aproveite!"])
+
+
+@api_router.post("/admin/users/{user_id}/end-sessions", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
+async def admin_end_sessions(data: AdminReasonInput, background: BackgroundTasks, user_id: str = PathParam(max_length=40),
+                             admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
+    """Desconecta a conta de todos os aparelhos (ex.: suspeita de senha vazada)."""
+    await _confirm_admin(db, admin, data.confirm)
+    target = await _admin_target(db, user_id)
+    _admin_protected(admin, target, "Para a sua própria conta, use Configurações > Minha conta > "
+                                    "Sair dos outros dispositivos.")
+    ended = await end_login_sessions(db, target)
+    detail = (f"Sessões encerradas pela administração ({ended} aparelho{'s' if ended != 1 else ''})"
+              + (f": {data.reason}" if data.reason else ""))
+    lines = ["A administração do PsiGestão desconectou a sua conta de todos os aparelhos. "
+             "Para continuar, entre de novo com a sua senha."]
+    if data.reason:
+        lines.append(f"Motivo: {data.reason}")
+    lines.append("Se você não reconhece algum acesso recente, troque a senha em Configurações > Minha conta.")
+    return await _admin_done(db, background, admin, target, action="encerrar_sessoes", entity="usuario",
+                             detail=detail, subject="Sua conta foi desconectada", lines=lines)
+
+
+@api_router.post("/admin/users/{user_id}/suspension", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
+async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTasks, user_id: str = PathParam(max_length=40),
+                           admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
+    """Suspende (motivo obrigatório) ou reativa a conta. Suspensa: sai de todos os
+    aparelhos, não entra mais e os links de cadastro dela param. Os dados ficam
+    guardados, sem alteração (guarda do prontuário, CFP)."""
+    await _confirm_admin(db, admin, data.confirm)
+    target = await _admin_target(db, user_id)
+    _admin_protected(admin, target, "Você não pode suspender a própria conta.")
+    if data.suspend == (target.suspended_at is not None):
+        raise HTTPException(status_code=409, detail={"code": "no_change", "msg": (
+            "Esta conta já está suspensa." if data.suspend else "Esta conta não está suspensa.")})
+    if data.suspend:
+        target.suspended_at = now_utc()
+        target.suspended_reason = data.reason
+        await db.commit()
+        ended = await end_login_sessions(db, target)
+        detail = f"Conta suspensa pela administração ({ended} sessão(ões) encerrada(s)): {data.reason}"
+        subject = "Sua conta foi suspensa"
+        lines = ["A sua conta no PsiGestão foi suspensa pela administração.",
+                 f"Motivo: {data.reason}",
+                 "Enquanto estiver suspensa, não é possível entrar no sistema e os links de cadastro de pacientes "
+                 "não funcionam. Os seus dados e prontuários continuam guardados, sem nenhuma alteração.",
+                 "Se você acha que houve engano, fale com o suporte."]
+    else:
+        target.suspended_at = None
+        target.suspended_reason = ""
+        await db.commit()
+        detail = "Conta reativada pela administração" + (f": {data.reason}" if data.reason else "")
+        subject = "Sua conta foi reativada"
+        lines = ["A sua conta no PsiGestão foi reativada. Você já pode entrar de novo, e está tudo como antes."]
+    await db.refresh(target)
+    return await _admin_done(db, background, admin, target, action="suspender" if data.suspend else "reativar",
+                             entity="usuario", detail=detail, subject=subject, lines=lines)
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,10 @@ const ACTION_LABEL = {
   // Produto (cadastro pelo paciente): criar, cancelar e prorrogar o link de cadastro.
   // ("Novo token"/"Integração" continuam para os registros antigos do Google Forms.)
   link_cadastro: "Link de cadastro",
+  // Produto (administração): o que a administração fez na conta (e, na trilha do
+  // administrador, cada consulta e ação da tela de administração).
+  prorrogar_teste: "Teste prorrogado", encerrar_sessoes: "Sessões encerradas",
+  suspender: "Suspensão", reativar: "Reativação", admin_confirmacao_falha: "Confirmação recusada",
 };
 const ENTITY_LABEL = {
   paciente: "Paciente", prontuario: "Prontuário", agenda: "Agenda", usuario: "Usuário",
@@ -61,6 +65,7 @@ const ENTITY_LABEL = {
   auditoria: "Auditoria",  // exportação da própria trilha (complementares)
   assinatura: "Assinatura",  // produto: assinatura
   cadastro: "Link de cadastro",  // produto: cadastro pelo paciente
+  administracao: "Administração",  // produto: administração
 };
 
 // Correção (varredura de UI, defeito 6): alguns detalhes da trilha guardam a

@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2, LifeBuoy,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2, LifeBuoy, UserCog,
 } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import api from "@/lib/api";
@@ -23,6 +23,10 @@ const nav = [
   { to: "/configuracoes", label: "Configurações", icon: Settings, id: "config" },
   // Análise de UI (O2): antes não havia "Ajuda" nem contato de suporte em nenhuma tela.
   { to: "/ajuda", label: "Ajuda", icon: LifeBuoy, id: "ajuda" },
+  // Produto (administração): só aparece para quem o SERVIDOR diz que é
+  // administrador (user.is_admin, vindo de ADMIN_EMAILS). Esconder o item é só
+  // conforto: cada rota /api/admin confere de novo e responde 404 aos outros.
+  { to: "/administracao", label: "Administração", icon: UserCog, id: "admin", adminOnly: true },
 ];
 
 // Fluxo clínico (C2): quantas sessões já aconteceram e estão sem evolução
@@ -64,7 +68,7 @@ export default function AppLayout() {
         </div>
       </div>
       <nav className="flex-1 space-y-1 px-3 py-2">
-        {nav.map((item) => (
+        {nav.filter((item) => !item.adminOnly || user?.is_admin).map((item) => (
           <NavLink
             key={item.id}
             to={item.to}

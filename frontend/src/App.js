@@ -28,6 +28,8 @@ const Settings = lazy(() => import("@/pages/Settings"));
 const PrivacyPolicy = lazy(() => import("@/pages/PrivacyPolicy"));
 const Help = lazy(() => import("@/pages/Help"));
 const SimulatedCheckout = lazy(() => import("@/pages/SimulatedCheckout"));
+// Produto (administração): controle das contas (só administradores; ver pages/Admin.js).
+const Admin = lazy(() => import("@/pages/Admin"));
 // Produto (cadastro pelo paciente): página pública do link de cadastro.
 const PatientIntake = lazy(() => import("@/pages/PatientIntake"));
 
@@ -131,6 +133,8 @@ function AppRouter() {
         <Route path="/ajuda" element={<Help />} />
         {/* Produto (assinatura): página do pagamento SIMULADO (só funciona no desenvolvimento). */}
         <Route path="/assinatura/simulacao" element={<SimulatedCheckout />} />
+        {/* Produto (administração): a página pergunta ao servidor (404 para quem não é administrador). */}
+        <Route path="/administracao" element={<Admin />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
