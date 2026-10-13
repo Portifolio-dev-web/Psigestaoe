@@ -235,7 +235,8 @@ def security_notice(to: str, name: str, subject: str, what: str, when: str, wher
     return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
 
 
-def admin_notice(to: str, name: str, subject: str, lines: list[str], support_email: str = "") -> OutgoingEmail:
+def admin_notice(to: str, name: str, subject: str, lines: list[str], support_email: str = "",
+                 button: Optional[tuple[str, str]] = None) -> OutgoingEmail:
     """Produto (administração): a administração mexeu na conta (cortesia, teste,
     sessões, suspensão). Transparência (LGPD art. 9º): a pessoa sempre fica
     sabendo o que mudou e por quê, sem precisar abrir o sistema.
@@ -243,8 +244,35 @@ def admin_notice(to: str, name: str, subject: str, lines: list[str], support_ema
     greeting = _greeting(name)
     footer = (f"Dúvidas? Escreva para {support_email}." if support_email
               else f"Dúvidas? Veja os contatos na Ajuda do {APP_NAME} (abre sem login).")
-    text = f"{greeting}\n\n" + "\n\n".join(lines) + f"\n\n{footer}"
-    html = _html(subject, [escape(greeting)] + [escape(line) for line in lines], footer=footer)
+    # `button` (rótulo, endereço): ação do e-mail, ex.: o link da nova senha na
+    # suspensão (revisão de segurança, RS1). No texto puro, o endereço por extenso.
+    action = f"\n\n{button[0]}: {button[1]}" if button else ""
+    text = f"{greeting}\n\n" + "\n\n".join(lines) + action + f"\n\n{footer}"
+    html = _html(subject, [escape(greeting)] + [escape(line) for line in lines], button, footer=footer)
+    return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
+
+
+def intake_incomplete_notice(to: str, name: str, reminders: int, warnings: int, discard_date: str,
+                             keep_days: int, link: str) -> OutgoingEmail:
+    """Revisão de segurança (RS2): cadastros incompletos esperando revisão. Só
+    números e datas: nada do paciente nem a identificação do link."""
+    greeting = _greeting(name)
+    lines = []
+    if reminders:
+        lines.append(f"Você tem {reminders} cadastro{'s' if reminders > 1 else ''} incompleto{'s' if reminders > 1 else ''} "
+                     "no PsiGestão: o tempo do link acabou antes de o paciente terminar. Revise e complete com o "
+                     "paciente, ou descarte.")
+    if warnings:
+        lines.append(f"{warnings} cadastro{'s' if warnings > 1 else ''} incompleto{'s' if warnings > 1 else ''} "
+                     f"{'serão descartados' if warnings > 1 else 'será descartado'} automaticamente a partir de "
+                     f"{discard_date}, por estar{'em' if warnings > 1 else ''} sem revisão há quase {keep_days} dias. "
+                     "Se ainda precisar, revise antes dessa data.")
+    lines.append(f"Cadastros incompletos ficam guardados por até {keep_days} dias depois que o tempo acaba: dado "
+                 "pessoal só pelo tempo necessário (LGPD).")
+    text = f"{greeting}\n\n" + "\n\n".join(lines) + f"\n\nRevisar cadastros: {link}"
+    html = _html("Cadastros incompletos", [escape(greeting)] + [escape(line) for line in lines],
+                 ("Revisar cadastros", link))
+    subject = "Cadastro incompleto será descartado" if warnings else "Cadastro incompleto esperando revisão"
     return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
 
 

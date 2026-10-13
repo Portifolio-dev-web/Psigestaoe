@@ -66,7 +66,7 @@ const TOPICS = [
         "A busca de Pacientes (e a da agenda) aceita o nome, o telefone (pelo menos 8 números, com ou sem DDD) ou o CPF, inclusive os do responsável."],
       // Produto (cadastro pelo paciente): o link temporário que substituiu o Google Forms.
       ["Como o paciente preenche o próprio cadastro?",
-        "Em Pacientes, toque em Link de cadastro e gere um link. Mande pelo WhatsApp ou por e-mail: ele vale 30 minutos para o paciente começar. Depois de começar, o paciente tem 10 minutos (pode pedir mais tempo) e o que ele digita é salvo sozinho. Se o tempo acabar antes do envio, o cadastro aparece como incompleto na mesma janela, para você revisar e completar com ele."],
+        "Em Pacientes, toque em Link de cadastro e gere um link. Mande pelo WhatsApp ou por e-mail: ele vale 30 minutos para o paciente começar. Depois de começar, o paciente tem 10 minutos (pode pedir mais tempo) e o que ele digita é salvo sozinho. Se o tempo acabar antes do envio, o cadastro aparece como incompleto (no Painel e na mesma janela), para você revisar e completar com ele. Incompletos ficam guardados por até 60 dias, com lembrete e aviso por e-mail antes do descarte (RS2)."],
       ["Paciente menor de idade: o que muda?",
         "Pela data de nascimento, o cadastro pede os dados do responsável legal, que é quem dá o consentimento."],
       ["Arquivar, anonimizar ou excluir?",
@@ -84,7 +84,8 @@ const TOPICS = [
         "O prontuário de um paciente sai em PDF ou JSON pela ficha (“Exportar prontuário”). Todos os dados da conta: Configurações > Minha conta > “Baixar todos os meus dados (ZIP)”."],
       // Análise da administração (AD2): o que acontece numa suspensão.
       ["Minha conta foi suspensa. E agora?",
-        "Você recebeu um e-mail com o motivo. Ao entrar, você continua podendo baixar a ficha de cada paciente e todos os dados, a trilha de auditoria, cuidar da segurança da conta e encerrá-la; nada foi apagado. Para contestar, use o contato do suporte nesta página. As regras estão nos Termos de Uso."],
+        // RS1: a senha antiga deixa de valer; a nova sai pelo link do e-mail.
+        "Você recebeu um e-mail com o motivo e um botão para criar uma senha nova (por segurança, a antiga deixou de valer; se o link vencer, use “Esqueci minha senha”). Ao entrar, você continua podendo baixar a ficha de cada paciente e todos os dados, a trilha de auditoria, reforçar a segurança da conta e encerrá-la; nada foi apagado. Para contestar, use o contato do suporte nesta página. As regras estão nos Termos de Uso."],
     ],
   },
 ];

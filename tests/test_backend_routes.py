@@ -3236,15 +3236,19 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
         assert any(mail.to == "psicologa.comum@example.com" and "Uso indevido da conta" in mail.text
                    for mail in mailer.outbox)
 
-        # AD2: suspensa = MODO RESTRITO. A sessão aberta morre; ela entra de novo
-        # (senha certa), mas só exporta, cuida da segurança e encerra a conta.
-        # Senha ERRADA continua com a resposta de sempre (não revela a suspensão).
+        # AD2: suspensa = MODO RESTRITO. A sessão aberta morre.
+        # RS1: a senha antiga deixa de valer (a mesma resposta de sempre, sem revelar
+        # a suspensão); a nova só nasce pelo link mandado ao e-mail da conta.
         assert (await target_client.get("/api/auth/me")).status_code == 401
-        wrong = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
-                                                                   "password": "Senha-errada-999"})
-        assert wrong.status_code == 401 and "suspensa" not in wrong.text
+        for old_or_wrong in ("Senha-segura-123", "Senha-errada-999"):
+            refused = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
+                                                                         "password": old_or_wrong})
+            assert refused.status_code == 401 and "suspensa" not in refused.text
+        reset = await target_client.post("/api/auth/password/reset", json={
+            "token": link_token("psicologa.comum@example.com"), "new_password": "Senha-nova-456"})
+        assert reset.status_code == 200, reset.text
         login = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
-                                                                   "password": "Senha-segura-123"})
+                                                                   "password": "Senha-nova-456"})
         assert login.status_code == 200, login.text
         me = (await target_client.get("/api/auth/me")).json()
         assert me["suspended"]["reason"] == "Uso indevido da conta" and me["suspended"]["at"]
@@ -3264,7 +3268,12 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
                                    ("GET", "/api/sessions", None),
                                    ("POST", "/api/intake-links", {"label": ""}),
                                    ("GET", "/api/consent-term", None),
-                                   ("POST", "/api/billing/checkout", {"plan": "monthly"})):
+                                   ("POST", "/api/billing/checkout", {"plan": "monthly"}),
+                                   # RS1: nem trocar a senha nem desativar as duas etapas
+                                   ("POST", "/api/auth/password", {"current_password": "Senha-nova-456",
+                                                                   "new_password": "Outra-senha-789"}),
+                                   ("POST", "/api/auth/mfa/disable", {"password": "Senha-nova-456",
+                                                                      "code": "000000"})):
             blocked = await target_client.request(method, path, json=body)
             assert blocked.status_code == 403, (path, blocked.status_code, blocked.text)
             assert blocked.json()["detail"]["code"] == "account_suspended", path
@@ -3285,12 +3294,13 @@ async def test_admin_end_sessions_and_suspension(client, monkeypatch):
         reactivated = await _admin_action(client, target_id, "suspension", suspend=False)
         assert reactivated.status_code == 200 and reactivated.json()["status"] == "trialing"
         login = await target_client.post("/api/auth/login", json={"email": "psicologa.comum@example.com",
-                                                                   "password": "Senha-segura-123"})
+                                                                   "password": "Senha-nova-456"})
         assert login.status_code == 200
         logs = (await target_client.get("/api/audit")).json()["items"]
         actions = {log["action"] for log in logs if "administração" in log["detail"]}
         assert {"encerrar_sessoes", "suspender", "reativar"} <= actions
         assert any(log["detail"].startswith("Entrada em conta suspensa (modo restrito") for log in logs)
+        assert any(log["detail"].startswith("Entrada recusada: senha desativada pela suspensão") for log in logs)
 
 
 # Análise da administração, lote 1 (AD3 a AD6)
@@ -3417,3 +3427,65 @@ async def test_terms_of_use_are_public_and_share_the_policy_version(client):
     await client.post("/api/auth/accept-terms", json={"version": legal.PRIVACY_POLICY_VERSION})
     logs = (await client.get("/api/audit")).json()["items"]
     assert any(log["action"] == "aceitar" and "Termos de Uso" in log["detail"] for log in logs)
+
+
+# Revisão de segurança (RS2): cadastro incompleto com prazo de 60 dias
+@pytest.mark.anyio
+async def test_incomplete_intakes_have_a_deadline(client):
+    """Lembrete aos 7 dias, aviso final aos 53, descarte aos 60 (nunca sem o aviso
+    antes); conta suspensa fica pausada; o Painel mostra quantos há."""
+    email = "prazo.incompleto@example.com"
+    await register_account(client, email)
+    intake, _ = await _new_intake(client, "Paciente da indicação")
+    now = datetime.now(timezone.utc)
+
+    async def age(days, **extra):
+        ended = now - timedelta(days=days)
+        await _set_intake(client, intake["id"], created_at=ended - timedelta(minutes=20),
+                          started_at=ended - timedelta(minutes=10), deadline_at=ended, draft="rascunho-criptografado",
+                          **extra)
+
+    async def tend():
+        async with client.session_factory() as db:
+            return await server.tend_incomplete_intakes(db)
+
+    await age(2)
+    assert (await client.get("/api/dashboard/stats")).json()["incomplete_intakes"] == 1
+    assert (await tend())["intake_reminders"] == 0  # cedo demais
+
+    mailer.outbox.clear()
+    await age(8)
+    assert (await tend())["intake_reminders"] == 1
+    assert (await tend())["intake_reminders"] == 0  # o lembrete sai uma vez só
+    reminder = [m for m in mailer.outbox if m.to == email]
+    assert len(reminder) == 1 and "esperando revisão" in reminder[0].subject
+    assert "Paciente da indicação" not in reminder[0].text  # nada que identifique o paciente
+    assert "/pacientes?cadastros=1" in reminder[0].text
+
+    # 61 dias SEM o aviso final: não descarta; manda o aviso final primeiro.
+    mailer.outbox.clear()
+    await age(61)
+    result = await tend()
+    assert result["intake_discard_warnings"] == 1 and result["intakes_discarded"] == 0
+    assert "será descartado" in mailer.outbox[-1].subject
+    listed = {i["id"]: i for i in (await client.get("/api/intake-links")).json()}
+    assert listed[intake["id"]]["status"] == "incomplete" and listed[intake["id"]]["discard_at"]
+
+    # Conta suspensa: contagem pausada (mesmo com o aviso antigo).
+    await _set_intake(client, intake["id"], discard_warned_at=now - timedelta(days=8))
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == email).values(suspended_at=now))
+        await db.commit()
+    assert (await tend())["intakes_discarded"] == 0
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == email).values(suspended_at=None))
+        await db.commit()
+
+    # Aviso final há mais de 7 dias e 61 dias desde o fim do tempo: descarta.
+    assert (await tend())["intakes_discarded"] == 1
+    async with client.session_factory() as db:
+        row = await db.get(PatientIntake, intake["id"])
+        assert row.draft == "" and row.revoked_at is not None
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any("descartado automaticamente" in log["detail"] for log in logs)
+    assert (await client.get("/api/dashboard/stats")).json()["incomplete_intakes"] == 0

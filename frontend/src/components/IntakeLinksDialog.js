@@ -36,7 +36,12 @@ const STATUS = {
   in_progress: { label: "Paciente preenchendo", cls: "bg-amber-50 text-amber-900", detail: (i) => `até ${time(i.deadline_at)}` },
   submitted: { label: "Recebido", cls: "bg-emerald-50 text-emerald-800", detail: (i) => dateTime(i.submitted_at) },
   completed: { label: "Completado por você", cls: "bg-emerald-50 text-emerald-800", detail: (i) => dateTime(i.submitted_at) },
-  incomplete: { label: "Incompleto", cls: "bg-red-50 text-red-800", detail: (i) => `o tempo acabou; salvo às ${time(i.draft_saved_at)}` },
+  // RS2: o incompleto mostra até quando fica guardado (60 dias, com avisos por e-mail).
+  incomplete: {
+    label: "Incompleto", cls: "bg-red-50 text-red-800",
+    detail: (i) => `o tempo acabou; salvo às ${time(i.draft_saved_at)}`
+      + (i.discard_at ? ` · guardado até ${new Date(i.discard_at).toLocaleDateString("pt-BR")}` : ""),
+  },
   expired: { label: "Venceu sem uso", cls: "bg-slate-100 text-slate-700", detail: (i) => dateTime(i.expires_at) },
   revoked: { label: "Cancelado", cls: "bg-slate-100 text-slate-700", detail: () => "" },
 };

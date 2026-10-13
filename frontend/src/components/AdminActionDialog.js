@@ -65,7 +65,10 @@ export const ADMIN_ACTIONS = {
     endpoint: "suspension",
     body: { suspend: true },
     // AD2: suspensão em MODO RESTRITO (ela ainda exporta e encerra a conta).
-    effect: "A pessoa sai de todos os aparelhos. Ao entrar de novo, só consegue exportar os dados (ficha de cada "
+    // RS1: a senha é desativada; a nova sai pelo link mandado ao e-mail da conta.
+    effect: "A pessoa sai de todos os aparelhos e a senha dela é desativada: para entrar de novo, ela cria outra "
+      + "pelo link que vai no e-mail da suspensão (só quem controla o e-mail da conta consegue). "
+      + "Ao entrar, só consegue exportar os dados (ficha de cada "
       + "paciente e tudo), cuidar da segurança da conta e encerrá-la; não registra, não agenda e os links de "
       + "cadastro de pacientes dela param. Nada é apagado. Use só nas hipóteses dos Termos de Uso (fraude, uso "
       + "por outra pessoa, violação grave ou ordem judicial). Atraso de pagamento não é motivo.",

@@ -84,7 +84,9 @@ function RecoveryCodes({ codes, onDone }) {
   );
 }
 
-export default function TwoFactorCard() {
+// `allowDisable`: na conta suspensa (modo restrito) o servidor não deixa desativar
+// as duas etapas (revisão de segurança, RS1); o botão nem aparece.
+export default function TwoFactorCard({ allowDisable = true }) {
   const { user, setUser } = useAuth();
   const [setup, setSetup] = useState(null); // { secret, otpauth_uri } durante a ativação
   const [code, setCode] = useState("");
@@ -176,10 +178,12 @@ export default function TwoFactorCard() {
             <Button type="button" variant="outline" size="sm" className="border-slate-300" onClick={() => setDialog("regenerate")}>
               Gerar novos códigos de recuperação
             </Button>
-            <Button type="button" variant="outline" size="sm" className="border-red-200 text-red-600 hover:bg-red-50"
-              onClick={() => setDialog("disable")} data-testid="mfa-disable-btn">
-              Desativar
-            </Button>
+            {allowDisable && (
+              <Button type="button" variant="outline" size="sm" className="border-red-200 text-red-600 hover:bg-red-50"
+                onClick={() => setDialog("disable")} data-testid="mfa-disable-btn">
+                Desativar
+              </Button>
+            )}
           </div>
         </div>
       ) : !user?.has_password ? (

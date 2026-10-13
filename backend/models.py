@@ -384,6 +384,13 @@ class PatientIntake(Base):
     completed_by = Column(String, nullable=True)  # "patient" (enviou) ou "professional" (completou o incompleto)
     patient_id = Column(String, ForeignKey("patients.id", ondelete="SET NULL"), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # Revisão de segurança (RS2): o cadastro INCOMPLETO tem prazo (60 dias depois
+    # que o tempo acabou). Antes ficava guardado para sempre se a psicóloga nunca
+    # revisasse. reminded_at: lembrete de 7 dias enviado; discard_warned_at: aviso
+    # final enviado (o descarte só acontece 7 dias depois dele). Ver
+    # tend_incomplete_intakes em server.py. Migração: 20261013_intake_retention.py
+    reminded_at = Column(DateTime(timezone=True), nullable=True)
+    discard_warned_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         # Lista de links da psicóloga, mais recentes primeiro.

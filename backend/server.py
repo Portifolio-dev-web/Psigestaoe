@@ -444,9 +444,12 @@ SUSPENDED_ALLOWED_ROUTES = frozenset({
     # sessão e aceite dos documentos
     ("GET", "/api/auth/me"), ("POST", "/api/auth/logout"), ("POST", "/api/auth/accept-terms"),
     ("POST", "/api/auth/lock"), ("POST", "/api/auth/unlock"), ("POST", "/api/auth/activity"),
-    # segurança da própria conta (senha, duas etapas, aparelhos conectados)
-    ("POST", "/api/auth/password"), ("POST", "/api/auth/mfa/setup"), ("POST", "/api/auth/mfa/enable"),
-    ("POST", "/api/auth/mfa/disable"), ("POST", "/api/auth/mfa/recovery-codes"),
+    # segurança da própria conta: só o que AUMENTA a proteção (ativar duas etapas,
+    # novos códigos, encerrar aparelhos). Revisão de segurança (RS1): trocar a senha
+    # e DESATIVAR as duas etapas saíram da lista. Não servem para exportar nem para
+    # encerrar, e eram justamente o que alguém com a senha de outra pessoa faria
+    # para tomar a conta. A senha nova sai pelo link do e-mail (rota pública).
+    ("POST", "/api/auth/mfa/setup"), ("POST", "/api/auth/mfa/enable"), ("POST", "/api/auth/mfa/recovery-codes"),
     ("GET", "/api/auth/sessions"), ("POST", "/api/auth/sessions/{session_id}/end"),
     ("POST", "/api/auth/sessions/end-others"),
     # guarda do prontuário e pedidos dos pacientes: achar o paciente e exportar
@@ -1858,7 +1861,10 @@ async def login(data: LoginInput, response: Response, db: AsyncSession = Depends
         # inexistente não tem dono a quem mostrar; a resposta é a mesma de
         # sempre, para não revelar quais e-mails têm conta.
         if user:
-            reason = "senha incorreta" if user.password_hash else "conta sem senha (entra pelo Google)"
+            # RS1: senha desativada pela suspensão tem motivo próprio na trilha.
+            reason = ("senha incorreta" if user.password_hash else
+                      "senha desativada pela suspensão" if user.suspended_at else
+                      "conta sem senha (entra pelo Google)")
             await log_audit(db, user.user_id, user.email, "entrar_falha", "sessao", user.user_id,
                             # Análise de UI (F3): termos em português na trilha ("Entrada", não "Login").
                             f"Entrada recusada: {reason} ({describe_user_agent(_audit_user_agent.get())})")
@@ -3955,6 +3961,8 @@ def _intake_public(intake: PatientIntake) -> dict:
         "deadline_at": _iso(_as_utc(intake.deadline_at)),
         "submitted_at": _iso(_as_utc(intake.submitted_at)),
         "draft_saved_at": _iso(_as_utc(intake.draft_saved_at)),
+        # RS2: incompleto mostra até quando fica guardado se ninguém agir.
+        "discard_at": _iso(intake_discard_at(intake)),
         "has_draft": bool(intake.draft),
         "patient_id": intake.patient_id or "",
     }
@@ -4459,12 +4467,12 @@ def _admin_account(user: User, admin: User, patients: int, last_access, now: Opt
 
 
 async def _admin_done(db: AsyncSession, background: BackgroundTasks, admin: User, target: User, *, action: str,
-                      entity: str, detail: str, subject: str, lines: list) -> dict:
+                      entity: str, detail: str, subject: str, lines: list, button: Optional[tuple] = None) -> dict:
     """Depois de uma ação: trilha das duas contas, e-mail à pessoa e a linha atualizada."""
     await log_audit(db, target.user_id, ADMIN_ACTOR, action, entity, target.user_id, detail)
     await log_audit(db, admin.user_id, admin.email, action, "administracao", target.user_id, detail)
     background.add_task(mailer.send_email, mailer.admin_notice(
-        target.email, target.name or "", subject, lines, legal.contact_info()["support_email"]))
+        target.email, target.name or "", subject, lines, legal.contact_info()["support_email"], button=button))
     # Análise da administração (AD3): TODAS as administradoras (inclusive quem
     # agiu) recebem um aviso de segurança. Antes, se uma conta de administração
     # fosse invadida, as suspensões e cortesias só apareciam na trilha. O aviso
@@ -4664,12 +4672,28 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
     if data.suspend == (target.suspended_at is not None):
         raise HTTPException(status_code=409, detail={"code": "no_change", "msg": (
             "Esta conta já está suspensa." if data.suspend else "Esta conta não está suspensa.")})
+    button = None
     if data.suspend:
         target.suspended_at = now_utc()
         target.suspended_reason = data.reason
+        # Revisão de segurança (RS1): a suspensão DESATIVA A SENHA. Antes ela só
+        # encerrava as sessões, e quem soubesse a senha (caso "uso da conta por
+        # outra pessoa", Termos item 8) entrava de novo no modo restrito e podia
+        # exportar todos os pacientes ou encerrar a conta. Agora a senha nova só
+        # nasce pelo link mandado ao e-mail da conta: volta quem controla o e-mail,
+        # a titular. Quem entra pelo Google continua provando a identidade nele.
+        had_password = bool(target.password_hash)
+        target.password_hash = None
         await db.commit()
         ended = await end_login_sessions(db, target)
-        detail = f"Conta suspensa pela administração ({ended} sessão(ões) encerrada(s)): {data.reason}"
+        if had_password:
+            # _issue_email_token também invalida links de senha pedidos antes.
+            token = await _issue_email_token(db, PASSWORD_RESET, target.email, user_id=target.user_id,
+                                             lifetime=timedelta(minutes=RESET_LINK_MINUTES))
+            button = ("Criar nova senha", frontend_link("/redefinir-senha", token))
+        detail = (f"Conta suspensa pela administração ({ended} sessão(ões) encerrada(s)"
+                  + ("; senha desativada, link de nova senha enviado ao e-mail" if had_password else "")
+                  + f"): {data.reason}")
         subject = "Sua conta foi suspensa"
         lines = ["A sua conta no PsiGestão foi suspensa pela administração.",
                  f"Motivo: {data.reason}",
@@ -4679,6 +4703,11 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
                  "encerrá-la. Não é possível registrar, agendar nem usar links de cadastro de pacientes. "
                  "Os seus dados e prontuários continuam guardados, sem nenhuma alteração.",
                  "Para contestar a suspensão, fale com o suporte (página Ajuda do PsiGestão)."]
+        if button:
+            # RS1: como entrar de novo (a senha antiga não vale mais).
+            lines.append(f"Por segurança, a sua senha foi desativada. Para entrar, crie uma nova pelo botão abaixo "
+                         f"(vale por {RESET_LINK_MINUTES} minutos). Depois disso, use \"Esqueci minha senha\" "
+                         "na tela de entrada.")
     else:
         target.suspended_at = None
         target.suspended_reason = ""
@@ -4686,9 +4715,12 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
         detail = "Conta reativada pela administração" + (f": {data.reason}" if data.reason else "")
         subject = "Sua conta foi reativada"
         lines = ["A sua conta no PsiGestão foi reativada. Você já pode entrar de novo, e está tudo como antes."]
+        if target.password_hash is None and target.google_sub is None:
+            # RS1: a senha foi desativada na suspensão e ainda não foi criada outra.
+            lines.append("Se você ainda não criou a senha nova, use \"Esqueci minha senha\" na tela de entrada.")
     await db.refresh(target)
     return await _admin_done(db, background, admin, target, action="suspender" if data.suspend else "reativar",
-                             entity="usuario", detail=detail, subject=subject, lines=lines)
+                             entity="usuario", detail=detail, subject=subject, lines=lines, button=button)
 
 
 # ---------------------------------------------------------------------------
@@ -4763,6 +4795,12 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
     # dados (os da conta vêm em /auth/me). Qualquer paciente conta, até
     # arquivado; qualquer sessão também, até cancelada: o passo é "aprender a fazer".
     has_patients = await db.scalar(select(exists().where(Patient.owner_id == uid)))
+    # Revisão de segurança (RS2): cadastros incompletos esperando revisão (o tempo do
+    # link acabou com dados digitados). Antes só apareciam na janela dos links.
+    incomplete_intakes = await db.scalar(select(func.count()).select_from(PatientIntake).where(
+        PatientIntake.owner_id == uid, PatientIntake.revoked_at.is_(None), PatientIntake.submitted_at.is_(None),
+        PatientIntake.started_at.is_not(None), PatientIntake.deadline_at <= now_utc(),
+        PatientIntake.draft.is_not(None), PatientIntake.draft != ""))
     has_sessions = await db.scalar(select(exists().where(Session.owner_id == uid)))
 
     return {
@@ -4773,6 +4811,7 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
         "recent_patients": recent_patients,
         "records_feed": feed,
         "onboarding": {"has_patients": bool(has_patients), "has_sessions": bool(has_sessions)},
+        "incomplete_intakes": incomplete_intakes or 0,  # RS2
     }
 # ---------------------------------------------------------------------------
 # Funções Auxiliares de Serialização (Agenda)
@@ -5400,11 +5439,98 @@ async def purge_closed_accounts(db: AsyncSession, now: Optional[datetime] = None
     return {"purged_patients": purged_patients, "purged_accounts": purged_accounts}
 
 
+# ---------------------------------------------------------------------------
+# Revisão de segurança (RS2): prazo do cadastro INCOMPLETO (LGPD art. 6º, III,
+# e art. 15: dado pessoal só pelo tempo necessário).
+#
+# Antes, o que o paciente digitou antes de o tempo acabar ficava guardado para
+# sempre se a psicóloga nunca revisasse, e ela só via esses cadastros abrindo a
+# janela "Link de cadastro". Agora (rotina de manutenção, a cada poucas horas):
+#   - 7 dias depois que o tempo acabou: um lembrete por e-mail (uma vez);
+#   - 53 dias: aviso final ("será descartado em 7 dias");
+#   - 60 dias, e pelo menos 7 dias depois do aviso final: o que o paciente
+#     digitou é apagado (o link fica como cancelado, com registro na trilha).
+# O descarte NUNCA acontece sem o aviso final antes. Conta suspensa ou encerrada
+# fica com a contagem pausada (não consegue completar). E-mails só com números e
+# datas: nada do paciente nem a identificação do link (pode ter o nome dele).
+# O Painel mostra quantos incompletos existem (dashboard_stats).
+# ---------------------------------------------------------------------------
+INTAKE_INCOMPLETE_KEEP_DAYS = 60
+INTAKE_REMIND_AFTER_DAYS = 7
+INTAKE_DISCARD_NOTICE_DAYS = 7
+INTAKE_SYSTEM_ACTOR = "sistema (manutenção)"
+
+
+def intake_discard_at(intake: PatientIntake, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Quando o incompleto será descartado se ninguém agir (None se não for incompleto)."""
+    now = now or now_utc()
+    if intake_status(intake, now) != "incomplete":
+        return None
+    by_age = _as_utc(intake.deadline_at) + timedelta(days=INTAKE_INCOMPLETE_KEEP_DAYS)
+    # Sem o aviso final ainda (ex.: conta suspensa), o descarte espera o aviso + 7 dias.
+    warned = _as_utc(intake.discard_warned_at) or now
+    return max(by_age, warned + timedelta(days=INTAKE_DISCARD_NOTICE_DAYS))
+
+
+async def tend_incomplete_intakes(db: AsyncSession, now: Optional[datetime] = None) -> dict:
+    """Lembretes, avisos finais e descartes dos cadastros incompletos (RS2)."""
+    now = now or now_utc()
+    rows = (await db.execute(select(PatientIntake).where(
+        PatientIntake.revoked_at.is_(None), PatientIntake.submitted_at.is_(None),
+        PatientIntake.started_at.is_not(None),
+        PatientIntake.deadline_at <= now - timedelta(days=INTAKE_REMIND_AFTER_DAYS),
+    ))).scalars().all()
+    owners = {}
+    reminders, warnings, discarded = {}, {}, 0
+    for intake in rows:
+        if intake_status(intake, now) != "incomplete":
+            continue
+        owner = owners.get(intake.owner_id) or await db.get(User, intake.owner_id)
+        owners[intake.owner_id] = owner
+        if owner is None or owner.closed_at is not None or owner.suspended_at is not None:
+            continue  # contagem pausada: a dona não consegue completar agora
+        age = now - _as_utc(intake.deadline_at)
+        warned = _as_utc(intake.discard_warned_at)
+        if (warned and age >= timedelta(days=INTAKE_INCOMPLETE_KEEP_DAYS)
+                and now >= warned + timedelta(days=INTAKE_DISCARD_NOTICE_DAYS)):
+            intake.draft = ""
+            intake.fill_secret_hash = None
+            intake.revoked_at = now
+            await db.commit()
+            await log_audit(db, owner.user_id, INTAKE_SYSTEM_ACTOR, "link_cadastro", "cadastro", intake.id,
+                            f"Cadastro incompleto descartado automaticamente "
+                            f"({INTAKE_INCOMPLETE_KEEP_DAYS} dias sem revisão, com aviso por e-mail antes)")
+            discarded += 1
+        elif not warned and age >= timedelta(days=INTAKE_INCOMPLETE_KEEP_DAYS - INTAKE_DISCARD_NOTICE_DAYS):
+            intake.discard_warned_at = now
+            warnings.setdefault(owner.user_id, []).append(intake)
+        elif not warned and intake.reminded_at is None:
+            intake.reminded_at = now
+            reminders.setdefault(owner.user_id, []).append(intake)
+    await db.commit()
+
+    for owner_id in set(reminders) | set(warnings):
+        owner = owners[owner_id]
+        warned_list = warnings.get(owner_id, [])
+        discard_date = min((intake_discard_at(i, now) for i in warned_list), default=None)
+        await mailer.send_email(mailer.intake_incomplete_notice(
+            owner.email, owner.name or "", len(reminders.get(owner_id, [])), len(warned_list),
+            _br_day(discard_date) if discard_date else "", INTAKE_INCOMPLETE_KEEP_DAYS,
+            frontend_link("/pacientes?cadastros=1")))
+        for intake in reminders.get(owner_id, []) + warned_list:
+            await log_audit(db, owner_id, INTAKE_SYSTEM_ACTOR, "link_cadastro", "cadastro", intake.id,
+                            "Aviso de descarte do cadastro incompleto enviado por e-mail" if intake in warned_list
+                            else "Lembrete do cadastro incompleto enviado por e-mail")
+    return {"intake_reminders": sum(map(len, reminders.values())),
+            "intake_discard_warnings": sum(map(len, warnings.values())),
+            "intakes_discarded": discarded}
+
+
 async def purge_patient_intakes(db: AsyncSession, now: Optional[datetime] = None) -> int:
     """Produto (cadastro pelo paciente): apaga links encerrados há mais de
     INTAKE_KEEP_DAYS dias (enviados, completados, cancelados, vencidos sem nada
     digitado). Cadastro INCOMPLETO com dados fica até a psicóloga completar ou
-    descartar: os dados do paciente não podem se perder."""
+    descartar, ou até o prazo de 60 dias (tend_incomplete_intakes, RS2)."""
     now = now or now_utc()
     rows = (await db.execute(select(PatientIntake).where(
         PatientIntake.created_at < now - timedelta(days=INTAKE_KEEP_DAYS)))).scalars().all()
@@ -5433,6 +5559,8 @@ async def run_maintenance() -> dict:
             return {"skipped": "outro processo está rodando a manutenção"}
         try:
             result = await purge_closed_accounts(db)
+            # RS2: lembretes/avisos/descarte dos incompletos ANTES da limpeza dos links.
+            result.update(await tend_incomplete_intakes(db))
             result["purged_intakes"] = await purge_patient_intakes(db)
             return result
         finally:

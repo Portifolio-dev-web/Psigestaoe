@@ -210,7 +210,13 @@ export default function Patients() {
   });
 
   // O1: chegou com ?novo=1 -> abre o cadastro; o parâmetro sai da URL (recarregar não reabre).
+  // RS2: ?cadastros=1 (aviso do Painel e e-mail dos incompletos) abre os links de cadastro.
   useEffect(() => {
+    if (searchParams.get("cadastros") === "1") {
+      setIntakeOpen(true);
+      setSearchParams({}, { replace: true });
+      return;
+    }
     if (searchParams.get("novo") !== "1") return;
     openNew();
     setSearchParams({}, { replace: true });

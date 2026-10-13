@@ -201,8 +201,11 @@ seção "cadastro pelo paciente"); a página do paciente é `frontend/src/pages/
 - limites: 20 links esperando o paciente por psicóloga, e limite por IP em todas as rotas
   públicas (`/api/intake/*`, que também exigem o cabeçalho anti-CSRF);
 - a página do paciente não carrega o Google nem nada da conta da psicóloga;
-- a manutenção apaga os links encerrados há mais de 30 dias (os incompletos ficam até a
-  psicóloga completar ou descartar). Encerrar a conta apaga todos os links.
+- a manutenção apaga os links encerrados há mais de 30 dias. Os **incompletos** têm prazo
+  de **60 dias** depois que o tempo acabou (LGPD: dado só pelo tempo necessário): lembrete
+  por e-mail aos 7 dias, aviso final 7 dias antes e descarte automático aos 60 (nunca sem o
+  aviso final antes; conta suspensa fica com a contagem pausada). O Painel mostra quantos
+  incompletos existem. Encerrar a conta apaga todos os links.
 
 ## Assinatura: planos, teste grátis, cortesia e somente leitura
 
@@ -278,11 +281,13 @@ Proteções (todas no servidor):
 - a busca vai no corpo de um POST (nome/e-mail fora dos logs de acesso);
 - não dá para suspender nem desconectar a própria conta nem a de outro administrador.
 
-**Suspensão (modo restrito)**: encerra todas as sessões e desliga os links de cadastro do
-paciente daquela conta. A psicóloga continua entrando, mas vê só a tela "Conta suspensa" e
+**Suspensão (modo restrito)**: encerra todas as sessões, **desativa a senha** (o e-mail da
+suspensão leva o link para criar outra: só quem controla o e-mail da conta volta a entrar;
+quem entra pelo Google continua pelo Google) e desliga os links de cadastro do paciente
+daquela conta. A psicóloga continua entrando, mas vê só a tela "Conta suspensa" e
 o servidor libera só uma lista fechada de rotas (`SUSPENDED_ALLOWED_ROUTES` em `server.py`):
-baixar a ficha de um paciente e todos os dados, baixar a trilha, cuidar da segurança da conta
-e encerrá-la. Assim ela cumpre a guarda do prontuário (CFP) e os pedidos dos pacientes (LGPD
+baixar a ficha de um paciente e todos os dados, baixar a trilha, reforçar a segurança da
+conta (sem trocar a senha nem desativar as duas etapas) e encerrá-la. Assim ela cumpre a guarda do prontuário (CFP) e os pedidos dos pacientes (LGPD
 art. 18). Qualquer outra rota responde 403 `account_suspended`, inclusive rotas novas
 (fail-closed). **Nada é apagado**; reativar devolve tudo como estava. As hipóteses de
 suspensão estão nos Termos de Uso (fraude, uso por outra pessoa, violação grave, ordem

@@ -44,8 +44,11 @@ logger = logging.getLogger("psigestao.legal")
 # suspensão em modo restrito (análise da administração, AD1/AD2); dados da
 # assinatura; e a lista completa de fornecedores (e-mail, cópias de segurança,
 # monitoramento de erros e meio de pagamento).
-PRIVACY_POLICY_VERSION = "2026-10-11"
-PRIVACY_POLICY_UPDATED_AT = "11/10/2026"
+# 2026-10-13: na suspensão a senha é desativada e a nova é criada pelo link do
+# e-mail (revisão de segurança, RS1); o modo restrito não troca senha nem
+# desativa as duas etapas; e o cadastro incompleto tem prazo de 60 dias (RS2).
+PRIVACY_POLICY_VERSION = "2026-10-13"
+PRIVACY_POLICY_UPDATED_AT = "13/10/2026"
 
 # SEGURANÇA/LGPD (varredura, item 12): nome e CPF reais tinham sido escritos
 # aqui e no texto da seção 1. Este arquivo vai para o git e o texto é público
@@ -135,7 +138,8 @@ def privacy_policy() -> dict:
             "são dados pessoais sensíveis (art. 5º, II, da LGPD) e recebem as proteções descritas no item 7.",
             "Link de cadastro: vale 30 minutos para começar e, depois de começado, 10 minutos para preencher "
             "(prorrogáveis). Enquanto o paciente preenche, o que ele digita é guardado criptografado; se o "
-            "tempo acabar antes do envio, o que foi preenchido chega ao profissional como cadastro incompleto. "
+            "tempo acabar antes do envio, o que foi preenchido chega ao profissional como cadastro incompleto, "
+            "que fica disponível por até 60 dias para ele completar com o paciente. "
             "A data, a hora e o endereço IP do envio são registrados como evidência do consentimento.",
         ]),
         ("4. Finalidades e bases legais", [
@@ -195,9 +199,10 @@ def privacy_policy() -> dict:
             "sessões da conta em todos os aparelhos e suspender ou reativar a conta, nas hipóteses dos Termos "
             "de Uso. Cada ação exige a confirmação da senha de quem administra, fica registrada na trilha de "
             "auditoria da conta afetada, e o profissional recebe um e-mail explicando o que mudou e por quê.",
-            "Conta suspensa: o profissional continua entrando, mas só para exportar os seus dados e os dos seus "
-            "pacientes, cuidar da segurança da conta e encerrá-la. Nenhum dado é alterado ou apagado por causa "
-            "da suspensão.",
+            "Conta suspensa: a senha é desativada e um link para criar outra é enviado ao e-mail da conta, para "
+            "que só a titular volte a entrar. Depois disso, o profissional entra apenas para exportar os seus "
+            "dados e os dos seus pacientes, reforçar a segurança da conta e encerrá-la. Nenhum dado é alterado ou "
+            "apagado por causa da suspensão.",
             "Bases legais: execução do contrato (art. 7º, V), prevenção a fraudes e segurança do serviço "
             "(art. 7º, IX, e art. 46).",
         ]),
@@ -210,6 +215,10 @@ def privacy_policy() -> dict:
             "Registros de acesso: no mínimo 6 meses (Marco Civil da Internet).",
             "Trilha de auditoria: enquanto houver dados relacionados sob guarda.",
             "Conta suspensa: os dados continuam guardados, sem alteração, durante toda a suspensão.",
+            # RS2: prazo do cadastro incompleto.
+            "Cadastro incompleto (link de cadastro em que o tempo acabou antes do envio): até 60 dias depois que o "
+            "tempo acabou. O profissional recebe um lembrete por e-mail e um aviso 7 dias antes; se não completar "
+            "nem descartar, o que o paciente digitou é eliminado automaticamente.",
             # AD1 (exatidão): backups guardam o que já foi excluído até serem substituídos.
             "Cópias de segurança (backup): são criptografadas e substituídas periodicamente; um dado excluído "
             "continua nas cópias mais antigas até elas serem descartadas.",
@@ -352,12 +361,15 @@ def terms_of_use() -> dict:
             "(b) uso da conta por quem não é a titular; (c) violação grave do uso permitido (item 6); ou (d) "
             "ordem judicial ou determinação de autoridade competente. Atraso de pagamento não é motivo de "
             "suspensão (ver item 5).",
-            "Você recebe um e-mail com o motivo, e a suspensão fica registrada na trilha de auditoria da conta.",
+            "Você recebe um e-mail com o motivo, e a suspensão fica registrada na trilha de auditoria da conta. "
+            "Por segurança, a senha da conta é desativada e o mesmo e-mail traz um link para criar outra: assim, só "
+            "quem tem acesso ao e-mail da conta volta a entrar. Quem entra pelo Google continua entrando por ele.",
             "Durante a suspensão (modo restrito), você continua entrando no sistema, mas só para exportar os seus "
             "dados e os dos seus pacientes (para cumprir a guarda do prontuário e atender os pedidos dos "
-            "pacientes), consultar a trilha de auditoria, cuidar da segurança da conta e encerrá-la. Não é "
-            "possível registrar, agendar, editar nem enviar links de cadastro de pacientes. Nenhum dado é "
-            "alterado ou apagado por causa da suspensão.",
+            "pacientes), consultar a trilha de auditoria, reforçar a segurança da conta (verificação em duas "
+            "etapas, aparelhos conectados) e encerrá-la. Não é possível registrar, agendar, editar, enviar links "
+            "de cadastro de pacientes, trocar a senha por dentro do sistema nem desativar a verificação em duas "
+            "etapas. Nenhum dado é alterado ou apagado por causa da suspensão.",
             "Você pode contestar a suspensão pelo contato do suporte (página Ajuda). A resposta é enviada por "
             "e-mail, com a decisão e o motivo. Superado o motivo, a conta é reativada e tudo volta a funcionar "
             "como antes, também com aviso por e-mail.",

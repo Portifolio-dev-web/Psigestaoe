@@ -99,7 +99,7 @@ export default function SuspendedAccount() {
               <p>
                 Os seus dados e prontuários estão guardados, sem nenhuma alteração. Enquanto a conta estiver suspensa,
                 não é possível registrar, agendar nem enviar links de cadastro. Você continua podendo exportar os dados
-                (para a guarda do prontuário e os pedidos dos pacientes), cuidar da segurança da conta e encerrá-la.
+                (para a guarda do prontuário e os pedidos dos pacientes), reforçar a segurança da conta e encerrá-la.
               </p>
               <p>
                 Para contestar a suspensão,{" "}
@@ -160,7 +160,8 @@ export default function SuspendedAccount() {
           </Button>
         </Card>
 
-        <TwoFactorCard />
+        {/* RS1: aqui só se REFORÇA a proteção (o servidor não deixa desativar). */}
+        <TwoFactorCard allowDisable={false} />
         <ConnectedDevicesCard />
         {/* Exportar todos os dados (ZIP) e encerrar a conta: o mesmo cartão das Configurações. */}
         <CloseAccountCard />

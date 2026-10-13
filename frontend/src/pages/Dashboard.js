@@ -187,6 +187,8 @@ export default function Dashboard() {
           O1: enquanto os "Primeiros passos" não foram ocultados, o convite é um dos passos
           da lista; a faixa mostra só o aviso de códigos de recuperação acabando. */}
       <SecurityNudge hideInvite={!user?.onboarding_dismissed} />
+      {/* Revisão de segurança (RS2): cadastros incompletos esperando revisão. */}
+      <IncompleteIntakesNotice count={stats?.incomplete_intakes} />
       <TodaySessions />
       {/* Fluxo clínico (C2): sessões de dias anteriores ainda sem evolução. */}
       <PendingEvolutions />
@@ -268,5 +270,32 @@ export default function Dashboard() {
         </>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Revisão de segurança (RS2): cadastros incompletos (o tempo do link acabou com
+// dados digitados pelo paciente). Antes só apareciam abrindo a janela dos links,
+// e podiam ficar esquecidos para sempre. Agora há prazo (60 dias, com lembrete e
+// aviso por e-mail) e este aviso no Painel leva direto à lista.
+// ---------------------------------------------------------------------------
+function IncompleteIntakesNotice({ count }) {
+  if (!count) return null;
+  return (
+    <Card className="flex flex-col gap-3 border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+      data-testid="incomplete-intakes-notice">
+      <div className="text-sm text-amber-950">
+        <p className="font-semibold">
+          {count === 1 ? "1 cadastro incompleto esperando revisão" : `${count} cadastros incompletos esperando revisão`}
+        </p>
+        <p className="mt-0.5">
+          O tempo do link acabou antes de o paciente terminar. Complete com ele ou descarte: depois de 60 dias,
+          os dados são apagados automaticamente (você recebe aviso por e-mail antes).
+        </p>
+      </div>
+      <Button asChild className="shrink-0 bg-[#1E3A8A] hover:bg-[#0F2C59]">
+        <Link to="/pacientes?cadastros=1">Revisar cadastros</Link>
+      </Button>
+    </Card>
   );
 }
