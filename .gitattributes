@@ -2,3 +2,10 @@
 # Com CRLF (padrão de editores no Windows), o `sh start.sh` falha com
 # "set: illegal option -" e o container não sobe.
 *.sh text eol=lf
+
+# Revisão (RS5): TODO arquivo de texto do repositório fica com quebra de linha LF
+# (o servidor é Linux). Editores e scripts no Windows gravavam CRLF sem avisar, e
+# 34 arquivos chegaram ao git assim (diffs inflados; .env.example copiado para o
+# servidor levaria o caractere CR para os valores). `text=auto`: o git decide o que é texto
+# (imagens e outros binários não são tocados) e grava LF a cada commit.
+* text=auto eol=lf

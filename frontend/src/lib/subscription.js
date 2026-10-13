@@ -25,7 +25,23 @@ export const READ_ONLY_REASON = {
 };
 
 // O que continua liberado no somente leitura (mesma regra do servidor: get_writer).
+// RS4: completar o cadastro que o paciente começou (link) também continua liberado.
 export const READ_ONLY_ALLOWED =
-  "Você continua vendo e exportando tudo, corrigindo cadastros e atendendo pedidos LGPD dos pacientes.";
+  "Você continua vendo e exportando tudo, corrigindo cadastros, completando os cadastros que os pacientes começaram "
+  + "e atendendo pedidos LGPD dos pacientes.";
+
+// Análise da assinatura (AS7): o "Assinar" só sai do sistema para a página de
+// pagamento do meio (domínios informados pelo servidor, sempre https). Antes a
+// tela seguia QUALQUER endereço que viesse na resposta. O servidor confere o
+// mesmo antes de responder; esta é a segunda trava.
+export function isTrustedCheckoutUrl(url, hosts = []) {
+  try {
+    const target = new URL(url, window.location.origin);
+    if (target.origin === window.location.origin) return true;
+    return target.protocol === "https:" && hosts.includes(target.hostname);
+  } catch {
+    return false;
+  }
+}
 
 export const SUBSCRIPTION_PATH = "/configuracoes?aba=assinatura";

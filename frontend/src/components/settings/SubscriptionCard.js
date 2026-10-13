@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
-  PLAN_LABEL, READ_ONLY_ALLOWED, READ_ONLY_REASON, daysLabel, formatBRL, formatDay,
+  PLAN_LABEL, READ_ONLY_ALLOWED, READ_ONLY_REASON, daysLabel, formatBRL, formatDay, isTrustedCheckoutUrl,
 } from "@/lib/subscription";
 
 // ---------------------------------------------------------------------------
@@ -103,7 +103,12 @@ export default function SubscriptionCard() {
   const subscribe = (plan) => inFlight.run(`checkout:${plan}`, async () => {
     try {
       const { data } = await api.post("/billing/checkout", { plan });
-      window.location.assign(data.url); // página de pagamento do meio (ou a simulação, no desenvolvimento)
+      // AS7: só a página de pagamento do meio (ou a simulação, no desenvolvimento).
+      if (!isTrustedCheckoutUrl(data.url, sub.checkout_hosts)) {
+        toast.error("Não foi possível abrir a página de pagamento. Tente de novo ou fale com o suporte (Ajuda).");
+        return;
+      }
+      window.location.assign(data.url);
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }

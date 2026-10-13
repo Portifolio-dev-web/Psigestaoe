@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid  # fluxo clínico (P1): identificador da série de sessões
+from urllib.parse import urlsplit  # análise da assinatura (AS7): endereço da página de pagamento
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
@@ -931,12 +932,40 @@ class IntakeSubmitData(PatientInput):
     @model_validator(mode="after")
     def require_all_fields(self):
         """Mesmo nome do validador de PatientInput: o substitui, sem "Notas iniciais"."""
-        labels = PATIENT_MINOR_REQUIRED_LABELS if is_minor(self.birth_date) else PATIENT_REQUIRED_LABELS
-        missing = [label for field, label in labels.items()
-                   if field != "initial_notes" and not str(getattr(self, field) or "").strip()]
+        missing = _missing_patient_fields(self, skip_notes=True)
         if missing:
             raise ValueError("Preencha todos os campos do cadastro. Faltando: " + ", ".join(missing) + ".")
         return self
+
+
+class PatientEditInput(PatientInput):
+    """Ficha EDITADA ou COMPLETADA pela psicóloga (PUT /patients/{id} e completar o
+    cadastro incompleto do link).
+
+    Análise da assinatura (AS2) e revisão de segurança (RS4): as "Notas iniciais"
+    são texto clínico. No somente leitura, corrigir o cadastro continua liberado
+    (LGPD art. 18, III) e completar o cadastro que o paciente começou também, mas
+    escrever notas novas não. Por isso o MODELO não exige as notas e a rota decide
+    pela situação da conta (_check_initial_notes): com acesso completo, continuam
+    obrigatórias como sempre; no somente leitura, ficam como estavam.
+    """
+
+    @model_validator(mode="after")
+    def require_all_fields(self):
+        """Mesmo nome do validador de PatientInput: o substitui, sem "Notas iniciais"."""
+        missing = _missing_patient_fields(self, skip_notes=True)
+        if missing:
+            raise ValueError("Preencha todos os campos do cadastro. Faltando: " + ", ".join(missing) + ".")
+        return self
+
+
+def _missing_patient_fields(model, *, skip_notes: bool) -> list:
+    """Campos obrigatórios em branco (regra de PatientInput). `skip_notes`: as
+    "Notas iniciais" ficam de fora (o paciente não preenche; e na edição a rota
+    decide pela situação da conta, ver _check_initial_notes)."""
+    labels = PATIENT_MINOR_REQUIRED_LABELS if is_minor(model.birth_date) else PATIENT_REQUIRED_LABELS
+    return [label for field, label in labels.items()
+            if not (skip_notes and field == "initial_notes") and not str(getattr(model, field) or "").strip()]
 
 
 class IntakeDraftData(BaseModel):
@@ -1398,7 +1427,8 @@ def public_user(u: User) -> dict:
         "onboarding_dismissed": u.onboarding_dismissed_at is not None,
         # Produto (assinatura): situação da conta (teste, assinante, atraso,
         # somente leitura, cortesia), preços e se o pagamento on-line existe.
-        "subscription": billing.public_state(u),
+        # AS7: + os domínios da página de pagamento (a tela só sai do sistema para eles).
+        "subscription": {**billing.public_state(u), "checkout_hosts": _checkout_hosts()},
         # AD2: conta suspensa (a tela do modo restrito mostra a data e o motivo,
         # o mesmo texto que a pessoa recebeu por e-mail). None = conta normal.
         "suspended": ({"at": _iso(_as_utc(u.suspended_at)), "reason": u.suspended_reason or ""}
@@ -2389,6 +2419,25 @@ def _billing_checkout_claims(token: str) -> dict:
             "code": "checkout_expired", "msg": "Este pagamento expirou. Volte e escolha o plano de novo."})
 
 
+def _checkout_url_allowed(url: str, provider: billing.BillingProvider) -> bool:
+    """Análise da assinatura (AS7): o "Assinar" só leva a pessoa para a página de
+    pagamento do meio (domínios em provider.checkout_hosts, sempre https) ou para
+    o próprio sistema (a simulação, no desenvolvimento). Antes, o frontend seguia
+    QUALQUER endereço da resposta: um meio mal configurado (ou uma resposta
+    adulterada) mandaria a pessoa para uma página de cobrança falsa."""
+    parts = urlsplit(url or "")
+    own = urlsplit(frontend_link("/"))
+    if parts.scheme in ("http", "https") and (parts.scheme, parts.netloc) == (own.scheme, own.netloc):
+        return True
+    return parts.scheme == "https" and (parts.hostname or "") in (provider.checkout_hosts or ())
+
+
+def _checkout_hosts() -> list:
+    """AS7: domínios da página de pagamento, para a tela conferir antes de sair do sistema."""
+    provider = billing_provider()
+    return list(provider.checkout_hosts or ()) if provider else []
+
+
 def billing_provider() -> Optional[billing.BillingProvider]:
     """O meio de pagamento configurado (None = pagamento on-line indisponível)."""
     if billing.BILLING_PROVIDER == "simulado":
@@ -2436,6 +2485,13 @@ async def billing_checkout(data: CheckoutInput, user: User = Depends(get_active_
             "code": "billing_unavailable",
             "msg": "O pagamento on-line ainda não está disponível. Fale com o suporte (página de Ajuda) para assinar."})
     url = await provider.start_checkout(user, data.plan)
+    if not _checkout_url_allowed(url, provider):
+        # AS7: o meio devolveu um endereço fora da lista dele: não leva a pessoa até lá.
+        logger.error("Meio de pagamento %s devolveu endereço fora de checkout_hosts; pagamento não iniciado.",
+                     provider.name)
+        raise HTTPException(status_code=502, detail={
+            "code": "checkout_url_rejected",
+            "msg": "Não foi possível abrir a página de pagamento. Tente de novo ou fale com o suporte (Ajuda)."})
     user.billing_provider = provider.name
     await db.commit()
     await log_audit(db, user.user_id, user.email, "assinatura", "assinatura", user.user_id,
@@ -3296,9 +3352,29 @@ async def create_patient(data: PatientInput, user: User = Depends(get_writer), d
                         "Termo de consentimento registrado")
     return patient_public(novo_paciente, user)
 
+def _check_initial_notes(user: User, new_notes: Optional[str], current_notes: str = "") -> None:
+    """AS2/RS4: as "Notas iniciais" (texto clínico) seguem a situação da conta.
+    Com acesso completo: obrigatórias (como no cadastro manual). No somente
+    leitura: não mudam (antes, editar o cadastro aceitava notas novas, e dava para
+    continuar escrevendo texto clínico sem assinatura)."""
+    new, current = (new_notes or "").strip(), (current_notes or "").strip()
+    state = billing.access_state(user)
+    if state["can_write"]:
+        if not new:
+            raise HTTPException(status_code=422, detail="Preencha todos os campos do cadastro. Faltando: Notas iniciais.")
+        return
+    if new != current:
+        raise HTTPException(status_code=402, detail={
+            "code": "read_only", "reason": state["reason"],
+            "msg": "No somente leitura dá para corrigir o cadastro, mas não as Notas iniciais (são registro clínico). "
+                   + billing.READ_ONLY_MESSAGES[state["reason"]]})
+
+
 @api_router.put("/patients/{pid}")
-async def update_patient(pid: str, data: PatientInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def update_patient(pid: str, data: PatientEditInput, user: User = Depends(get_active_user),
+                         db: AsyncSession = Depends(get_db)):
     p = await _get_owned_patient(db, pid, user)
+    _check_initial_notes(user, data.initial_notes, decrypt_field(p.initial_notes))  # AS2
 
     _apply_patient_input(p, data)
     consent_action = apply_consent(p, data.consent_terms, user)
@@ -4078,13 +4154,20 @@ async def intake_link_draft(intake_id: str = PathParam(max_length=40), user: Use
 
 
 @api_router.post("/intake-links/{intake_id}/complete")
-async def complete_intake(data: PatientInput, intake_id: str = PathParam(max_length=40),
-                          user: User = Depends(get_writer), db: AsyncSession = Depends(get_db)):
+async def complete_intake(data: PatientEditInput, intake_id: str = PathParam(max_length=40),
+                          user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     """A psicóloga completa o cadastro incompleto (com o paciente) e salva: vira
-    paciente e o rascunho é apagado. Mesmas regras do cadastro manual."""
+    paciente e o rascunho é apagado. Mesmas regras do cadastro manual.
+
+    Revisão de segurança (RS4): vale também no SOMENTE LEITURA (antes exigia
+    get_writer). São dados que o próprio paciente forneceu, e o envio dele pelo
+    link já era aceito com a conta em somente leitura; sem isso, o prazo de 60
+    dias (RS2) apagaria esses dados sem que a psicóloga pudesse salvá-los. No
+    somente leitura, as Notas iniciais ficam vazias (AS2)."""
     intake = await _owned_intake(db, intake_id, user)
     if intake_status(intake) != "incomplete":
         raise HTTPException(status_code=409, detail={"code": "not_incomplete", "msg": "Este link não tem cadastro incompleto."})
+    _check_initial_notes(user, data.initial_notes)  # AS2/RS4
     claimed = await db.execute(update(PatientIntake).where(
         PatientIntake.id == intake.id, PatientIntake.submitted_at.is_(None)).values(submitted_at=now_utc()))
     if claimed.rowcount != 1:  # completado ao mesmo tempo em outra aba
@@ -5382,6 +5465,9 @@ async def close_account(data: CloseAccountInput, background: BackgroundTasks, re
         raise HTTPException(status_code=403, detail=MFA_INVALID_DETAIL)
 
     original_email, name = user.email, user.name or ""
+    # Análise da assinatura (AS1): cancela a renovação ANTES de encerrar (falhou no
+    # meio de pagamento -> a conta não é encerrada, e a pessoa tenta de novo).
+    subscription_canceled = await _cancel_subscription_on_close(db, user)
     summary = await _close_account(db, user)
     until = summary["retained_until"]
     until_label = datetime.fromisoformat(until).strftime("%d/%m/%Y") if until else None
@@ -5390,9 +5476,45 @@ async def close_account(data: CloseAccountInput, background: BackgroundTasks, re
                     + (f"; {count_label(summary['retained_patients'], 'paciente', 'pacientes')} sob guarda até "
                        f"{until_label}" if summary["retained_patients"] else ""))
     background.add_task(mailer.send_email, mailer.account_closed(
-        original_email, name, summary["deleted_patients"], summary["retained_patients"], until_label))
+        original_email, name, summary["deleted_patients"], summary["retained_patients"], until_label,
+        subscription_canceled))
     clear_auth_cookie(response)
     return summary
+
+
+async def _cancel_subscription_on_close(db: AsyncSession, user: User) -> bool:
+    """Análise da assinatura (AS1): encerrar a conta cancela a assinatura.
+
+    Antes o encerramento não mexia nela: com um meio de pagamento real, quem
+    encerrasse a conta continuaria sendo cobrada (Código de Defesa do
+    Consumidor; e tratamento de dados sem finalidade, LGPD). Agora a renovação
+    é cancelada no meio de pagamento e registrada (aviso "subscription_canceled",
+    mesma regra do botão "Cancelar renovação"). Se o meio de pagamento falhar, o
+    encerramento PARA, com uma mensagem: melhor tentar de novo do que encerrar a
+    conta e deixar a cobrança ativa. Devolve True se havia o que cancelar."""
+    if (user.courtesy_at is not None or user.cancel_at_period_end
+            or (user.subscription_status or "none") not in ("active", "past_due")):
+        return False
+    provider = billing_provider()
+    if provider is not None and user.billing_provider == provider.name:
+        try:
+            await provider.cancel(user)
+        except Exception:
+            logger.exception("Falha ao cancelar a assinatura no encerramento da conta %s.", user.user_id)
+            raise HTTPException(status_code=502, detail={
+                "code": "billing_cancel_failed",
+                "msg": "Não foi possível cancelar a sua assinatura no meio de pagamento, então a conta NÃO foi "
+                       "encerrada (para você não continuar sendo cobrada). Tente de novo em alguns minutos ou "
+                       "fale com o suporte (Ajuda)."})
+    elif user.billing_provider:
+        # Meio de pagamento que não está mais configurado: cancela aqui e avisa no log
+        # (alguém precisa conferir a cobrança lá).
+        logger.warning("Encerramento da conta %s: assinatura no meio %s, que não está configurado.",
+                       user.user_id, user.billing_provider)
+    event = billing.BillingEvent(event_id=f"encerramento-{uuid.uuid4().hex}", kind="subscription_canceled",
+                                 user_id=user.user_id)
+    await apply_billing_event(db, user, event, user.billing_provider or "app", actor=user.email)
+    return True
 
 
 async def _purge_audit_logs(db: AsyncSession, owner_id: str) -> None:

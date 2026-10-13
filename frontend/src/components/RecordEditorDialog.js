@@ -246,6 +246,14 @@ export default function RecordEditorDialog({ open, onOpenChange, patientId, pati
       } else if (status === 423) {
         draft.flush();
         toast.info("A tela foi bloqueada. Desbloqueie e clique em Salvar de novo: o texto continua aqui.");
+      } else if (status === 402 && detail?.code === "read_only") {
+        // Análise da assinatura (AS9): o acesso acabou com a evolução aberta (ex.: o
+        // teste venceu durante a escrita). Antes aparecia só um erro genérico, e a
+        // pessoa podia achar que perdeu o texto. Ele continua no rascunho; a
+        // explicação com "Ver planos" vem do WriteAccessContext (evento psi:read-only).
+        draft.flush();
+        toast.info("A evolução não foi salva porque a conta está em somente leitura, mas o texto continua guardado "
+          + "como rascunho neste computador. Assine para salvar.", { duration: 12000 });
       } else {
         toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
       }

@@ -198,7 +198,12 @@ export default function Patients() {
   // Produto (assinatura): paciente NOVO exige gravação; no somente leitura aparece a
   // explicação (com "Ver planos"). Editar o cadastro de quem já existe continua
   // liberado (correção, LGPD art. 18, III), como no servidor.
-  const { guard } = useWriteAccess();
+  const { guard, canWrite } = useWriteAccess();
+  // AS2/RS4: no somente leitura, editar ou completar o cadastro continua liberado,
+  // mas as "Notas iniciais" (texto clínico) ficam travadas como estão (o servidor
+  // aplica a mesma regra: _check_initial_notes).
+  const notesLocked = !canWrite && Boolean(editing || completingIntake);
+  const formOptions = { includeNotes: !notesLocked };
   const openNew = guard(() => {
     setEditing(null);
     setCompletingIntake(null);
@@ -244,8 +249,9 @@ export default function Patients() {
   // Produto (cadastro pelo paciente): o tempo do link acabou com o cadastro pela
   // metade. A ficha abre com o que o paciente preencheu; a psicóloga completa (de
   // preferência com ele) e salva. A leitura fica na trilha de auditoria (servidor).
-  // Completar cria um paciente novo: no somente leitura, aparece a explicação.
-  const reviewIncomplete = guard(async (intake) => {
+  // RS4: liberado também no somente leitura (são dados que o paciente forneceu, e o
+  // prazo de 60 dias apagaria esses dados sem que a psicóloga pudesse salvá-los).
+  const reviewIncomplete = async (intake) => {
     try {
       const { data } = await api.get(`/intake-links/${intake.id}/draft`);
       const draft = data.data || {};
@@ -261,7 +267,7 @@ export default function Patients() {
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
     }
-  });
+  };
 
   // Segurança (varredura, item 2): CPF e telefone (também os do responsável, C3)
   // ganham máscara enquanto a pessoa digita, e a idade acompanha a data de
@@ -288,10 +294,10 @@ export default function Patients() {
     // PRODUTO: nenhum campo em branco. Lista tudo o que falta e leva o foco ao
     // primeiro campo com problema, em vez de a pessoa descobrir um erro de cada vez.
     // A4: os erros ficam no formulário (resumo + mensagem em cada campo), não num aviso que some.
-    const errors = validatePatientForm(form);
+    const errors = validatePatientForm(form, formOptions);  // AS2: notas travadas não são exigidas
     setFormErrors(errors);
     setSubmitError("");
-    const firstInvalid = errorFields(form).find(([key]) => errors[key]);
+    const firstInvalid = errorFields(form, formOptions).find(([key]) => errors[key]);
     if (firstInvalid) {
       document.getElementById(firstInvalid[2])?.focus();
       return;
@@ -411,7 +417,8 @@ export default function Patients() {
 
       <PatientFormDialog open={dialogOpen} onOpenChange={setDialogOpen} editing={editing}
         form={form} onFormChange={upd} saving={saving} onSubmit={save} currentTerm={currentTerm}
-        errors={formErrors} submitError={submitError} completing={Boolean(completingIntake)} />
+        errors={formErrors} submitError={submitError} completing={Boolean(completingIntake)}
+        notesLocked={notesLocked} />
 
       <PatientConfirmDialog confirm={confirm} onConfirm={doAction} onOpenChange={(o) => !o && setConfirm(null)} />
 
@@ -627,7 +634,7 @@ function PatientMobileCards({ filtered, navigate, onEdit, onDelete, onAnon, onAr
 
 // `completing`: a ficha veio de um link de cadastro incompleto (produto: cadastro pelo paciente).
 function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, saving, onSubmit, currentTerm,
-  errors = {}, submitError = "", completing = false }) {
+  errors = {}, submitError = "", completing = false, notesLocked = false }) {
   // Quem já consentiu vê a cópia do texto que aceitou; os demais, o termo atual.
   const consentText = editing?.consent_terms ? editing.consent_terms_text : currentTerm;
   const consentDate = editing?.consent_terms && editing.consent_given_at
@@ -665,16 +672,18 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
               com o paciente o que falta (inclusive a resposta sobre o termo) antes de salvar.
             </p>
           )}
-          <FormErrorSummary errors={errors} submitError={submitError} fields={errorFields(form)} />
+          <FormErrorSummary errors={errors} submitError={submitError}
+            fields={errorFields(form, { includeNotes: !notesLocked })} />
           <PatientFormFields form={form} errors={errors} onFormChange={onFormChange} />
 
           <FormSection title="Informações clínicas">
             <div className="sm:col-span-2">
-              <Label htmlFor="patient-notes">Notas iniciais *</Label>
+              <Label htmlFor="patient-notes">Notas iniciais{notesLocked ? "" : " *"}</Label>
               <Textarea
                 id="patient-notes"
-                {...fieldA11y(errors, "initial_notes", "patient-notes")}
-                required
+                {...fieldA11y(errors, "initial_notes", "patient-notes", notesLocked ? "patient-notes-locked" : undefined)}
+                required={!notesLocked}
+                readOnly={notesLocked}
                 maxLength={LIMITS.patientNotes}
                 value={form.initial_notes}
                 onChange={onFormChange("initial_notes")}
@@ -684,6 +693,13 @@ function PatientFormDialog({ open, onOpenChange, editing, form, onFormChange, sa
                 rows={3}
               />
               <FieldError id="patient-notes" message={errors.initial_notes} />
+              {/* AS2: por que o campo não aceita texto (somente leitura). */}
+              {notesLocked && (
+                <p id="patient-notes-locked" className="mt-1 text-xs text-slate-600" data-testid="patient-notes-locked">
+                  Conta em somente leitura: as notas iniciais são registro clínico e não podem ser alteradas sem
+                  assinatura. O restante do cadastro pode ser corrigido normalmente.
+                </p>
+              )}
             </div>
           </FormSection>
 

@@ -259,9 +259,13 @@ class BillingProvider:
         da PÁGINA DE PAGAMENTO dele (nenhum dado de cartão passa pelo nosso servidor);
       - cancel: cancela a renovação (o período pago continua valendo);
       - parse_webhook: confere a autenticidade do aviso (token/assinatura) e o
-        traduz em BillingEvent; aviso inválido levanta PermissionError.
+        traduz em BillingEvent; aviso inválido levanta PermissionError;
+      - checkout_hosts: os domínios da página de pagamento do meio (análise da
+        assinatura, AS7). O servidor e a tela só levam a pessoa para um desses
+        (ou para o próprio sistema); qualquer outro endereço é recusado.
     """
     name = ""
+    checkout_hosts: tuple = ()
 
     async def start_checkout(self, user, plan: str) -> str:
         raise NotImplementedError

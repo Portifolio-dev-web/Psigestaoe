@@ -3489,3 +3489,110 @@ async def test_incomplete_intakes_have_a_deadline(client):
     logs = (await client.get("/api/audit")).json()["items"]
     assert any("descartado automaticamente" in log["detail"] for log in logs)
     assert (await client.get("/api/dashboard/stats")).json()["incomplete_intakes"] == 0
+
+
+# Análise da assinatura, lote 1 (AS1, AS2, AS7) e revisão de segurança (RS4)
+class _CheckoutProvider(billing.BillingProvider):
+    """Meio de pagamento de mentira: página de pagamento em pagamento.exemplo.com."""
+    name = "teste"
+    checkout_hosts = ("pagamento.exemplo.com",)
+
+    def __init__(self):
+        self.url = "https://pagamento.exemplo.com/pagar/1"
+        self.fail_cancel = False
+        self.canceled = []
+
+    async def start_checkout(self, user, plan):
+        return self.url
+
+    async def cancel(self, user):
+        if self.fail_cancel:
+            raise RuntimeError("meio de pagamento fora do ar")
+        self.canceled.append(user.user_id)
+
+
+@pytest.mark.anyio
+async def test_closing_account_cancels_the_subscription(client, monkeypatch):
+    """AS1: encerrar a conta cancela a renovação; se o meio falhar, a conta não é encerrada."""
+    provider = _CheckoutProvider()
+    monkeypatch.setattr(server, "billing_provider", lambda: provider)
+    email = "encerra.assinante@example.com"
+    await register_account(client, email)
+    async with client.session_factory() as db:
+        await db.execute(update(User).where(User.email == email).values(
+            subscription_status="active", subscription_plan="monthly", billing_provider="teste",
+            paid_until=datetime.now(timezone.utc) + timedelta(days=20)))
+        await db.commit()
+    body = {"password": "Senha-segura-123", "confirmation": "ENCERRAR"}
+
+    provider.fail_cancel = True
+    failed = await client.post("/api/account/close", json=body)
+    assert failed.status_code == 502 and failed.json()["detail"]["code"] == "billing_cancel_failed"
+    assert (await client.get("/api/auth/me")).status_code == 200  # a conta continua aberta
+
+    provider.fail_cancel = False
+    mailer.outbox.clear()
+    closed = await client.post("/api/account/close", json=body)
+    assert closed.status_code == 200, closed.text
+    assert len(provider.canceled) == 1
+    assert any(mail.to == email and "não haverá novas cobranças" in mail.text for mail in mailer.outbox)
+
+
+@pytest.mark.anyio
+async def test_checkout_only_leads_to_known_payment_pages(client, monkeypatch):
+    """AS7: o servidor só devolve a página de pagamento do meio (https, domínio da lista)."""
+    provider = _CheckoutProvider()
+    monkeypatch.setattr(server, "billing_provider", lambda: provider)
+    await register_account(client, "checkout.seguro@example.com")
+    assert (await client.get("/api/auth/me")).json()["subscription"]["checkout_hosts"] == ["pagamento.exemplo.com"]
+    ok = await client.post("/api/billing/checkout", json={"plan": "monthly"})
+    assert ok.status_code == 200 and ok.json()["url"].startswith("https://pagamento.exemplo.com/")
+    for bad in ("https://pagamento.exemplo.com.golpe.net/pagar", "http://pagamento.exemplo.com/pagar",
+                "javascript:alert(1)", "https://outro-site.com/pagar", ""):
+        provider.url = bad
+        refused = await client.post("/api/billing/checkout", json={"plan": "monthly"})
+        assert refused.status_code == 502 and refused.json()["detail"]["code"] == "checkout_url_rejected", bad
+
+
+@pytest.mark.anyio
+async def test_read_only_corrects_record_but_not_initial_notes(client):
+    """AS2: no somente leitura o cadastro é corrigido, mas as notas (texto clínico) não mudam."""
+    email = "notas.travadas@example.com"
+    patient_id = await _create_patient(client, email)
+    # Com acesso completo, as notas continuam obrigatórias na edição.
+    blank = await client.put(f"/api/patients/{patient_id}", json=patient_data("Paciente Cripto", initial_notes=""))
+    assert blank.status_code == 422
+    await _end_trial(client, email)
+    fixed = await client.put(f"/api/patients/{patient_id}",
+                             json=patient_data("Paciente Cripto", phone="(11) 98888-7777"))
+    assert fixed.status_code == 200, fixed.text  # mesmas notas, telefone corrigido
+    notes = await client.put(f"/api/patients/{patient_id}",
+                             json=patient_data("Paciente Cripto", initial_notes="Nova anotação clínica."))
+    assert notes.status_code == 402 and notes.json()["detail"]["code"] == "read_only"
+    assert "Notas iniciais" in notes.json()["detail"]["msg"]
+    current = (await client.get(f"/api/patients/{patient_id}")).json()
+    assert current["initial_notes"] == "Primeiro contato." and current["phone"] == "(11) 98888-7777"
+
+
+@pytest.mark.anyio
+async def test_incomplete_intake_can_be_completed_in_read_only(client):
+    """RS4: completar o cadastro que o paciente começou vale no somente leitura (sem notas)."""
+    email = "completa.leitura@example.com"
+    await register_account(client, email)
+    first, _ = await _new_intake(client)
+    second, _ = await _new_intake(client)
+    ended = datetime.now(timezone.utc) - timedelta(days=1)
+    for intake in (first, second):
+        await _set_intake(client, intake["id"], started_at=ended - timedelta(minutes=10), deadline_at=ended,
+                          draft="rascunho-criptografado")
+    # Com acesso completo: as notas são obrigatórias, como no cadastro manual.
+    no_notes = await client.post(f"/api/intake-links/{first['id']}/complete", json=patient_data(initial_notes=""))
+    assert no_notes.status_code == 422
+    await _end_trial(client, email)
+    with_notes = await client.post(f"/api/intake-links/{first['id']}/complete", json=patient_data())
+    assert with_notes.status_code == 402 and with_notes.json()["detail"]["code"] == "read_only"
+    done = await client.post(f"/api/intake-links/{first['id']}/complete", json=patient_data(initial_notes=""))
+    assert done.status_code == 200, done.text
+    assert done.json()["initial_notes"] == ""
+    statuses = {i["id"]: i["status"] for i in (await client.get("/api/intake-links")).json()}
+    assert statuses[first["id"]] == "completed" and statuses[second["id"]] == "incomplete"

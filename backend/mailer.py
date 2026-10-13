@@ -276,10 +276,14 @@ def intake_incomplete_notice(to: str, name: str, reminders: int, warnings: int, 
     return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
 
 
-def account_closed(to: str, name: str, deleted: int, retained: int, retained_until: Optional[str]) -> OutgoingEmail:
+def account_closed(to: str, name: str, deleted: int, retained: int, retained_until: Optional[str],
+                   subscription_canceled: bool = False) -> OutgoingEmail:
     greeting = _greeting(name)
     lines = [f"Sua conta no {APP_NAME} foi encerrada. Ninguém consegue mais entrar nela.",
              f"Pacientes excluídos definitivamente: {deleted}."]
+    if subscription_canceled:
+        # Análise da assinatura (AS1): o encerramento cancela a renovação.
+        lines.append("A renovação da sua assinatura foi cancelada: não haverá novas cobranças.")
     if retained:
         lines.append(
             f"Pacientes com prontuário sob guarda obrigatória (Resolução CFP nº 001/2009): {retained}. "
