@@ -49,7 +49,6 @@ def _int_env(name: str, default: int) -> int:
 
 # Configuração (variáveis de ambiente; ver backend/.env.example). Preços em
 # CENTAVOS, para nunca haver arredondamento de ponto flutuante em dinheiro.
-TRIAL_DAYS = _int_env("TRIAL_DAYS", 14)
 GRACE_DAYS = _int_env("BILLING_GRACE_DAYS", 7)
 PRICES = {
     "monthly": _int_env("PRICE_MONTHLY_CENTS", 5900),
@@ -62,6 +61,20 @@ BILLING_PROVIDER = os.environ.get("BILLING_PROVIDER", "").strip().lower()
 # padrão é LIGADO: esquecer a variável nunca começa a cobrar ninguém por engano.
 # Desligue (BILLING_BETA=false) quando o meio de pagamento real estiver pronto.
 BETA = os.environ.get("BILLING_BETA", "true").strip().lower() != "false"
+# PRODUTO (versão beta): teste grátis de DOIS MESES (60 dias) enquanto a versão
+# beta estiver ligada. Sem cobrança pelo sistema, um teste de 14 dias levaria a
+# pessoa ao somente leitura sem ter como pagar. Fora da beta, volta aos 14 dias.
+# TRIAL_DAYS no ambiente continua mandando (vazio = estes padrões). Contas que já
+# existiam ganham o prazo novo pela migração 20261013_beta_trial.
+BETA_TRIAL_DAYS = 60
+STANDARD_TRIAL_DAYS = 14
+
+
+def default_trial_days(beta: bool) -> int:
+    return BETA_TRIAL_DAYS if beta else STANDARD_TRIAL_DAYS
+
+
+TRIAL_DAYS = _int_env("TRIAL_DAYS", default_trial_days(BETA))
 KNOWN_PROVIDERS = ("", "simulado")
 
 READ_ONLY_MESSAGES = {

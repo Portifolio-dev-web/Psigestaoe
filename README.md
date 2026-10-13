@@ -224,7 +224,7 @@ As regras ficam em `backend/billing.py`; as rotas, em `server.py` (seção "assi
 
 | Situação | O que a pessoa pode fazer |
 |---|---|
-| Teste grátis (`TRIAL_DAYS`, padrão 14, desde o cadastro, sem cartão) | tudo |
+| Teste grátis (`TRIAL_DAYS`: padrão de **60 dias, dois meses, na versão beta** e 14 depois; desde o cadastro, sem cartão) | tudo |
 | Assinante (mensal ou anual) | tudo |
 | Pagamento atrasado, dentro da tolerância (`BILLING_GRACE_DAYS`, padrão 7) | tudo, com aviso |
 | Teste encerrado, atraso além da tolerância ou assinatura encerrada | **somente leitura** |

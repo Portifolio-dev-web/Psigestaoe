@@ -94,7 +94,8 @@ const TOPICS = [
 // (dias de teste, tolerância, preços) vêm da conta quando há login; sem login,
 // os padrões do servidor (backend/billing.py).
 function billingTopic(sub) {
-  const trialDays = sub?.trial_days ?? 14;
+  // Sem login vale o padrão do servidor na versão beta: 60 dias (dois meses).
+  const trialDays = sub?.trial_days ?? 60;
   const graceDays = sub?.grace_days ?? 7;
   return {
     id: "assinatura", icon: CreditCard, title: "Assinatura",

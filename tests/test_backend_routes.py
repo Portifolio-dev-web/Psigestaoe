@@ -3678,3 +3678,9 @@ async def test_admin_sees_and_marks_beta_interests(client, monkeypatch):
             contacted_at=datetime.now(timezone.utc) - timedelta(days=366)))
         await db.commit()
         assert await server.purge_subscription_interests(db) == 1
+
+
+def test_trial_is_two_months_during_beta():
+    """Versão beta: teste grátis de dois meses (60 dias); depois dela, 14."""
+    assert billing.default_trial_days(True) == 60
+    assert billing.default_trial_days(False) == 14
