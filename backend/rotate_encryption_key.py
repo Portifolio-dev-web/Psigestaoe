@@ -34,7 +34,7 @@ from sqlalchemy import select
 
 from crypto import dev_fallback_key, is_fernet_token, legacy_key_from_secret
 from database import AsyncSessionLocal
-from models import PatientIntake, EmailToken, Patient, Record, RecordVersion, Session, User
+from models import PatientIntake, EmailToken, Patient, Record, RecordVersion, Session, SubscriptionInterest, User
 
 # Tabela -> colunas criptografadas. Precisa acompanhar os encrypt_field() do server.py.
 #
@@ -44,6 +44,8 @@ from models import PatientIntake, EmailToken, Patient, Record, RecordVersion, Se
 # --apply UMA vez: os valores antigos em texto puro são criptografados (o
 # servidor continua lendo texto puro legado até lá, então nada quebra no meio).
 ENCRYPTED_COLUMNS = {
+    # Assinatura (versão beta): contato de quem quer assinar.
+    SubscriptionInterest: ("contact_email", "contact_phone"),
     Patient: ("full_name", "cpf", "rg", "phone", "email", "address", "emergency_contact", "initial_notes",
               # Fluxo clínico (C3): responsável legal do paciente menor de idade.
               "guardian_name", "guardian_cpf", "guardian_phone"),

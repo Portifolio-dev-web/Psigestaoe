@@ -276,6 +276,31 @@ def intake_incomplete_notice(to: str, name: str, reminders: int, warnings: int, 
     return OutgoingEmail(to, f"{subject} | {APP_NAME}", text, html)
 
 
+def interest_received(to: str, name: str, plan_label: str, price: str) -> OutgoingEmail:
+    """Versão beta: confirma para a pessoa que o interesse em assinar chegou."""
+    greeting = _greeting(name)
+    lines = [f"Recebemos o seu interesse em assinar o plano {plan_label} do {APP_NAME} ({price}).",
+             f"O {APP_NAME} está em versão beta: a assinatura ainda não é feita pelo sistema. A nossa equipe vai "
+             "entrar em contato pelo e-mail ou telefone que você deixou para combinar os próximos passos.",
+             "Até lá, nada é cobrado."]
+    text = f"{greeting}\n\n" + "\n\n".join(lines)
+    html = _html("Recebemos o seu interesse", [escape(greeting)] + [escape(line) for line in lines])
+    return OutgoingEmail(to, f"Interesse em assinar recebido | {APP_NAME}", text, html)
+
+
+def interest_admin_notice(to: str, name: str, plan_label: str, updated: bool, link: str) -> OutgoingEmail:
+    """Versão beta: avisa a equipe (administração) de um interesse novo. SEM os dados
+    de contato no e-mail: eles ficam só na tela Administração (minimização, LGPD)."""
+    greeting = _greeting(name)
+    what = ("Uma conta atualizou o contato para assinar" if updated else "Uma conta deixou o contato para assinar")
+    lines = [f"{what} o plano {plan_label}. Os dados de contato estão na tela Administração, em "
+             "\"Interessados em assinar\"."]
+    text = f"{greeting}\n\n" + "\n\n".join(lines) + f"\n\nAbrir a administração: {link}"
+    html = _html("Interesse em assinar", [escape(greeting)] + [escape(line) for line in lines],
+                 ("Abrir a administração", link))
+    return OutgoingEmail(to, f"Interesse em assinar | {APP_NAME}", text, html)
+
+
 def account_closed(to: str, name: str, deleted: int, retained: int, retained_until: Optional[str],
                    subscription_canceled: bool = False) -> OutgoingEmail:
     greeting = _greeting(name)

@@ -33,6 +33,9 @@ os.environ.setdefault("FERNET_KEY", TEST_FERNET_KEY)
 os.environ["MAIL_BACKEND"] = "memory"
 # A rotina de manutenção não roda sozinha nos testes (eles chamam as funções direto).
 os.environ["MAINTENANCE_ENABLED"] = "false"
+# Assinatura: os testes de pagamento usam o fluxo normal; a versão beta (padrão em
+# produção) tem testes próprios, que ligam billing.BETA.
+os.environ["BILLING_BETA"] = "false"
 
 from database import Base, get_db
 import billing
@@ -46,7 +49,8 @@ import observability
 import totp
 from crypto import legacy_key_from_secret
 from models import (
-    PatientIntake, AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session, User, UserSession,
+    PatientIntake, AuditLog, EmailToken, Patient, PatientSearchToken, Record, RecordVersion, Session,
+    SubscriptionInterest, User, UserSession,
 )
 from server import app
 
@@ -3596,3 +3600,81 @@ async def test_incomplete_intake_can_be_completed_in_read_only(client):
     assert done.json()["initial_notes"] == ""
     statuses = {i["id"]: i["status"] for i in (await client.get("/api/intake-links")).json()}
     assert statuses[first["id"]] == "completed" and statuses[second["id"]] == "incomplete"
+
+
+# Assinatura em VERSÃO BETA: "Assinar" registra o interesse (e-mail e telefone)
+BETA_CONTACT = {"plan": "monthly", "email": "contato.pessoal@example.com", "phone": "(11) 91234-5678"}
+
+
+@pytest.mark.anyio
+async def test_beta_subscription_collects_contact_instead_of_charging(client, monkeypatch):
+    monkeypatch.setattr(billing, "BETA", True)
+    monkeypatch.setattr(billing, "BILLING_PROVIDER", "simulado")
+    monkeypatch.setenv("ADMIN_EMAILS", "dona.beta@example.com")
+    async with _patient_client() as admin_client:  # quem administra recebe o aviso
+        assert (await register_account(admin_client, "dona.beta@example.com")).status_code == 200
+    email = "interessada@example.com"
+    await register_account(client, email)
+    sub = (await client.get("/api/auth/me")).json()["subscription"]
+    assert sub["beta"] is True and sub["prices"]["monthly"] == billing.PRICES["monthly"]  # o preço aparece
+
+    # O pagamento direto fica fechado no servidor (não só na tela).
+    blocked = await client.post("/api/billing/checkout", json={"plan": "monthly"})
+    assert blocked.status_code == 409 and blocked.json()["detail"]["code"] == "beta"
+
+    bad = await client.post("/api/billing/interest", json={"plan": "monthly", "email": "nao-e-email", "phone": "123"})
+    assert bad.status_code == 422
+    mailer.outbox.clear()
+    ok = await client.post("/api/billing/interest", json=BETA_CONTACT)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["interest"]["phone"] == "(11) 91234-5678" and ok.json()["interest"]["plan"] == "monthly"
+    to_user = [m for m in mailer.outbox if m.to == email]
+    to_admin = [m for m in mailer.outbox if m.to == "dona.beta@example.com"]
+    assert to_user and "versão beta" in to_user[0].text
+    # O aviso à equipe NÃO leva o contato (só a tela da administração mostra).
+    assert to_admin and "91234-5678" not in to_admin[0].text and "contato.pessoal" not in to_admin[0].text
+    async with client.session_factory() as db:
+        row = (await db.execute(select(SubscriptionInterest))).scalar_one()
+        assert "91234" not in row.contact_phone and "contato.pessoal" not in row.contact_email  # criptografado
+
+    # Enviar de novo atualiza o mesmo registro (sem duplicar).
+    again = await client.post("/api/billing/interest", json={**BETA_CONTACT, "plan": "annual"})
+    assert again.status_code == 200
+    async with client.session_factory() as db:
+        assert len((await db.execute(select(SubscriptionInterest))).scalars().all()) == 1
+    assert (await client.get("/api/billing/interest")).json()["interest"]["plan"] == "annual"
+    logs = (await client.get("/api/audit")).json()["items"]
+    assert any(log["detail"].startswith("Interesse em assinar registrado") for log in logs)
+    assert not any("91234" in (log["detail"] or "") for log in logs)  # o contato não vai para a trilha
+
+    # Encerrar a conta apaga o contato.
+    closed = await client.post("/api/account/close", json={"password": "Senha-segura-123", "confirmation": "ENCERRAR"})
+    assert closed.status_code == 200
+    async with client.session_factory() as db:
+        assert (await db.execute(select(SubscriptionInterest))).scalars().all() == []
+
+
+@pytest.mark.anyio
+async def test_admin_sees_and_marks_beta_interests(client, monkeypatch):
+    monkeypatch.setattr(billing, "BETA", True)
+    target_client, target_id = await _admin_setup(client, monkeypatch)
+    async with aclosing(target_client):
+        assert (await target_client.post("/api/billing/interest", json=BETA_CONTACT)).status_code == 200
+        # Quem não administra não vê a lista (a área não existe para ela).
+        assert (await target_client.post("/api/admin/interests/search", json={})).status_code == 404
+    await _enable_mfa(client)
+    listed = (await client.post("/api/admin/interests/search", json={})).json()
+    assert listed["counts"] == {"open": 1, "contacted": 0}
+    item = listed["items"][0]
+    assert item["account"]["user_id"] == target_id and item["phone"] == "(11) 91234-5678"
+    done = await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": True})
+    assert done.status_code == 200 and done.json()["contacted_at"]
+    assert (await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": True})).status_code == 409
+    contacted = (await client.post("/api/admin/interests/search", json={"status": "contacted"})).json()
+    assert contacted["counts"] == {"open": 0, "contacted": 1} and len(contacted["items"]) == 1
+    # 12 meses depois do contato, a manutenção apaga.
+    async with client.session_factory() as db:
+        await db.execute(update(SubscriptionInterest).values(
+            contacted_at=datetime.now(timezone.utc) - timedelta(days=366)))
+        await db.commit()
+        assert await server.purge_subscription_interests(db) == 1

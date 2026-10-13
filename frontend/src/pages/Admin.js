@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { Loader2, MoreVertical, Search, ShieldAlert } from "lucide-react";
+import { Loader2, Mail, MoreVertical, Phone, Search, ShieldAlert } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { formatDateTime } from "@/lib/datetime";
 import { PLAN_LABEL, formatDay } from "@/lib/subscription";
 import { countLabel } from "@/lib/utils";
 import AdminActionDialog from "@/components/AdminActionDialog";
+import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -149,6 +150,8 @@ export default function Admin() {
 
       {!blocked && (
         <>
+          {/* Versão beta da assinatura: quem deixou o contato para assinar. */}
+          <InterestsSection />
           <div className="flex flex-col gap-3">
             <div className="relative w-full sm:max-w-sm">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -307,3 +310,96 @@ function AccountsCards({ items, onAction }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// PRODUTO (assinatura, VERSÃO BETA): quem deixou e-mail e telefone para assinar.
+// A equipe liga ou escreve, combina a assinatura (ex.: cortesia ou prorrogar o
+// teste, no menu de cada conta) e marca como contatado. O contato só aparece
+// aqui (o aviso por e-mail à equipe não o leva). Sem nenhum interessado, a seção
+// não aparece.
+// ---------------------------------------------------------------------------
+function InterestsSection() {
+  const [status, setStatus] = useState("open");
+  const [data, setData] = useState(null);
+  const inFlight = useSingleFlight();
+
+  const load = useCallback(async () => {
+    try {
+      const { data: result } = await api.post("/admin/interests/search", { status });
+      setData(result);
+    } catch (err) {
+      setData({ items: [], counts: {} });
+    }
+  }, [status]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const markContacted = (item) => inFlight.run(item.id, async () => {
+    try {
+      await api.post(`/admin/interests/${item.id}/contacted`, { confirm: true });
+      toast.success("Marcado como contatado.");
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
+    }
+  });
+
+  const counts = data?.counts || {};
+  if (!data || (!counts.open && !counts.contacted)) return null;
+
+  return (
+    <Card className="border-slate-200 p-5 shadow-sm" data-testid="admin-interests">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="font-head text-lg font-bold text-[#0F172A]">Interessados em assinar</h2>
+          <p className="mt-0.5 text-sm text-slate-600">Versão beta: quem deixou o contato está esperando a equipe falar com ela.</p>
+        </div>
+        <div role="group" aria-label="Filtrar interessados" className="flex gap-2">
+          {[["open", "Aguardando contato"], ["contacted", "Contatados"]].map(([id, label]) => (
+            <button key={id} type="button" onClick={() => setStatus(id)} aria-pressed={status === id}
+              data-testid={`admin-interests-${id}`}
+              className={`min-h-9 rounded-full border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:ring-offset-1 ${
+                status === id ? "border-[#1E3A8A] bg-[#1E3A8A] text-white" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}>
+              {label} <span className={status === id ? "text-blue-100" : "text-slate-500"}>({counts[id] ?? 0})</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      {data.items.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-500">Ninguém nesta lista.</p>
+      ) : (
+        <ul className="mt-4 divide-y divide-slate-100 rounded-md border border-slate-200">
+          {data.items.map((item) => (
+            <li key={item.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"
+              data-testid={`admin-interest-${item.id}`}>
+              <div className="min-w-0 space-y-1 text-sm">
+                <p className="font-medium text-[#0F172A]">
+                  {item.account.name || "Sem nome"} <span className="font-normal text-slate-600">· {item.account.email}</span>
+                </p>
+                <p className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                  <StatusBadge account={{ status: item.status }} />
+                  Plano {PLAN_LABEL[item.plan]} · pediu em {formatDay(item.updated_at || item.created_at)}
+                  {item.contacted_at && ` · contatado em ${formatDay(item.contacted_at)}`}
+                </p>
+                <p className="flex flex-wrap gap-x-4 gap-y-1">
+                  <a href={`mailto:${item.email}`} className="inline-flex min-h-6 items-center gap-1.5 text-[#1E3A8A] underline underline-offset-2">
+                    <Mail className="h-4 w-4" aria-hidden="true" /> {item.email}
+                  </a>
+                  <a href={`tel:${item.phone.replace(/[^\d+]/g, "")}`} className="inline-flex min-h-6 items-center gap-1.5 text-[#1E3A8A] underline underline-offset-2">
+                    <Phone className="h-4 w-4" aria-hidden="true" /> {item.phone}
+                  </a>
+                </p>
+              </div>
+              {!item.contacted_at && (
+                <Button type="button" size="sm" variant="outline" className="shrink-0 border-slate-300"
+                  disabled={inFlight.isBusy(item.id)} onClick={() => markContacted(item)}
+                  data-testid={`admin-interest-contacted-${item.id}`}>
+                  {inFlight.isBusy(item.id) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Marcar como contatado
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}

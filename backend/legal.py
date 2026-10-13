@@ -47,7 +47,8 @@ logger = logging.getLogger("psigestao.legal")
 # 2026-10-13: na suspensão a senha é desativada e a nova é criada pelo link do
 # e-mail (revisão de segurança, RS1); o modo restrito não troca senha nem
 # desativa as duas etapas; e o cadastro incompleto tem prazo de 60 dias (RS2).
-PRIVACY_POLICY_VERSION = "2026-10-13"
+# 2026-10-13.2: versão beta da assinatura (contato de quem quer assinar).
+PRIVACY_POLICY_VERSION = "2026-10-13.2"
 PRIVACY_POLICY_UPDATED_AT = "13/10/2026"
 
 # SEGURANÇA/LGPD (varredura, item 12): nome e CPF reais tinham sido escritos
@@ -130,6 +131,9 @@ def privacy_policy() -> dict:
             "Assinatura do profissional: plano, situação (teste grátis, assinante, atraso, somente leitura, "
             "cortesia ou suspensa), datas de pagamento e os identificadores do meio de pagamento. Os dados "
             "do cartão ficam apenas com o meio de pagamento; o PsiGestão não os recebe.",
+            # Versão beta da assinatura: contato para a equipe.
+            "Interesse em assinar (versão beta): o e-mail e o telefone que o profissional deixa para a equipe "
+            "entrar em contato sobre a assinatura, com o plano escolhido. Usados só para esse contato.",
             "Pacientes (inseridos pelo profissional ou pelo próprio paciente, num link de cadastro "
             "temporário que o profissional envia): "
             "identificação (nome, CPF, RG, data de nascimento e idade), contato (telefone, e-mail, endereço e "
@@ -215,6 +219,8 @@ def privacy_policy() -> dict:
             "Registros de acesso: no mínimo 6 meses (Marco Civil da Internet).",
             "Trilha de auditoria: enquanto houver dados relacionados sob guarda.",
             "Conta suspensa: os dados continuam guardados, sem alteração, durante toda a suspensão.",
+            "Interesse em assinar (versão beta): até 12 meses depois de a equipe fazer o contato, ou até o "
+            "encerramento da conta, o que vier primeiro.",
             # RS2: prazo do cadastro incompleto.
             "Cadastro incompleto (link de cadastro em que o tempo acabou antes do envio): até 60 dias depois que o "
             "tempo acabou. O profissional recebe um lembrete por e-mail e um aviso 7 dias antes; se não completar "
@@ -325,6 +331,11 @@ def terms_of_use() -> dict:
             "(Resolução CFP nº 001/2009) e então são eliminados automaticamente.",
         ]),
         ("5. Planos, teste grátis e pagamento", [
+            # Versão beta da assinatura.
+            "Versão beta: enquanto o PsiGestão estiver em versão beta, a assinatura não é feita pelo sistema e "
+            "nada é cobrado por ele. Quem tiver interesse em assinar deixa e-mail e telefone em Configurações > "
+            "Assinatura, e a equipe entra em contato para combinar. As regras abaixo valem quando o pagamento "
+            "pelo sistema começar.",
             f"Toda conta nova tem {billing.TRIAL_DAYS} dias de teste grátis, sem cartão. Depois, o uso completo "
             f"depende de um plano: mensal ({_brl(billing.PRICES['monthly'])}) ou anual "
             f"({_brl(billing.PRICES['annual'])}), pelos valores exibidos no sistema no momento da contratação. "

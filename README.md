@@ -211,6 +211,15 @@ seção "cadastro pelo paciente"); a página do paciente é `frontend/src/pages/
 
 ## Assinatura: planos, teste grátis, cortesia e somente leitura
 
+**Versão beta (`BILLING_BETA`, ligada por padrão).** Os preços aparecem, mas ninguém paga pelo
+sistema: "Assinar" explica que é uma versão beta e recolhe e-mail e telefone (tabela
+`subscription_interests`, contato criptografado). A equipe vê os interessados em
+**Administração → Interessados em assinar** (recebe um aviso por e-mail, sem o contato), fala com
+a pessoa (e, se for o caso, concede cortesia ou prorroga o teste) e marca como contatado. O
+contato é apagado 12 meses depois do contato ou ao encerrar a conta. Com o modo beta ligado, o
+servidor também recusa o pagamento direto (`/billing/checkout`). Para cobrar de verdade:
+`BILLING_BETA=false` e um meio de pagamento real (ver "Meio de pagamento", abaixo).
+
 As regras ficam em `backend/billing.py`; as rotas, em `server.py` (seção "assinatura").
 
 | Situação | O que a pessoa pode fazer |

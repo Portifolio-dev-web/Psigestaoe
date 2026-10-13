@@ -12,6 +12,7 @@ import { Card } from "@/components/ui/card";
 import {
   PLAN_LABEL, READ_ONLY_ALLOWED, READ_ONLY_REASON, daysLabel, formatBRL, formatDay, isTrustedCheckoutUrl,
 } from "@/lib/subscription";
+import BetaInterestDialog from "@/components/settings/BetaInterestDialog";
 
 // ---------------------------------------------------------------------------
 // PRODUTO (assinatura): Configurações > Assinatura.
@@ -63,6 +64,8 @@ export default function SubscriptionCard() {
   const [confirm, confirmDialog] = useConfirm();
   const inFlight = useSingleFlight();
   const [checking, setChecking] = useState(false);
+  // Versão beta: o plano escolhido em "Assinar" abre a janela de interesse (contato).
+  const [interestPlan, setInterestPlan] = useState(null);
   const stateRef = useRef(sub?.state);
   stateRef.current = sub?.state;
 
@@ -174,6 +177,14 @@ export default function SubscriptionCard() {
 
       {showPlans && (
         <>
+          {/* PRODUTO (versão beta): os preços aparecem, mas nada é cobrado pelo sistema;
+              "Assinar" explica e recolhe o contato para a equipe (BetaInterestDialog). */}
+          {sub.beta && (
+            <p className="mt-4 rounded-md bg-blue-50 px-3 py-2 text-sm text-[#0F2C59]" role="note" data-testid="beta-note">
+              <b>Versão beta:</b> os preços já estão definidos, mas a assinatura ainda não é feita pelo sistema e nada
+              é cobrado. Toque em Assinar para deixar o seu contato: a equipe fala com você.
+            </p>
+          )}
           <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
             {plans.map((plan) => (
               <div key={plan.id} className="flex flex-col gap-3 rounded-lg border border-slate-200 p-4" data-testid={`plan-${plan.id}`}>
@@ -183,21 +194,24 @@ export default function SubscriptionCard() {
                     <span className="text-sm text-slate-600">{plan.unit}</span></p>
                   <p className="mt-1 text-xs text-slate-600">{plan.note}</p>
                 </div>
-                <Button onClick={() => subscribe(plan.id)} disabled={inFlight.isBusy(`checkout:${plan.id}`)}
+                <Button onClick={() => (sub.beta ? setInterestPlan(plan.id) : subscribe(plan.id))}
+                  disabled={inFlight.isBusy(`checkout:${plan.id}`)}
                   className="mt-auto bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid={`subscribe-${plan.id}`}>
                   {inFlight.isBusy(`checkout:${plan.id}`) ? <Loader2 className="h-4 w-4 animate-spin" /> : `Assinar ${plan.title.toLowerCase()}`}
                 </Button>
               </div>
             ))}
           </div>
-          {!sub.checkout_available && (
+          {!sub.beta && !sub.checkout_available && (
             <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900" role="note">
               O pagamento on-line ainda não está disponível. Para assinar, fale com o suporte (página de Ajuda).
             </p>
           )}
           <ul className="mt-4 space-y-1 text-xs text-slate-600">
-            <li className="flex gap-2"><CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
-              O pagamento é feito na página segura do meio de pagamento; o PsiGestão não recebe os dados do seu cartão.</li>
+            {!sub.beta && (
+              <li className="flex gap-2"><CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
+                O pagamento é feito na página segura do meio de pagamento; o PsiGestão não recebe os dados do seu cartão.</li>
+            )}
             <li className="flex gap-2"><CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
               Se a assinatura acabar, nada é apagado: {READ_ONLY_ALLOWED.charAt(0).toLowerCase() + READ_ONLY_ALLOWED.slice(1)}</li>
           </ul>
@@ -231,6 +245,9 @@ export default function SubscriptionCard() {
         </div>
       )}
       {confirmDialog}
+      {interestPlan && (
+        <BetaInterestDialog plan={interestPlan} prices={sub.prices} onClose={() => setInterestPlan(null)} />
+      )}
     </Card>
   );
 }

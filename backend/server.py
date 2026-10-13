@@ -67,7 +67,7 @@ from http_security import (
 )
 from models import (
     AuditLog, BillingEventLog, EmailToken, Patient, PatientIntake, PatientSearchToken, Record, RecordVersion,
-    Session, User, UserSession, now_utc,
+    Session, SubscriptionInterest, User, UserSession, now_utc,
 )
 
 # MONITORAMENTO (escala): configura os logs antes de qualquer outra coisa,
@@ -2474,6 +2474,13 @@ async def apply_billing_event(db: AsyncSession, user: User, event: billing.Billi
 async def billing_checkout(data: CheckoutInput, user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     """Começa a assinatura: devolve o endereço da página de pagamento do meio.
     Usa get_active_user (não get_writer): quem está no somente leitura PRECISA conseguir assinar."""
+    if billing.BETA:
+        # Versão beta: nada é cobrado pelo sistema; a tela registra o interesse
+        # (POST /billing/interest). A regra vale aqui também, não só na tela.
+        raise HTTPException(status_code=409, detail={
+            "code": "beta",
+            "msg": "O PsiGestão está em versão beta: a assinatura ainda não é feita pelo sistema. Deixe o seu "
+                   "contato em Configurações > Assinatura e a equipe fala com você."})
     state = billing.access_state(user)
     if state["state"] == "courtesy":
         raise HTTPException(status_code=409, detail={"code": "courtesy", "msg": "Sua conta é cortesia: não há o que pagar."})
@@ -2512,6 +2519,107 @@ async def billing_cancel(data: EndSessionsInput, user: User = Depends(get_active
                                  user_id=user.user_id)
     await apply_billing_event(db, user, event, user.billing_provider or "app", actor=user.email)
     return public_user(user)
+
+
+# ---------------------------------------------------------------------------
+# PRODUTO (assinatura, VERSÃO BETA): interesse em assinar.
+#
+# Enquanto billing.BETA estiver ligado, ninguém paga pelo sistema. Os preços
+# aparecem; "Assinar" explica que é uma versão beta e recolhe e-mail e telefone,
+# e a equipe entra em contato (tela Administração > Interessados em assinar).
+# LGPD: finalidade única (falar sobre a assinatura), base legal "procedimentos
+# preliminares a contrato, a pedido do titular" (art. 7º, V); contato
+# criptografado; o aviso à equipe não leva o contato; apagado ao encerrar a conta
+# e 12 meses depois de contatado (purge_subscription_interests).
+# ---------------------------------------------------------------------------
+INTEREST_KEEP_DAYS = 365
+
+
+class BillingInterestInput(BaseModel):
+    plan: Literal["monthly", "annual"]
+    email: str = Field(max_length=254)
+    phone: str = Field(max_length=30)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        try:
+            return validate_email((value or "").strip(), check_deliverability=False).normalized
+        except EmailNotValidError:
+            raise ValueError("E-mail inválido. Ex.: nome@exemplo.com.") from None
+
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls, value: str) -> str:
+        value = (value or "").strip()
+        digits = re.sub(r"\D", "", value)
+        if not _PHONE_CHARS.fullmatch(value) or not 10 <= len(digits) <= 15:
+            raise ValueError("Telefone inválido. Informe o DDD e o número, ex.: (11) 91234-5678.")
+        return value
+
+
+def _interest_public(interest: SubscriptionInterest) -> dict:
+    return {
+        "id": interest.id,
+        "plan": interest.plan,
+        "email": decrypt_field(interest.contact_email),
+        "phone": decrypt_field(interest.contact_phone),
+        "created_at": _iso(_as_utc(interest.created_at)),
+        "updated_at": _iso(_as_utc(interest.updated_at)),
+        "contacted_at": _iso(_as_utc(interest.contacted_at)),
+    }
+
+
+async def _open_interest(db: AsyncSession, user: User) -> Optional[SubscriptionInterest]:
+    """O interesse ainda não atendido da conta (enviar de novo atualiza este)."""
+    return (await db.execute(select(SubscriptionInterest).where(
+        SubscriptionInterest.user_id == user.user_id, SubscriptionInterest.contacted_at.is_(None),
+    ).order_by(desc(SubscriptionInterest.created_at)).limit(1))).scalar_one_or_none()
+
+
+@api_router.get("/billing/interest")
+async def billing_interest(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """O contato que a pessoa já deixou (para a tela mostrar e deixar atualizar)."""
+    interest = await _open_interest(db, user)
+    return {"interest": _interest_public(interest) if interest else None}
+
+
+@api_router.post("/billing/interest", dependencies=[Depends(rate_limit("billing-interest", 10, 3600))])
+async def billing_register_interest(data: BillingInterestInput, background: BackgroundTasks,
+                                    user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    """Versão beta: registra (ou atualiza) o interesse em assinar e avisa a equipe."""
+    if not billing.BETA:
+        raise HTTPException(status_code=409, detail={
+            "code": "not_beta", "msg": "A assinatura já é feita pelo sistema: use o botão Assinar."})
+    state = billing.access_state(user)
+    if state["state"] == "courtesy":
+        raise HTTPException(status_code=409, detail={"code": "courtesy", "msg": "Sua conta é cortesia: não há o que pagar."})
+    if state["state"] == "active" and not state["cancel_at_period_end"]:
+        raise HTTPException(status_code=409, detail={"code": "already_active", "msg": "Você já tem uma assinatura ativa."})
+    await enforce(f"billing-interest-user:{user.user_id}", 5, 3600)
+    interest = await _open_interest(db, user)
+    updated = interest is not None
+    if interest is None:
+        interest = SubscriptionInterest(user_id=user.user_id)
+        db.add(interest)
+    interest.plan = data.plan
+    interest.contact_email = encrypt_field(data.email)
+    interest.contact_phone = encrypt_field(data.phone)
+    interest.updated_at = now_utc()
+    await db.commit()
+    await db.refresh(interest)
+    plan_label = billing.PLAN_LABELS[data.plan]
+    # Trilha: sem o contato (fica só na tabela, criptografado).
+    await log_audit(db, user.user_id, user.email, "assinatura", "assinatura", user.user_id,
+                    f"Interesse em assinar {'atualizado' if updated else 'registrado'} (plano {plan_label}; "
+                    "versão beta: a equipe entra em contato)")
+    price = "R$ " + f"{billing.PRICES[data.plan] / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    background.add_task(mailer.send_email, mailer.interest_received(
+        user.email, user.name or "", plan_label, f"{price} por {'mês' if data.plan == 'monthly' else 'ano'}"))
+    for admin in await _admin_recipients(db):
+        background.add_task(mailer.send_email, mailer.interest_admin_notice(
+            admin.email, admin.name or "", plan_label, updated, frontend_link("/administracao")))
+    return {"interest": _interest_public(interest)}
 
 
 @api_router.post("/billing/simulate")
@@ -4488,6 +4596,17 @@ async def _confirm_admin(db: AsyncSession, admin: User, confirm: str) -> None:
             "msg": ("Senha incorreta." if admin.password_hash else "Código incorreto.") + " Nada foi alterado."})
 
 
+async def _log_admin_view(db: AsyncSession, admin: User, detail: str) -> None:
+    """AD6: consulta da administração na trilha, no máximo uma vez a cada
+    ADMIN_VIEW_LOG_MINUTES por tipo (filtros e páginas não enchem a trilha)."""
+    logged_recently = await db.scalar(select(exists().where(
+        AuditLog.owner_id == admin.user_id, AuditLog.action == "visualizar",
+        AuditLog.entity_type == "administracao", AuditLog.detail == detail,
+        AuditLog.timestamp >= now_utc() - timedelta(minutes=ADMIN_VIEW_LOG_MINUTES))))
+    if not logged_recently:
+        await log_audit(db, admin.user_id, admin.email, "visualizar", "administracao", admin.user_id, detail)
+
+
 async def _admin_target(db: AsyncSession, user_id: str) -> User:
     target = await db.get(User, user_id)
     if target is None or target.closed_at is not None:
@@ -4659,18 +4778,57 @@ async def admin_list_users(data: AdminListInput, admin: User = Depends(get_admin
     # (lista / busca). Antes cada clique em filtro ou página gravava um registro, e
     # as ações de verdade se perdiam no meio. A trilha continua dizendo que houve
     # consulta naquele intervalo.
-    detail = "Lista de contas consultada" + (" (com busca)" if term else "")
-    logged_recently = await db.scalar(select(exists().where(
-        AuditLog.owner_id == admin.user_id, AuditLog.action == "visualizar",
-        AuditLog.entity_type == "administracao", AuditLog.detail == detail,
-        AuditLog.timestamp >= now - timedelta(minutes=ADMIN_VIEW_LOG_MINUTES))))
-    if not logged_recently:
-        await log_audit(db, admin.user_id, admin.email, "visualizar", "administracao", admin.user_id, detail)
+    await _log_admin_view(db, admin, "Lista de contas consultada" + (" (com busca)" if term else ""))
     return {
         "items": [_admin_account(u, admin, counts.get(u.user_id, 0), last.get(u.user_id), now) for u in page_users],
         "total": total, "page": page, "pages": pages, "page_size": ADMIN_PAGE_SIZE, "summary": summary,
         "trial_days_options": list(ADMIN_TRIAL_DAYS),
     }
+
+
+class AdminInterestListInput(BaseModel):
+    status: Literal["open", "contacted"] = "open"
+
+
+@api_router.post("/admin/interests/search", dependencies=[Depends(rate_limit("admin-read", 60, 60))])
+async def admin_list_interests(data: AdminInterestListInput, admin: User = Depends(get_admin),
+                               db: AsyncSession = Depends(get_db)):
+    """Versão beta: quem quer assinar, com o contato, para a equipe falar com a pessoa."""
+    base = (select(SubscriptionInterest, User).join(User, User.user_id == SubscriptionInterest.user_id)
+            .where(User.closed_at.is_(None)))
+    opened = SubscriptionInterest.contacted_at.is_(None)
+    stmt = base.where(opened if data.status == "open" else SubscriptionInterest.contacted_at.is_not(None))
+    rows = (await db.execute(stmt.order_by(desc(SubscriptionInterest.created_at)).limit(500))).all()
+    counts = {}
+    for key, condition in (("open", opened), ("contacted", SubscriptionInterest.contacted_at.is_not(None))):
+        counts[key] = await db.scalar(select(func.count()).select_from(SubscriptionInterest).join(
+            User, User.user_id == SubscriptionInterest.user_id).where(User.closed_at.is_(None), condition))
+    await _log_admin_view(db, admin, "Lista de interessados em assinar consultada")
+    return {
+        "items": [{**_interest_public(interest),
+                   "account": {"user_id": owner.user_id, "name": owner.name or "", "email": owner.email},
+                   "status": "suspended" if owner.suspended_at else billing.access_state(owner)["state"]}
+                  for interest, owner in rows],
+        "counts": counts,
+    }
+
+
+@api_router.post("/admin/interests/{interest_id}/contacted", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
+async def admin_interest_contacted(data: EndSessionsInput, interest_id: str = PathParam(max_length=40),
+                                   admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
+    """A equipe falou com a pessoa: sai da lista de abertos (e o prazo de 12 meses começa)."""
+    interest = await db.get(SubscriptionInterest, interest_id)
+    if interest is None:
+        raise HTTPException(status_code=404, detail="Não encontrado.")
+    if interest.contacted_at is not None:
+        raise HTTPException(status_code=409, detail={"code": "no_change", "msg": "Já estava marcado como contatado."})
+    interest.contacted_at = now_utc()
+    interest.contacted_by = admin.user_id
+    await db.commit()
+    await db.refresh(interest)
+    await log_audit(db, admin.user_id, admin.email, "assinatura", "administracao", interest.user_id,
+                    "Interessado em assinar marcado como contatado")
+    return _interest_public(interest)
 
 
 @api_router.post("/admin/users/{user_id}/courtesy", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
@@ -5422,6 +5580,8 @@ async def _close_account(db: AsyncSession, user: User) -> dict:
     # Produto (cadastro pelo paciente): links e rascunhos de cadastro não são
     # prontuário: saem na hora.
     await db.execute(delete(PatientIntake).where(PatientIntake.owner_id == user.user_id))
+    # Versão beta: o contato deixado para assinar também sai (finalidade acabou).
+    await db.execute(delete(SubscriptionInterest).where(SubscriptionInterest.user_id == user.user_id))
 
     user.closed_at = now
     user.purge_after = max(last_deadline or now, now + ACCESS_LOG_RETENTION)
@@ -5648,6 +5808,17 @@ async def tend_incomplete_intakes(db: AsyncSession, now: Optional[datetime] = No
             "intakes_discarded": discarded}
 
 
+async def purge_subscription_interests(db: AsyncSession, now: Optional[datetime] = None) -> int:
+    """Versão beta: o contato de quem quis assinar sai 12 meses depois de a equipe
+    marcar como contatado (dado só pelo tempo necessário, LGPD art. 15)."""
+    now = now or now_utc()
+    result = await db.execute(delete(SubscriptionInterest).where(
+        SubscriptionInterest.contacted_at.is_not(None),
+        SubscriptionInterest.contacted_at < now - timedelta(days=INTEREST_KEEP_DAYS)))
+    await db.commit()
+    return result.rowcount or 0
+
+
 async def purge_patient_intakes(db: AsyncSession, now: Optional[datetime] = None) -> int:
     """Produto (cadastro pelo paciente): apaga links encerrados há mais de
     INTAKE_KEEP_DAYS dias (enviados, completados, cancelados, vencidos sem nada
@@ -5684,6 +5855,7 @@ async def run_maintenance() -> dict:
             # RS2: lembretes/avisos/descarte dos incompletos ANTES da limpeza dos links.
             result.update(await tend_incomplete_intakes(db))
             result["purged_intakes"] = await purge_patient_intakes(db)
+            result["purged_interests"] = await purge_subscription_interests(db)
             return result
         finally:
             if postgres:

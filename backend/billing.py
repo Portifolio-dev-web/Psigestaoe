@@ -56,6 +56,12 @@ PRICES = {
     "annual": _int_env("PRICE_ANNUAL_CENTS", 59000),
 }
 BILLING_PROVIDER = os.environ.get("BILLING_PROVIDER", "").strip().lower()
+# PRODUTO (versão beta): enquanto BILLING_BETA não for "false", ninguém paga pelo
+# sistema. Os preços aparecem, e "Assinar" explica que é uma versão beta e recolhe
+# e-mail e telefone para a equipe entrar em contato (SubscriptionInterest). O
+# padrão é LIGADO: esquecer a variável nunca começa a cobrar ninguém por engano.
+# Desligue (BILLING_BETA=false) quando o meio de pagamento real estiver pronto.
+BETA = os.environ.get("BILLING_BETA", "true").strip().lower() != "false"
 KNOWN_PROVIDERS = ("", "simulado")
 
 READ_ONLY_MESSAGES = {
@@ -179,6 +185,7 @@ def public_state(user, now: Optional[datetime] = None) -> dict:
         "trial_days": TRIAL_DAYS,
         "grace_days": GRACE_DAYS,
         "checkout_available": bool(BILLING_PROVIDER),
+        "beta": BETA,  # versão beta: "Assinar" registra o interesse (sem cobrança)
         "simulated": BILLING_PROVIDER == "simulado",
     }
 

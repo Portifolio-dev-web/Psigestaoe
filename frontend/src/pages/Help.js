@@ -101,8 +101,11 @@ function billingTopic(sub) {
     items: [
       ["Como funciona o teste grátis?",
         `Ao criar a conta você tem ${trialDays} dias com tudo liberado, sem cartão. Se assinar durante o teste, os dias que sobrarem não se perdem: o período pago começa depois deles.`],
+      // Versão beta: sem cobrança pelo sistema (sem login, vale o padrão: beta).
       ["Como assino ou mudo de plano?",
-        "Em Configurações > Assinatura, escolha mensal ou anual. O pagamento é feito na página segura do meio de pagamento; o PsiGestão não recebe os dados do seu cartão."],
+        sub?.beta === false
+          ? "Em Configurações > Assinatura, escolha mensal ou anual. O pagamento é feito na página segura do meio de pagamento; o PsiGestão não recebe os dados do seu cartão."
+          : "O PsiGestão está em versão beta: a assinatura ainda não é feita pelo sistema e nada é cobrado. Em Configurações > Assinatura, toque em Assinar no plano que preferir e deixe o seu e-mail e telefone: a equipe entra em contato para combinar."],
       ["O que acontece se eu não assinar ou parar de pagar?",
         "Nada é apagado. A conta fica em somente leitura: você continua vendo e exportando tudo (PDF, JSON e o arquivo completo da conta), corrigindo cadastros e atendendo pedidos LGPD dos pacientes, mas não cria pacientes, evoluções nem sessões. Assim você continua cumprindo a guarda de 5 anos dos prontuários exigida pelo CFP."],
       ["E se o pagamento atrasar?",

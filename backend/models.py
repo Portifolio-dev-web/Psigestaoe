@@ -398,6 +398,29 @@ class PatientIntake(Base):
     )
 
 
+class SubscriptionInterest(Base):
+    """PRODUTO (assinatura, versão beta): quem quer assinar deixa e-mail e telefone,
+    e a equipe entra em contato para combinar (ainda não há cobrança pelo sistema).
+
+    Um registro "aberto" por conta (contacted_at vazio): enviar de novo atualiza o
+    mesmo. Contato criptografado (dado pessoal, finalidade única: falar sobre a
+    assinatura). Retenção: apagado ao encerrar a conta e 12 meses depois de a
+    equipe marcar como contatado (purge_subscription_interests em server.py).
+    Migração: alembic/versions/20261013_subscription_interest.py
+    """
+    __tablename__ = "subscription_interests"
+
+    id = Column(String, primary_key=True, default=lambda: f"int_{uuid.uuid4().hex[:12]}")
+    user_id = Column(String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    plan = Column(String, nullable=False)                  # "monthly" | "annual"
+    contact_email = Column(Text, default="")               # [CRIPTOGRAFADO]
+    contact_phone = Column(Text, default="")               # [CRIPTOGRAFADO]
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+    updated_at = Column(DateTime(timezone=True), default=now_utc)
+    contacted_at = Column(DateTime(timezone=True), nullable=True)
+    contacted_by = Column(String, nullable=True)           # user_id de quem administra
+
+
 # ---------------------------------------------------------------------------
 # Prontuários e Versionamento
 # ---------------------------------------------------------------------------
