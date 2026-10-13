@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { Check, Copy, Link2, Loader2, MessageCircle } from "lucide-react";
+import { Check, Copy, Link2, Loader2, MessageCircle, Share2 } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { useConfirm } from "@/hooks/useConfirm";
 import { useSingleFlight } from "@/hooks/useSingleFlight";
@@ -50,6 +50,7 @@ export default function IntakeLinksDialog({ open, onOpenChange, onReviewIncomple
   const [label, setLabel] = useState("");
   const [created, setCreated] = useState(null); // { url, expires_at } do link recém-gerado
   const [copied, setCopied] = useState(false);
+  const [copiedMessage, setCopiedMessage] = useState(false); // RS3: "Copiar mensagem"
   const [links, setLinks] = useState(null);
   const inFlight = useSingleFlight();
   const [confirm, confirmDialog] = useConfirm();
@@ -77,6 +78,7 @@ export default function IntakeLinksDialog({ open, onOpenChange, onReviewIncomple
     if (!open) {
       setCreated(null);
       setCopied(false);
+      setCopiedMessage(false);
       setLabel("");
     }
   }, [open]);
@@ -86,6 +88,7 @@ export default function IntakeLinksDialog({ open, onOpenChange, onReviewIncomple
       const { data } = await api.post("/intake-links", { label: label.trim() });
       setCreated(data);
       setCopied(false);
+      setCopiedMessage(false);
       setLabel("");
       load();
     } catch (err) {
@@ -143,10 +146,42 @@ export default function IntakeLinksDialog({ open, onOpenChange, onReviewIncomple
     }
   });
 
-  const whatsappText = created
+  // ---------------------------------------------------------------------------
+  // Revisão de segurança (RS3): o envio ao paciente NÃO passa mais por um endereço.
+  // Antes, "Enviar pelo WhatsApp" abria wa.me/?text=<mensagem com o link>: o token
+  // ficava no histórico do navegador da psicóloga e passava em texto aberto pelo
+  // redirecionamento do wa.me (servidores da Meta). Agora:
+  //   - "Copiar mensagem": o texto pronto vai para a área de transferência e a
+  //     psicóloga cola na conversa (a conversa do WhatsApp é criptografada);
+  //   - "Compartilhar" (celular e navegadores que suportam): a folha de
+  //     compartilhamento do sistema entrega o texto direto ao aplicativo escolhido.
+  // ---------------------------------------------------------------------------
+  const message = created
     ? `Olá! Este é o link para você preencher seu cadastro com segurança. Ele vale por 30 minutos para começar; `
       + `depois de começar, são 10 minutos para terminar: ${created.url}`
     : "";
+  const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message);
+      setCopiedMessage(true);
+      toast.success("Mensagem copiada. Cole na conversa com o paciente.");
+    } catch {
+      // Sem permissão de área de transferência: seleciona o link para copiar à mão.
+      document.getElementById("intake-link-url")?.select();
+      toast.info("Selecione e copie o link no campo acima.");
+    }
+  };
+
+  const share = async () => {
+    try {
+      await navigator.share({ text: message });
+    } catch (err) {
+      // Fechar a folha de compartilhamento sem escolher nada não é erro.
+      if (err?.name !== "AbortError") toast.error("Não foi possível abrir o compartilhamento. Use “Copiar mensagem”.");
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -184,16 +219,23 @@ export default function IntakeLinksDialog({ open, onOpenChange, onReviewIncomple
                 {copied ? <Check className="h-4 w-4" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
                 {copied ? "Copiado" : "Copiar link"}
               </Button>
-              {/* Verde-escuro do WhatsApp: o verde claro com texto branco não tem contraste (WCAG 1.4.3). */}
-              <a href={`https://wa.me/?text=${encodeURIComponent(whatsappText)}`} target="_blank" rel="noopener noreferrer"
-                className="inline-flex h-10 items-center gap-2 rounded-md bg-[#075E54] px-4 text-sm font-medium text-white hover:bg-[#054C44] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:ring-offset-2"
-                data-testid="intake-whatsapp">
-                <MessageCircle className="h-4 w-4" aria-hidden="true" /> Enviar pelo WhatsApp
-              </a>
+              {/* RS3: a mensagem com o link vai pela área de transferência, não por um endereço.
+                  Verde-escuro do WhatsApp: o verde claro com texto branco não tem contraste (WCAG 1.4.3). */}
+              <Button type="button" onClick={copyMessage} className="gap-2 bg-[#075E54] hover:bg-[#054C44]"
+                data-testid="intake-copy-message">
+                {copiedMessage ? <Check className="h-4 w-4" aria-hidden="true" /> : <MessageCircle className="h-4 w-4" aria-hidden="true" />}
+                {copiedMessage ? "Mensagem copiada" : "Copiar mensagem para o WhatsApp"}
+              </Button>
+              {canShare && (
+                <Button type="button" onClick={share} variant="outline" className="gap-2 border-slate-300 bg-white"
+                  data-testid="intake-share">
+                  <Share2 className="h-4 w-4" aria-hidden="true" /> Compartilhar
+                </Button>
+              )}
             </div>
             <p className="text-xs text-[#0F2C59]">
+              Cole a mensagem na conversa com o paciente. Mande somente para ele: quem tiver o link pode preencher.
               O link aparece só agora (por segurança, o sistema não guarda uma cópia). Se perder, gere outro.
-              Mande somente para o paciente: quem tiver o link pode preencher.
             </p>
           </div>
         )}

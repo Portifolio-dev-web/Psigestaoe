@@ -182,7 +182,9 @@ A API precisa listar o endereço do frontend em `CORS_ORIGINS`.
 
 Substitui a antiga integração com o Google Forms (removida, com as colunas `webhook_token_*`,
 na migração `20261009_patient_intake`). Em **Pacientes → Link de cadastro** a psicóloga gera
-um link e manda ao paciente (WhatsApp, e-mail). As regras ficam no servidor (`server.py`,
+um link e manda ao paciente (WhatsApp, e-mail) com "Copiar mensagem" ou "Compartilhar": o
+link nunca vai num endereço como `wa.me/?text=`, que o deixaria no histórico do navegador e nos
+logs do redirecionamento (revisão de segurança, RS3). As regras ficam no servidor (`server.py`,
 seção "cadastro pelo paciente"); a página do paciente é `frontend/src/pages/PatientIntake.js`.
 
 - o link vale **30 minutos para começar**. Abrir a página não gasta o link (a prévia

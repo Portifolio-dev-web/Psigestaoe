@@ -66,7 +66,7 @@ const TOPICS = [
         "A busca de Pacientes (e a da agenda) aceita o nome, o telefone (pelo menos 8 números, com ou sem DDD) ou o CPF, inclusive os do responsável."],
       // Produto (cadastro pelo paciente): o link temporário que substituiu o Google Forms.
       ["Como o paciente preenche o próprio cadastro?",
-        "Em Pacientes, toque em Link de cadastro e gere um link. Mande pelo WhatsApp ou por e-mail: ele vale 30 minutos para o paciente começar. Depois de começar, o paciente tem 10 minutos (pode pedir mais tempo) e o que ele digita é salvo sozinho. Se o tempo acabar antes do envio, o cadastro aparece como incompleto (no Painel e na mesma janela), para você revisar e completar com ele. Incompletos ficam guardados por até 60 dias, com lembrete e aviso por e-mail antes do descarte (RS2)."],
+        "Em Pacientes, toque em Link de cadastro e gere um link. Toque em “Copiar mensagem” (ou “Compartilhar”, no celular) e mande só para o paciente, pelo WhatsApp ou por e-mail: quem tiver o link pode preencher. Ele vale 30 minutos para o paciente começar. Depois de começar, o paciente tem 10 minutos (pode pedir mais tempo) e o que ele digita é salvo sozinho. Se o tempo acabar antes do envio, o cadastro aparece como incompleto (no Painel e na mesma janela), para você revisar e completar com ele. Incompletos ficam guardados por até 60 dias, com lembrete e aviso por e-mail antes do descarte (RS2)."],
       ["Paciente menor de idade: o que muda?",
         "Pela data de nascimento, o cadastro pede os dados do responsável legal, que é quem dá o consentimento."],
       ["Arquivar, anonimizar ou excluir?",
