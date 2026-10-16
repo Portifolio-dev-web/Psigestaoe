@@ -16,6 +16,7 @@ import { PATIENT_INTAKE_PATH, isPatientIntakePage } from "@/lib/patientIntakeRou
 // (React.lazy). Antes o app inteiro vinha num único arquivo de ~250 KB
 // (compactado), inclusive para quem só abria a tela de login. O que é comum
 // a todas (layout, bloqueio, aceite da política) continua no arquivo principal.
+const Landing = lazy(() => import("@/pages/Landing"));
 const Login = lazy(() => import("@/pages/Login"));
 const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
 const EmailLinkPassword = lazy(() => import("@/pages/EmailLinkPassword"));
@@ -122,6 +123,11 @@ function AppRouter() {
   return (
     <Suspense fallback={<LoadingScreen />}>
     <Routes>
+      {/* DESIGN (pedido do usuário, prévia validada): tela de entrada antes
+          do login/cadastro — antes não existia "/" (caía na 404, item D2 da
+          varredura). PublicOnly: quem já tem sessão ativa vai direto ao
+          Painel, igual a /login e /register abaixo. */}
+      <Route path="/" element={<PublicOnly><Landing /></PublicOnly>} />
       <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
       {/* DESIGN: cadastro passou a ser o mesmo componente do login, num
           cartão só que alterna de modo (ver pages/Login.js) — o caminho

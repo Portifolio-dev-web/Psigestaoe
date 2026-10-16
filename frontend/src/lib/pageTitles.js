@@ -12,6 +12,7 @@
 const APP_NAME = "PsiGestão";
 
 const PAGES = [
+  [/^\/$/, "Bem-vindo(a)"],
   [/^\/login\/?$/, "Entrar"],
   [/^\/register\/?$/, "Criar conta"],
   [/^\/esqueci-senha\/?$/, "Esqueci minha senha"],

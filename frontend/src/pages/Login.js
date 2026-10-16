@@ -35,7 +35,7 @@ const HERO_COPY = {
   // Mostrado enquanto o modo ATUAL é "login": convite para quem ainda não tem conta.
   login: {
     title: "Ainda não tem conta?",
-    text: "Organize sua clínica com prontuários protegidos por criptografia e conformidade com o CFP.",
+    text: "Organize suas consultas com prontuários protegidos por criptografia e conformidade com o CFP.",
     buttonLabel: "Criar conta",
   },
   // Mostrado enquanto o modo ATUAL é "register": convite para quem já tem conta.
