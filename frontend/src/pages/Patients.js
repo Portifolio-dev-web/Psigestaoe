@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 // API & Utils
-import api, { formatApiErrorDetail } from "@/lib/api";
+import api, { fieldErrorsFromDetail, formatApiErrorDetail } from "@/lib/api";
 import { LIMITS } from "@/lib/validation";
 // Produto (cadastro pelo paciente): regras e campos da ficha compartilhados com o link de cadastro.
 import {
@@ -323,10 +323,23 @@ export default function Patients() {
       setDialogOpen(false);
       load();
     } catch (err) {
-      // A4: o erro do servidor (ex.: dado recusado) também fica no formulário, no
-      // resumo do topo, que recebe o foco para ser lido; antes era um aviso que sumia.
-      setSubmitError(formatApiErrorDetail(err.response?.data?.detail) || err.message);
-      requestAnimationFrame(() => document.getElementById("patient-form-errors")?.focus());
+      const detail = err.response?.data?.detail;
+      // A2 (varredura): se o 422 do servidor identificar o CAMPO (ex.: uma regra
+      // que só o servidor confere), marca ELE, como os erros de validação do
+      // próprio navegador já fazem — em vez de só um resumo genérico, que
+      // obrigava a pessoa a adivinhar qual campo corrigir.
+      const serverFields = fieldErrorsFromDetail(detail);
+      const firstServerField = serverFields && errorFields(form, formOptions).find(([key]) => serverFields[key]);
+      if (serverFields && firstServerField) {
+        setFormErrors((current) => ({ ...current, ...serverFields }));
+        setSubmitError("");
+        document.getElementById(firstServerField[2])?.focus();
+      } else {
+        // A4: o erro do servidor (ex.: dado recusado) também fica no formulário, no
+        // resumo do topo, que recebe o foco para ser lido; antes era um aviso que sumia.
+        setSubmitError(formatApiErrorDetail(detail) || err.message);
+        requestAnimationFrame(() => document.getElementById("patient-form-errors")?.focus());
+      }
     } finally {
       setSaving(false);
     }

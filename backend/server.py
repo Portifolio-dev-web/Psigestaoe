@@ -739,6 +739,15 @@ def cpf_is_valid(digits: str) -> bool:
 # mensagem de erro listar o que falta como a pessoa vê na tela. O nome tem
 # validação própria (validate_full_name) e a idade é CALCULADA pela data de
 # nascimento (age_from_birth_date), por isso não estão aqui.
+#
+# LGPD (varredura, item L1 — minimização, art. 6º III): RG, escolaridade,
+# estado civil e profissão foram apontados como coleta sem necessidade clara
+# para o atendimento psicológico em si. Avaliado e MANTIDO obrigatório por
+# decisão de produto (fichas completas no atendimento, acima) — decisão de
+# quem opera o sistema, não do código; para menores, esses 4 campos já saem
+# da lista (_NOT_REQUIRED_FOR_MINORS, abaixo), mas a mesma lógica não foi
+# estendida a adultos de propósito. Se a decisão mudar, é só tirar o campo
+# daqui (e do formulário correspondente no frontend).
 PATIENT_REQUIRED_LABELS = {
     "cpf": "CPF",
     "rg": "RG",
@@ -4463,6 +4472,11 @@ async def intake_submit(data: IntakeSubmitInput, db: AsyncSession = Depends(get_
 #   6. quem não é administrador recebe 404: a área não se anuncia;
 #   7. administrador não suspende nem desconecta a própria conta nem a de outro
 #      administrador (evita trancar o sistema por engano ou por conta invadida).
+#      Cortesia e prorrogar teste (S2, varredura) NÃO têm essa restrição de
+#      propósito: a lista de administradores já vem de configuração do servidor
+#      (confiança assumida), a ação não tranca nada, e fica na trilha nas duas
+#      pontas + aviso por e-mail a TODOS os administradores (_admin_done) — não
+#      haveria como um admin usar isso escondido. Avaliado e mantido assim.
 # ---------------------------------------------------------------------------
 ADMIN_ACTOR = "administração do PsiGestão"  # como a ação aparece na trilha da conta afetada
 ADMIN_PAGE_SIZE = 25
@@ -4814,9 +4828,16 @@ async def admin_list_interests(data: AdminInterestListInput, admin: User = Depen
 
 
 @api_router.post("/admin/interests/{interest_id}/contacted", dependencies=[Depends(rate_limit("admin-action", 30, 600))])
-async def admin_interest_contacted(data: EndSessionsInput, interest_id: str = PathParam(max_length=40),
+async def admin_interest_contacted(data: AdminConfirmInput, interest_id: str = PathParam(max_length=40),
                                    admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
     """A equipe falou com a pessoa: sai da lista de abertos (e o prazo de 12 meses começa)."""
+    # SEGURANÇA (varredura, item S1): faltava a reconfirmação de senha/código que
+    # TODA outra ação da administração exige a cada chamada (ver _confirm_admin,
+    # comentário da seção "ADMINISTRAÇÃO", regra 3). Antes, esta rota aceitava só
+    # {"confirm": true} como marcador anti-CSRF (EndSessionsInput): uma sessão de
+    # admin comprometida (cookie roubado, computador aberto) bastava para usá-la,
+    # diferente de cortesia/prorrogar teste/encerrar sessões/suspender.
+    await _confirm_admin(db, admin, data.confirm)
     interest = await db.get(SubscriptionInterest, interest_id)
     if interest is None:
         raise HTTPException(status_code=404, detail="Não encontrado.")
@@ -5495,13 +5516,6 @@ ACCOUNT_CLOSE_CONFIRMATION = "ENCERRAR"
 ACCESS_LOG_RETENTION = timedelta(days=183)  # Marco Civil da Internet, art. 15: 6 meses
 
 
-def _safe_filename(text_value: str) -> str:
-    """Nome de arquivo seguro dentro do ZIP (sem acentos, barras ou espaços)."""
-    import unicodedata
-    plain = unicodedata.normalize("NFKD", text_value or "").encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^A-Za-z0-9]+", "_", plain).strip("_")[:60] or "paciente"
-
-
 def _build_account_zip(user_name: str, user_email: str, entries: list, agenda: list) -> io.BytesIO:
     """Monta o ZIP da exportação completa (roda numa thread: o PDF é pesado)."""
     import zipfile
@@ -5511,7 +5525,12 @@ def _build_account_zip(user_name: str, user_email: str, entries: list, agenda: l
         for pat, recs, consent_given_at, consent_terms, consent_revoked_at in entries:
             pdf = _render_patient_pdf(pat, recs, user_name, user_email,
                                       consent_given_at, consent_terms, consent_revoked_at)
-            archive.writestr(f"pacientes/{_safe_filename(pat['full_name'])}_{pat['id']}.pdf", pdf.getvalue())
+            # LGPD (varredura, item L2): o nome do paciente (decifrado) no nome do
+            # arquivo aparecia no explorador de arquivos de quem extraísse o ZIP
+            # (histórico, computador compartilhado), mesmo sem abrir o PDF —
+            # inconsistente com export_patient (abaixo), que já identifica só por
+            # ID. Agora os dois seguem a mesma regra: nunca nome no nome do arquivo.
+            archive.writestr(f"pacientes/{pat['id']}.pdf", pdf.getvalue())
             everything.append({"paciente": pat, "prontuarios": recs})
         archive.writestr("psigestao_completo.json", json.dumps({
             "exportado_em": now_utc().isoformat(), "profissional": user_email,

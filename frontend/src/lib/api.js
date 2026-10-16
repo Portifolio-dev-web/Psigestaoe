@@ -108,6 +108,23 @@ const api = {
   delete: (path) => request("DELETE", path),
 };
 
+// Acessibilidade (varredura, item A2): um 422 do FastAPI nessa forma identifica
+// o CAMPO (loc: ["body", "campo"]) que o servidor recusou. Antes,
+// formatApiErrorDetail() descartava o "loc" e juntava tudo numa frase só, que ia
+// para um resumo genérico — a pessoa tinha que adivinhar qual campo corrigir
+// quando havia mais de um problema. Devolve {campo: mensagem}, ou null se o
+// erro não vier nesse formato (quem chama cai no resumo geral de sempre).
+export function fieldErrorsFromDetail(detail) {
+  if (!Array.isArray(detail)) return null;
+  const fields = {};
+  for (const item of detail) {
+    const loc = item?.loc;
+    const field = Array.isArray(loc) ? loc[loc.length - 1] : null;
+    if (typeof field === "string" && typeof item?.msg === "string") fields[field] = item.msg;
+  }
+  return Object.keys(fields).length ? fields : null;
+}
+
 export function formatApiErrorDetail(detail) {
   if (detail == null) return "Algo deu errado. Tente novamente.";
   if (typeof detail === "string") return detail;

@@ -86,6 +86,20 @@ export const ADMIN_ACTIONS = {
     submit: "Reativar conta",
     done: "Conta reativada.",
   },
+  // SEGURANÇA (varredura, item S1): esta rota (marcar interessado como
+  // contatado) passou a exigir a mesma reconfirmação de senha/código das
+  // demais ações — o servidor não aceita mais só {"confirm": true}. Por isso
+  // entra aqui, embora o alvo seja um "interesse em assinar", não uma conta de
+  // usuária: `urlFor` troca a URL padrão (/admin/users/{id}/...) pela rota de
+  // interesses, usando o `interest_id` que a tela injeta no objeto `account`.
+  markContacted: {
+    title: "Marcar como contatado",
+    endpoint: "contacted",
+    urlFor: (account) => `/admin/interests/${account.interest_id}/contacted`,
+    effect: "Marca que a equipe já falou com a pessoa: ela sai da lista de aguardando contato.",
+    submit: "Marcar como contatado",
+    done: "Marcado como contatado.",
+  },
 };
 
 const DAY_MS = 86400000;
@@ -134,7 +148,11 @@ export default function AdminActionDialog({ action, account, hasPassword, trialO
     setSaving(true);
     try {
       const body = { ...(config.body || {}), reason: reason.trim(), confirm, ...(config.days ? { days: Number(days) } : {}) };
-      const { data } = await api.post(`/admin/users/${account.user_id}/${config.endpoint}`, body);
+      // S1: a maioria das ações é sobre a conta (`/admin/users/{id}/...`); a de
+      // marcar interessado como contatado usa `urlFor` para apontar para a rota
+      // própria dos interesses (`/admin/interests/{id}/contacted`).
+      const url = config.urlFor ? config.urlFor(account) : `/admin/users/${account.user_id}/${config.endpoint}`;
+      const { data } = await api.post(url, body);
       onDone(data, config.done);
     } catch (err) {
       const detail = err.response?.data?.detail;

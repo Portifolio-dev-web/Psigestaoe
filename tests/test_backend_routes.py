@@ -2187,7 +2187,10 @@ async def test_account_export_zip(client):
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     names = archive.namelist()
     assert "psigestao_completo.json" in names and "LEIA-ME.txt" in names
-    assert any(n.startswith("pacientes/Paciente_Cripto_") and n.endswith(".pdf") for n in names)
+    # LGPD (varredura, item L2): o nome do arquivo identifica só pelo ID, nunca
+    # pelo nome do paciente (consistente com export_patient, abaixo).
+    assert f"pacientes/{patient_id}.pdf" in names
+    assert not any("Paciente_Cripto" in n for n in names)
     data = json.loads(archive.read("psigestao_completo.json"))
     assert data["pacientes"][0]["prontuarios"][0]["content"] == "Evolução"
 
@@ -3667,9 +3670,14 @@ async def test_admin_sees_and_marks_beta_interests(client, monkeypatch):
     assert listed["counts"] == {"open": 1, "contacted": 0}
     item = listed["items"][0]
     assert item["account"]["user_id"] == target_id and item["phone"] == "(11) 91234-5678"
-    done = await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": True})
+    # SEGURANÇA (varredura, item S1): esta rota passou a exigir a mesma senha/
+    # código das outras ações da administração (antes bastava {"confirm": true}).
+    wrong = await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": "senha-errada"})
+    assert wrong.status_code == 403 and wrong.json()["detail"]["code"] == "admin_confirm_invalid"
+    done = await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": ADMIN_PASSWORD})
     assert done.status_code == 200 and done.json()["contacted_at"]
-    assert (await client.post(f"/api/admin/interests/{item['id']}/contacted", json={"confirm": True})).status_code == 409
+    assert (await client.post(f"/api/admin/interests/{item['id']}/contacted",
+                              json={"confirm": ADMIN_PASSWORD})).status_code == 409
     contacted = (await client.post("/api/admin/interests/search", json={"status": "contacted"})).json()
     assert contacted["counts"] == {"open": 0, "contacted": 1} and len(contacted["items"]) == 1
     # 12 meses depois do contato, a manutenção apaga.

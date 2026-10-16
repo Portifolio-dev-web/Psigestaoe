@@ -8,7 +8,6 @@ import { formatDateTime } from "@/lib/datetime";
 import { PLAN_LABEL, formatDay } from "@/lib/subscription";
 import { countLabel } from "@/lib/utils";
 import AdminActionDialog from "@/components/AdminActionDialog";
-import { useSingleFlight } from "@/hooks/useSingleFlight";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -81,6 +80,12 @@ export default function Admin() {
   const [filter, setFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [action, setAction] = useState(null); // { action, account }
+  // S1: "marcar interessado como contatado" agora passa pelo mesmo diálogo de
+  // confirmação das outras ações (ver AdminActionDialog). Como o alvo é um
+  // interesse, não uma conta de usuária, não dá para atualizar a lista de
+  // contas por user_id (abaixo, em `done`) — só avisamos a InterestsSection
+  // para recarregar, incrementando esta chave.
+  const [interestsReloadKey, setInterestsReloadKey] = useState(0);
   const requestSeq = useRef(0);
 
   // Busca no servidor 300 ms depois da última tecla. O termo (nome ou e-mail)
@@ -113,6 +118,12 @@ export default function Admin() {
   const done = (updated, message) => {
     toast.success(message);
     setAction(null);
+    if (action?.action === "markContacted") {
+      // S1: o retorno aqui é o interesse (_interest_public), não uma conta de
+      // usuária — não tem user_id para casar com a lista de contas abaixo.
+      setInterestsReloadKey((k) => k + 1);
+      return;
+    }
     // A linha muda na hora; a lista recarrega para os totais e o filtro.
     setData((current) => current && { ...current, items: current.items.map((item) => (item.user_id === updated.user_id ? updated : item)) });
     load();
@@ -151,7 +162,8 @@ export default function Admin() {
       {!blocked && (
         <>
           {/* Versão beta da assinatura: quem deixou o contato para assinar. */}
-          <InterestsSection />
+          <InterestsSection onAction={(name, account) => setAction({ action: name, account })}
+            reloadKey={interestsReloadKey} />
           <div className="flex flex-col gap-3">
             <div className="relative w-full sm:max-w-sm">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -317,10 +329,9 @@ function AccountsCards({ items, onAction }) {
 // aqui (o aviso por e-mail à equipe não o leva). Sem nenhum interessado, a seção
 // não aparece.
 // ---------------------------------------------------------------------------
-function InterestsSection() {
+function InterestsSection({ onAction, reloadKey }) {
   const [status, setStatus] = useState("open");
   const [data, setData] = useState(null);
-  const inFlight = useSingleFlight();
 
   const load = useCallback(async () => {
     try {
@@ -331,17 +342,10 @@ function InterestsSection() {
     }
   }, [status]);
 
-  useEffect(() => { load(); }, [load]);
-
-  const markContacted = (item) => inFlight.run(item.id, async () => {
-    try {
-      await api.post(`/admin/interests/${item.id}/contacted`, { confirm: true });
-      toast.success("Marcado como contatado.");
-      load();
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail) || err.message);
-    }
-  });
+  // S1: marcar como contatado agora abre o diálogo de confirmação (AdminActionDialog,
+  // ação "markContacted") em vez de chamar a API direto daqui; `reloadKey` muda
+  // quando o diálogo termina essa ação, e então recarregamos a lista.
+  useEffect(() => { load(); }, [load, reloadKey]);
 
   const counts = data?.counts || {};
   if (!data || (!counts.open && !counts.contacted)) return null;
@@ -391,9 +395,9 @@ function InterestsSection() {
               </div>
               {!item.contacted_at && (
                 <Button type="button" size="sm" variant="outline" className="shrink-0 border-slate-300"
-                  disabled={inFlight.isBusy(item.id)} onClick={() => markContacted(item)}
+                  onClick={() => onAction("markContacted", { ...item.account, interest_id: item.id })}
                   data-testid={`admin-interest-contacted-${item.id}`}>
-                  {inFlight.isBusy(item.id) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Marcar como contatado
+                  Marcar como contatado
                 </Button>
               )}
             </li>

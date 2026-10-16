@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CheckCircle2, Clock, Loader2, ShieldCheck, Stethoscope, TriangleAlert } from "lucide-react";
-import api, { formatApiErrorDetail } from "@/lib/api";
+import api, { fieldErrorsFromDetail, formatApiErrorDetail } from "@/lib/api";
 import { useLinkToken } from "@/components/auth/useLinkToken";
 import { Button } from "@/components/ui/button";
 import {
@@ -406,10 +406,21 @@ export default function PatientIntake() {
       setPhase("done");
     } catch (err) {
       if (!handleFillError(err)) {
-        setSubmitError(err.response
-          ? formatApiErrorDetail(err.response.data?.detail)
-          : "Sem conexão com a internet. O que você preencheu está salvo: confira a conexão e toque em Enviar cadastro de novo.");
-        requestAnimationFrame(() => document.getElementById("patient-form-errors")?.focus());
+        const detail = err.response?.data?.detail;
+        // A2 (varredura): mesmo tratamento de Patients.js — um 422 que identifica
+        // o campo (loc) marca ELE, em vez de só um resumo genérico.
+        const serverFields = fieldErrorsFromDetail(detail);
+        const firstServerField = serverFields && errorFields(form, FORM_OPTIONS).find(([key]) => serverFields[key]);
+        if (serverFields && firstServerField) {
+          setFormErrors((current) => ({ ...current, ...serverFields }));
+          setSubmitError("");
+          document.getElementById(firstServerField[2])?.focus();
+        } else {
+          setSubmitError(err.response
+            ? formatApiErrorDetail(detail)
+            : "Sem conexão com a internet. O que você preencheu está salvo: confira a conexão e toque em Enviar cadastro de novo.");
+          requestAnimationFrame(() => document.getElementById("patient-form-errors")?.focus());
+        }
         dirtyRef.current = true; // mantém o rascunho em dia enquanto isso
         scheduleSave();
       }

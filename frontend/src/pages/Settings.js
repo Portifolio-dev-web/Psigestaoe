@@ -407,6 +407,13 @@ function AccountSecurity() {
   const [form, setForm] = useState(EMPTY_PASSWORD_FORM);
   const [saving, setSaving] = useState(false);
   const inFlight = useSingleFlight();
+  // Acessibilidade (varredura, item A1): "senha atual incorreta" ficava só num
+  // toast que some em ~10s, sem relação com o campo. Agora, quando o servidor
+  // identifica que é a senha atual (código invalid_current_password), o erro
+  // fica ligado a ESSE campo; qualquer outro problema cai num aviso fixo
+  // (role="alert") acima do botão, no lugar do toast.
+  const [currentPasswordError, setCurrentPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
 
   const problem = form.next ? passwordProblem(form.next) : "";
   const mismatch = form.confirm && form.confirm !== form.next ? "As senhas não conferem." : "";
@@ -414,6 +421,8 @@ function AccountSecurity() {
 
   // `proof`: a senha atual (quem tem senha) ou o token do Google (quem não tem).
   const submit = async (proof) => {
+    setCurrentPasswordError("");
+    setFormError("");
     setSaving(true);
     try {
       const { data } = await api.post("/auth/password", { ...proof, new_password: form.next });
@@ -425,7 +434,14 @@ function AccountSecurity() {
         : "";
       toast.success(`${hasPassword ? "Senha alterada" : "Senha definida"}.${ended}`);
     } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+      const detail = err.response?.data?.detail;
+      if (detail?.code === "invalid_current_password") {
+        setCurrentPasswordError(formatApiErrorDetail(detail));
+        document.getElementById("current-password")?.focus();
+      } else {
+        setFormError(formatApiErrorDetail(detail) || err.message);
+        requestAnimationFrame(() => document.getElementById("password-form-error")?.focus());
+      }
     } finally {
       setSaving(false);
     }
@@ -442,7 +458,11 @@ function AccountSecurity() {
     }
   });
 
-  const setField = (field) => (e) => setForm((current) => ({ ...current, [field]: e.target.value }));
+  const setField = (field) => (e) => {
+    setForm((current) => ({ ...current, [field]: e.target.value }));
+    if (field === "current") setCurrentPasswordError("");
+    setFormError("");
+  };
   const hint = mismatch || problem;
 
   return (
@@ -462,8 +482,17 @@ function AccountSecurity() {
               <Label htmlFor="current-password" className="text-slate-700">Senha atual</Label>
               <div className="mt-1.5">
                 <PasswordInput id="current-password" autoComplete="current-password"
-                  value={form.current} onChange={setField("current")} data-testid="current-password-input" />
+                  value={form.current} onChange={setField("current")}
+                  aria-invalid={currentPasswordError ? true : undefined}
+                  aria-describedby={currentPasswordError ? "current-password-error" : undefined}
+                  data-testid="current-password-input" />
               </div>
+              {/* A1: erro ligado ao campo, não um toast que some. */}
+              {currentPasswordError && (
+                <p id="current-password-error" role="alert" className="mt-1.5 text-xs text-red-600" data-testid="current-password-error">
+                  {currentPasswordError}
+                </p>
+              )}
             </div>
           ) : (
             <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">
@@ -491,6 +520,15 @@ function AccountSecurity() {
             className={`text-xs ${hint ? "text-red-600" : "text-slate-500"}`}>
             {hint || `${PASSWORD_RULE}. Os outros aparelhos serão desconectados.`}
           </p>
+          {/* A1: qualquer outro erro do servidor (ex.: limite de tentativas) também
+              fixo, não um toast. */}
+          {formError && (
+            <p id="password-form-error" role="alert" tabIndex={-1}
+              className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+              data-testid="password-form-error">
+              {formError}
+            </p>
+          )}
           {hasPassword ? (
             <Button type="submit" disabled={!ready || saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]"
               data-testid="change-password-btn">

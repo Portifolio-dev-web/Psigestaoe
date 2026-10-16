@@ -310,6 +310,12 @@ os dois em `backend/legal.py`, com a **mesma versão** (`PRIVACY_POLICY_VERSION`
 de novo no próximo acesso. Os textos são modelos fiéis ao sistema e devem ser revisados por
 um advogado antes de valer para clientes pagantes.
 
+**Resposta a incidentes (L3/E1, varredura)**: rascunho em
+[`docs/plano-resposta-incidentes.md`](docs/plano-resposta-incidentes.md) — quem decide, como
+avaliar risco, prazo de 3 dias úteis à ANPD. Ainda sem RIPD nem registro formal das operações
+de tratamento (o próprio arquivo lista o que falta); peça revisão de advogado antes de valer
+para clientes pagantes, como os demais documentos legais.
+
 ## Backup e a chave de criptografia
 
 Os prontuários ficam criptografados no banco com a `FERNET_KEY`. **Um backup do banco
@@ -346,6 +352,52 @@ Recomendações:
 - o `JWT_SECRET` pode ser trocado a qualquer momento (só obriga todos a entrar de
   novo); a `SEARCH_INDEX_KEY` pode ser recriada (`python rebuild_search_index.py --all`);
   a `FERNET_KEY`, não.
+
+### Automatizar (B1, varredura)
+
+O comando manual acima depende de alguém lembrar de rodar (e de testar a
+restauração). O `backup.sh` (raiz do projeto) automatiza o mesmo dump, envia
+cifrado para fora do servidor com [restic](https://restic.net/) e avisa se
+falhar — falta só agendar e preencher o destino:
+
+```
+RESTIC_REPOSITORY=s3:https://s3.sa-east-1.amazonaws.com/seu-bucket
+RESTIC_PASSWORD=gere-com-secrets.token_urlsafe
+BACKUP_HEALTHCHECK_URL=https://hc-ping.com/seu-id   # opcional: alerta se não rodar
+```
+
+Agendamento (cron, todo dia às 3h; `backup.sh --help` não existe — leia o
+cabeçalho do arquivo para a lista completa de variáveis):
+
+```
+0 3 * * * cd /caminho/do/psigestao && RESTIC_REPOSITORY=... RESTIC_PASSWORD=... \
+  BACKUP_HEALTHCHECK_URL=... ./backup.sh >> /var/log/psigestao-backup.log 2>&1
+```
+
+A senha do restic cifra o **arquivo** do backup; é diferente da `FERNET_KEY`
+(que cifra os **campos** no banco) e guarda-se do mesmo jeito: no cofre de
+segredos, nunca junto do backup. Continue testando a restauração a cada 3
+meses — o script automatiza o envio, não substitui esse teste.
+
+## Monitoramento (I2/I3, varredura)
+
+O que é **código** (já pronto, só falta ligar com uma conta real) e o que é
+**conta externa** (não tem o que programar — é só cadastrar e apontar para o
+seu endereço):
+
+| O quê | Tipo | Como ligar |
+|---|---|---|
+| Erros da API | Código (pronto) | `SENTRY_DSN` em `backend/.env.example` |
+| Erros do navegador | Código (pronto) | `REACT_APP_SENTRY_DSN` em `frontend/.env.example` (ver `frontend/src/lib/sentry.js`); depois de preencher, acrescente o domínio de ingestão do Sentry ao `connect-src` do `nginx.conf` (comentário "I2" lá) |
+| Backup rodou? | Código (pronto) | `BACKUP_HEALTHCHECK_URL` em `backup.sh` (ver seção acima) |
+| Site e API no ar | **Conta externa** | [UptimeRobot](https://uptimerobot.com/) (ou similar): um monitor HTTP(S) no seu domínio e outro em `/api/health/ready` |
+| Backup rodou (alerta por fora do servidor) | **Conta externa** | [Healthchecks.io](https://healthchecks.io/) (ou similar): a URL do "ping" é o `BACKUP_HEALTHCHECK_URL` acima |
+
+Sentry (erros) e Healthchecks.io/UptimeRobot (disponibilidade) são serviços de
+terceiros: se usá-los em produção, acrescente-os à lista de terceiros da
+Política de Privacidade (`backend/legal.py`) e confira a região deles (LGPD
+art. 33, transferência internacional — `lgpd.md` item 11 do padrão de
+segurança usado nesta varredura).
 
 ## Endereços do deploy (frontend e API)
 

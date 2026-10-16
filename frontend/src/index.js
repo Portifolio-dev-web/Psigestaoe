@@ -15,6 +15,13 @@ import "@fontsource/manrope/800.css";
 import "@/index.css";
 import App from "@/App";
 import { isPatientIntakePage } from "@/lib/patientIntakeRoute";
+import { initSentry } from "@/lib/sentry";
+
+// DEPLOY (varredura, item I2): captura erros do navegador (desligado sem
+// REACT_APP_SENTRY_DSN; ver lib/sentry.js). Chamado antes do render para
+// pegar também falhas bem no início; o import do pacote é dinâmico, então
+// sem DSN configurado nem o código do Sentry entra no bundle carregado.
+initSentry();
 
 // Desempenho (análise de componentes sem uso): o @tanstack/react-query envolvia
 // o app inteiro (QueryClientProvider), mas nenhuma tela usava useQuery nem
