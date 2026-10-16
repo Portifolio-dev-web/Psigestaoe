@@ -9,6 +9,37 @@
 > legais (`backend/legal.py`) — ainda precisam de revisão de advogado antes
 > de valer para clientes pagantes (ver README.md).
 
+## Fornecedores recomendados
+
+Uma empresa por serviço, critério de peso maior primeiro — nenhuma indicação
+é exclusiva, mas as listadas aqui têm histórico que justifica a escolha.
+Confirme preço e disponibilidade atual no site de cada uma antes de
+contratar (muda com frequência).
+
+| Serviço | Recomendado | Por quê | Alternativa |
+|---|---|---|---|
+| **VPS** (seção 1) | [Vultr](https://www.vultr.com/) — região São Paulo | Tem região Brasil (obrigatório, LGPD art. 33); suporte a IP fixo por serviço (precisa para o Caddy) | [DigitalOcean](https://www.digitalocean.com/) (sem região BR hoje — só use se abrir mão do critério Brasil) |
+| **Domínio `.com.br`** (seção 4) | [Registro.br](https://registro.br/) | É o próprio órgão registrador (NIC.br) — comprar direto evita intermediário e repasse de preço | Revenda só se já usar um provedor de hospedagem que inclua registro (ex.: Hostinger) |
+| **Armazenamento do backup** (seção 9) | [Backblaze B2](https://www.backblaze.com/b2) | Mais barato do mercado para este volume (poucos GB/mês); compatível com restic/S3 | [Wasabi](https://wasabi.com/) (preço mais previsível em volume maior, sem taxa de saída) |
+| **E-mail transacional/SMTP** (seção 7) | [Resend](https://resend.com/) | Feito para desenvolvedor, API simples, 3.000 e-mails/mês grátis — compatível com o `mailer.py` do projeto | [Brevo](https://www.brevo.com/) (300/dia grátis, sem limite de validade) — bom se o volume crescer rápido |
+| **Erros do backend e do navegador** (seção 10) | [Sentry](https://sentry.io/) (região UE) | Já integrado no código (`observability.py`, `lib/sentry.js`); plano grátis cobre o volume de um piloto | — (já é a única opção ligada ao código) |
+| **Site e API no ar** (seção 10) | [UptimeRobot](https://uptimerobot.com/) | Plano grátis com até 50 monitores e checagem a cada 5 min, app Android com notificação push | [Healthchecks.io](https://healthchecks.io/) também monitora URLs, mas é mais focado em jobs agendados (ver linha abaixo) |
+| **Backup rodou?** (seção 9) | [Healthchecks.io](https://healthchecks.io/) | Feito para "isto devia ter rodado" (cron, jobs) — exatamente o caso do `backup.sh`; grátis até 20 checks | — |
+| **Acesso administrativo** (seção 5) | [Tailscale](https://tailscale.com/) | Rede privada entre seus aparelhos sem abrir porta nenhuma; grátis até 100 dispositivos, app Android maduro | [WireGuard](https://www.wireguard.com/) puro (mais trabalho manual de configurar, sem a camada de gerência do Tailscale) |
+| **SSH pelo celular** (seção 11) | [Termius](https://termius.com/) | App Android estável, salva atalhos de comando, funciona bem com Tailscale | [JuiceSSH](https://juicessh.com/) (mais simples, só Android) |
+| **Login social** | [Google Cloud Console](https://console.cloud.google.com/) | Não é uma escolha — é quem emite o `GOOGLE_CLIENT_ID` já usado no código | — |
+
+**Sobre e-mail**: o mercado mudou nos últimos anos — SendGrid tirou o plano
+grátis permanente, Mailgun também, depois de comprada pela Sinch. Resend e
+Brevo são as opções atuais com plano grátis real. Se o volume de e-mails
+crescer muito (milhares/dia), considere o Amazon SES (mais barato em escala,
+mas exige configurar DKIM/SPF e lidar com bounces manualmente) ou o Postmark
+(mais caro, mas o histórico de entrega mais consistente do mercado).
+
+**Sobre o VPS fora do Brasil**: se algum dia topar abrir mão da região
+Brasil (não recomendado para dado de saúde — LGPD art. 33), a Hetzner tem o
+melhor custo-benefício do mercado europeu, mas não tem região Brasil hoje.
+
 ## Sumário
 
 1. [Escolher e criar a VPS](#1-escolher-e-criar-a-vps)
