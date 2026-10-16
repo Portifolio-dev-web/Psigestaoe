@@ -395,12 +395,15 @@ export default function Login() {
       ) : (
         // ------------------------------------------------ cadastro: passo 1
         <>
-          {/* Produto (assinatura): o teste grátis começa no cadastro, sem cartão. */}
-          <p className="mb-4 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800" data-testid="register-trial-note">
-            Comece com o teste grátis, com tudo liberado e sem cartão.
+          {/* Produto (assinatura): o teste grátis começa no cadastro, sem cartão.
+              Compacto (prévia validada pelo usuário): texto mais curto (cabe
+              numa linha) e padding menor — o cartão é mais estreito que uma
+              página inteira, então cada px de respiro conta. */}
+          <p className="mb-2.5 rounded-md bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800" data-testid="register-trial-note">
+            Teste grátis, tudo liberado, sem cartão.
           </p>
 
-          <form onSubmit={handleRegisterSubmit} className="space-y-4">
+          <form onSubmit={handleRegisterSubmit} className="space-y-2.5">
             <div>
               <Label htmlFor="name" className="text-slate-700">Nome completo</Label>
               {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
@@ -414,7 +417,7 @@ export default function Login() {
                 className="mt-1.5" placeholder="voce@clinica.com" data-testid="register-email-input" />
               <p id="email-hint" className="mt-1 text-xs text-slate-500">Você vai receber um link para criar a senha.</p>
             </div>
-            <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-3">
+            <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-2">
               <Checkbox id="terms" checked={terms}
                 onCheckedChange={(value) => { setTerms(value); if (value) setTermsError(""); }}
                 aria-invalid={termsError ? true : undefined} aria-describedby={termsError ? "terms-error" : undefined}
@@ -446,7 +449,7 @@ export default function Login() {
             </Button>
           </form>
 
-          <div className="my-5 flex items-center gap-3">
+          <div className="my-3 flex items-center gap-3">
             <div className="h-px flex-1 bg-slate-200" />
             <span className="text-xs text-slate-500">ou</span>
             <div className="h-px flex-1 bg-slate-200" />
@@ -456,7 +459,7 @@ export default function Login() {
               width={String(googleWidth)} onError={() => toast.error("Ocorreu um erro no cadastro com o Google.")} />
           </div>
 
-          <p className="mt-6 text-center text-sm text-slate-500">
+          <p className="mt-3 text-center text-sm text-slate-500">
             Já tem conta?{" "}
             <button type="button" onClick={switchMode}
               className="rounded font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:ring-offset-2"

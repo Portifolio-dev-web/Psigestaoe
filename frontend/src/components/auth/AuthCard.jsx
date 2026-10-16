@@ -76,7 +76,7 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
   }, [mode]);
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#F5F7FA] px-4 py-10">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#F5F7FA] px-4 py-6">
       {/* Fundo da página: só um véu estático em degradê (sem WebGL) — o
           destaque animado fica no painel do cartão, abaixo. */}
       <div className="pointer-events-none absolute inset-0" aria-hidden="true" style={{
@@ -86,13 +86,22 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
 
       <div className={cn(
         "relative z-10 grid w-full max-w-4xl grid-cols-1 overflow-hidden rounded-[28px] bg-white shadow-2xl shadow-slate-900/10",
-        "lg:min-h-[600px] lg:grid-cols-2",
+        "lg:min-h-[460px] lg:grid-cols-2",
       )}>
-        {/* Painel decorativo: no celular é uma faixa normal (ordem 1); no
-            computador, posição absoluta que desliza entre os lados. */}
+        {/* Painel decorativo: 1ª coluna no DOM (grid auto-flow já o coloca à
+            esquerda). No cadastro (estado "neutro") fica aí mesmo; no login,
+            translate-x-full desliza pela LARGURA DA PRÓPRIA COLUNA até a
+            direita. Importante: "translate" não tira do fluxo (diferente de
+            "absolute") — a grade mede a altura de CADA coluna pelo conteúdo
+            normalmente, e o "align-items: stretch" padrão do grid estica a
+            mais curta até a altura da mais alta. É assim que a altura do
+            cartão acompanha o formulário (sem corte nem barra de rolagem,
+            mesmo o cadastro tendo mais campos que o login) — NÃO troque isto
+            de volta para "position: absolute" nos dois painéis: foi assim
+            que a rolagem apareceu da primeira vez (o cartão ficava com
+            altura fixa, sem acompanhar o conteúdo). */}
         <div className={cn(
-          "relative min-h-[220px] overflow-hidden",
-          "lg:absolute lg:inset-y-0 lg:left-0 lg:w-1/2",
+          "relative min-h-[200px] overflow-hidden",
           "lg:transition-transform lg:duration-700 lg:ease-in-out motion-reduce:lg:duration-0",
           isRegister ? "lg:translate-x-0" : "lg:translate-x-full",
         )}>
@@ -104,19 +113,29 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
           </div>
         </div>
 
-        {/* Painel do formulário: ocupa sempre o lado OPOSTO ao decorativo. */}
+        {/* Painel do formulário: 2ª coluna no DOM. Login (estado "neutro")
+            fica aí; cadastro desliza -translate-x-full (uma coluna para a
+            esquerda) — sempre o lado OPOSTO ao decorativo. z-10: fica por
+            cima durante os ~700ms em que os dois se cruzam.
+            Compacto (prévia validada pelo usuário): padding menor nas bordas
+            (antes p-10 no computador) e menos respiro até o formulário. */}
         <div className={cn(
-          "relative order-2 flex flex-col justify-center overflow-y-auto p-6 sm:p-10",
-          "lg:absolute lg:inset-y-0 lg:left-0 lg:order-none lg:w-1/2",
+          "relative z-10 order-2 flex flex-col justify-center p-6 sm:p-7",
+          "lg:order-none",
           "lg:transition-transform lg:duration-700 lg:ease-in-out motion-reduce:lg:duration-0",
-          isRegister ? "lg:translate-x-full" : "lg:translate-x-0",
+          // CORREÇÃO: estava invertido (os dois painéis caíam do MESMO lado,
+          // sobrepostos — login mostrava tudo empilhado à direita, esquerda
+          // em branco). O painel natural (2ª coluna) é a direita; cadastro
+          // precisa ficar lá (sem deslocar), login precisa ir para a
+          // esquerda (-translate-x-full), nunca o contrário.
+          isRegister ? "lg:translate-x-0" : "lg:-translate-x-full",
         )}>
           <div key={mode} className="psi-fade-up mx-auto w-full max-w-sm">
             <h1 ref={headingRef} tabIndex={-1} className="font-head text-2xl font-bold text-[#0F172A] focus:outline-none">
               {formTitle}
             </h1>
             {formSubtitle && <p className="mt-1 text-sm text-slate-500">{formSubtitle}</p>}
-            <div className="mt-6">{children}</div>
+            <div className="mt-3">{children}</div>
           </div>
         </div>
       </div>
