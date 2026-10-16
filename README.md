@@ -96,6 +96,12 @@ testes estão liberadas em `.gitleaks.toml`, e só para a regra genérica.
 
 ## Produção (API)
 
+> **Deploy numa VPS com Docker, do zero ao ar**: passo a passo completo em
+> [`docs/deploy-vps.md`](docs/deploy-vps.md) — VPS, DNS, HTTPS automático
+> (`docker-compose.prod.yml` + `Caddyfile`), todas as variáveis de ambiente,
+> backup, monitoramento e como operar pelo celular Android. As seções abaixo
+> continuam valendo como referência técnica de cada peça.
+
 A imagem do `backend/` sobe pelo `start.sh`:
 
 1. `prestart.py` migra o banco uma única vez, com trava no Postgres, e indexa a busca;

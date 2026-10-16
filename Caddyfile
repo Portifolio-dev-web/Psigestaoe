@@ -1,0 +1,43 @@
+# Caddyfile
+# ---------------------------------------------------------------------------
+# DEPLOY (passo a passo em docs/deploy-vps.md): HTTPS automático (Let's
+# Encrypt, renovação sozinha) e UM domínio só para frontend + API — o cookie
+# de sessão é SameSite=Strict e só funciona se os dois estiverem no MESMO
+# site (ver README.md, "Endereços do deploy"). /api/* vai para o backend;
+# todo o resto vai para os arquivos estáticos do frontend.
+#
+# {$DOMAIN} e {$ACME_EMAIL} vêm do .env (docker-compose.prod.yml já repassa).
+# ---------------------------------------------------------------------------
+{
+	email {$ACME_EMAIL}
+	# SEGURANÇA: não anuncia a versão do Caddy nas respostas.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$DOMAIN} {
+	encode gzip
+
+	# Backend: tudo que começa com /api vai para o gunicorn.
+	handle /api/* {
+		reverse_proxy api:5000
+	}
+
+	# Frontend: o resto são os arquivos estáticos do nginx (produção).
+	handle {
+		reverse_proxy web:8080
+	}
+
+	# Mesmo cabeçalho em toda resposta (o backend e o nginx do frontend já
+	# mandam os deles; aqui é só uma rede de segurança a mais, sem sobrescrever).
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

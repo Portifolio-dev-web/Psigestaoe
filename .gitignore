@@ -80,3 +80,9 @@ venv/
 
 # Mobile development
 android-sdk/
+
+# DEPLOY (deploy.sh): dumps de segurança gerados antes de cada deploy. Nunca
+# versionar — é o banco inteiro (prontuários cifrados por campo, mas ainda
+# assim não é algo para ficar no histórico do git).
+_deploy_dumps/
+*.dump

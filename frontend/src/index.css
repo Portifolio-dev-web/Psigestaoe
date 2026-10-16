@@ -72,3 +72,32 @@ h1, h2, h3, h4, .font-head {
 @media (prefers-reduced-motion: reduce) {
     .psi-fade-up { animation: none; }
 }
+
+/* DESIGN (prévia validada pelo usuário, cartão de entrar/cadastrar): campos
+   em cascata — cada filho direto aparece um instante depois do anterior, em
+   vez de tudo de uma vez. Só os 6 primeiros têm atraso (o que vier depois
+   aparece junto com o 6º; um formulário raramente tem mais que isso). */
+@keyframes psi-stagger-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.psi-stagger > * { animation: psi-stagger-in 0.4s ease both; }
+.psi-stagger > *:nth-child(1) { animation-delay: 0.05s; }
+.psi-stagger > *:nth-child(2) { animation-delay: 0.11s; }
+.psi-stagger > *:nth-child(3) { animation-delay: 0.17s; }
+.psi-stagger > *:nth-child(4) { animation-delay: 0.23s; }
+.psi-stagger > *:nth-child(5) { animation-delay: 0.29s; }
+.psi-stagger > *:nth-child(6) { animation-delay: 0.35s; }
+
+/* Ícone do painel decorativo "respirando": pulsação bem lenta e sutil, só
+   para o painel não ficar 100% parado enquanto a pessoa lê/digita. */
+@keyframes psi-breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.06); }
+}
+.psi-breathe { animation: psi-breathe 3.2s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+    .psi-stagger > * { animation: none; }
+    .psi-breathe { animation: none; }
+}

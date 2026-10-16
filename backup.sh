@@ -32,9 +32,12 @@
 #                            retenção (padrão 8/12/5 — cobre a guarda legal
 #                            de 5 anos do CFP com folga; ajuste se o prazo
 #                            de guarda dos seus dados for diferente).
-#   POSTGRES_USER / POSTGRES_DB   só se diferentes do padrão do docker-compose.yml.
+#   POSTGRES_USER / POSTGRES_DB   só se diferentes do padrão do compose.
+#   COMPOSE_FILE   qual arquivo de compose usar (padrão: docker-compose.prod.yml,
+#                  o da VPS — troque para docker-compose.yml só se for rodar
+#                  isto contra o ambiente de desenvolvimento).
 #
-# Uso (a partir da pasta com o docker-compose.yml):
+# Uso (a partir da pasta com o docker-compose.prod.yml):
 #   ./backup.sh
 #
 # Exemplo de agendamento (cron, todo dia às 3h, com log):
@@ -58,6 +61,10 @@ KEEP_MONTHLY="${BACKUP_KEEP_MONTHLY:-12}"
 KEEP_YEARLY="${BACKUP_KEEP_YEARLY:-5}"
 DB_USER="${POSTGRES_USER:-admin}"
 DB_NAME="${POSTGRES_DB:-psigestao}"
+# Compose de PRODUÇÃO por padrão (docs/deploy-vps.md) — "docker compose exec db"
+# sem -f apontaria para o docker-compose.yml de DESENVOLVIMENTO, que a VPS nem tem.
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+COMPOSE="docker compose -f $COMPOSE_FILE"
 
 # O dump (prontuários dentro) fica num diretório temporário só deste script e
 # é apagado ao sair, com sucesso ou erro — nunca sobra em disco.
@@ -71,8 +78,8 @@ ping_healthcheck() {
   curl -fsS -m 10 --retry 3 "${BACKUP_HEALTHCHECK_URL}${1}" -o /dev/null || true
 }
 
-echo "backup.sh: gerando o dump do banco (docker compose exec db pg_dump)..."
-if ! docker compose exec -T db pg_dump -U "$DB_USER" -d "$DB_NAME" --format=custom > "$DUMP_FILE"; then
+echo "backup.sh: gerando o dump do banco ($COMPOSE exec db pg_dump)..."
+if ! $COMPOSE exec -T db pg_dump -U "$DB_USER" -d "$DB_NAME" --format=custom > "$DUMP_FILE"; then
   echo "backup.sh: falha ao gerar o dump do banco." >&2
   ping_healthcheck "/fail"
   exit 1

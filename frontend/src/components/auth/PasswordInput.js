@@ -20,7 +20,15 @@ const PasswordInput = forwardRef(function PasswordInput({ className, withIcon = 
         // Rótulo fixo + aria-pressed (ligado/desligado): o padrão para botões de alternar.
         aria-label="Mostrar senha" aria-pressed={visible}
         data-testid={props["data-testid"] ? `${props["data-testid"]}-toggle` : undefined}>
-        {visible ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+        {/* Crossfade (prévia validada): os dois ícones ficam empilhados e só a
+            opacidade/escala transicionam — troca suave, não instantânea.
+            motion-reduce: cai para "sem transição" (A3, mesmo padrão do app). */}
+        <Eye aria-hidden="true"
+          className={cn("absolute h-4 w-4 transition-all duration-150 motion-reduce:transition-none",
+            visible ? "scale-75 opacity-0" : "scale-100 opacity-100")} />
+        <EyeOff aria-hidden="true"
+          className={cn("absolute h-4 w-4 transition-all duration-150 motion-reduce:transition-none",
+            visible ? "scale-100 opacity-100" : "scale-75 opacity-0")} />
       </button>
     </div>
   );

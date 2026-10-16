@@ -35,7 +35,9 @@ const PANEL_COLORS = ["#0F2C59", "#1E3A8A", "#0369A1", "#1D4ED8"];
 function Hero({ title, text, buttonLabel, onSwitch }) {
   return (
     <div className="relative z-10 flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-white lg:gap-4 lg:p-10">
-      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-white/15">
+      {/* psi-breathe (prévia validada): pulsação lenta e sutil, só para o
+          painel não ficar 100% parado — desliga com "reduzir movimento". */}
+      <div className="psi-breathe flex h-11 w-11 items-center justify-center rounded-lg bg-white/15">
         <Stethoscope className="h-5 w-5" aria-hidden="true" />
       </div>
       <div>
@@ -43,7 +45,7 @@ function Hero({ title, text, buttonLabel, onSwitch }) {
         <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-blue-100">{text}</p>
       </div>
       <button type="button" onClick={onSwitch}
-        className="rounded-full border border-white/30 bg-white/10 px-8 py-2.5 text-sm font-medium text-white backdrop-blur-sm transition-colors hover:bg-white hover:text-[#0F2C59] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#0F2C59]">
+        className="rounded-full border border-white/30 bg-white/10 px-8 py-2.5 text-sm font-medium text-white backdrop-blur-sm transition-all hover:bg-white hover:text-[#0F2C59] active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#0F2C59]">
         {buttonLabel}
       </button>
     </div>
@@ -84,8 +86,11 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
           + "radial-gradient(900px circle at 85% 90%, rgba(3,105,161,0.08), transparent 55%)",
       }} />
 
+      {/* psi-fade-up (prévia validada): o cartão entra com um leve fade+subida
+          ao abrir a tela — só uma vez (este componente não remonta ao trocar
+          entrar/cadastrar, só os painéis internos, abaixo). */}
       <div className={cn(
-        "relative z-10 grid w-full max-w-4xl grid-cols-1 overflow-hidden rounded-[28px] bg-white shadow-2xl shadow-slate-900/10",
+        "psi-fade-up relative z-10 grid w-full max-w-4xl grid-cols-1 overflow-hidden rounded-[28px] bg-white shadow-2xl shadow-slate-900/10",
         "lg:min-h-[460px] lg:grid-cols-2",
       )}>
         {/* Painel decorativo: 1ª coluna no DOM (grid auto-flow já o coloca à

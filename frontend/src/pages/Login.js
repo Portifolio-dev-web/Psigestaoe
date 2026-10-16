@@ -247,7 +247,9 @@ export default function Login() {
             <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
               <ShieldCheck className="h-5 w-5" aria-hidden="true" />
             </div>
-            <form onSubmit={handleMfa} className="space-y-4">
+            {/* psi-stagger (prévia validada): cada campo aparece um instante
+                depois do anterior, em vez de tudo de uma vez. */}
+            <form onSubmit={handleMfa} className="psi-stagger space-y-4">
               <div>
                 <Label htmlFor="mfa-code" className="text-slate-700">{useRecovery ? "Código de recuperação" : "Código do aplicativo"}</Label>
                 {/* autoComplete="one-time-code": o celular oferece o código para colar. */}
@@ -262,7 +264,11 @@ export default function Login() {
                 {/* A1: erro do código fica ligado ao campo (não some sozinho como o toast antigo). */}
                 {mfaError && <p id="mfa-code-error" role="alert" className="mt-1.5 text-sm text-red-600" data-testid="login-mfa-error">{mfaError}</p>}
               </div>
-              <Button type="submit" disabled={loading} className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="login-mfa-submit">
+              {/* transition-all + active:scale (prévia validada): resposta ao
+                  toque no clique, sombra mais forte no hover. */}
+              <Button type="submit" disabled={loading}
+                className="w-full bg-[#1E3A8A] transition-all hover:bg-[#0F2C59] hover:shadow-lg hover:shadow-[#1E3A8A]/30 active:scale-[0.98]"
+                data-testid="login-mfa-submit">
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Confirmar"}
               </Button>
             </form>
@@ -280,7 +286,9 @@ export default function Login() {
         ) : (
           // ------------------------------------------------ login: passo 1
           <>
-            <form onSubmit={handleEmailLogin} className="space-y-4">
+            {/* psi-stagger (prévia validada): cada campo aparece um instante
+                depois do anterior, em vez de tudo de uma vez. */}
+            <form onSubmit={handleEmailLogin} className="psi-stagger space-y-4">
               <div>
                 <Label htmlFor="email" className="text-slate-700">E-mail</Label>
                 {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
@@ -321,9 +329,11 @@ export default function Login() {
                   {loginError}
                 </p>
               )}
+              {/* transition-all + active:scale (prévia validada): resposta ao
+                  toque no clique, sombra mais forte no hover. */}
               <Button
                 type="submit" disabled={loading}
-                className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]"
+                className="w-full bg-[#1E3A8A] transition-all hover:bg-[#0F2C59] hover:shadow-lg hover:shadow-[#1E3A8A]/30 active:scale-[0.98]"
                 data-testid="login-submit-btn"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Entrar"}
@@ -403,7 +413,9 @@ export default function Login() {
             Teste grátis, tudo liberado, sem cartão.
           </p>
 
-          <form onSubmit={handleRegisterSubmit} className="space-y-2.5">
+          {/* psi-stagger (prévia validada): cada campo aparece um instante
+              depois do anterior, em vez de tudo de uma vez. */}
+          <form onSubmit={handleRegisterSubmit} className="psi-stagger space-y-2.5">
             <div>
               <Label htmlFor="name" className="text-slate-700">Nome completo</Label>
               {/* Segurança (varredura, item 2): limites iguais aos do servidor. */}
@@ -443,8 +455,11 @@ export default function Login() {
             </div>
             {/* F1: a mensagem fica aqui, ligada à caixa (aria-describedby), até a pessoa marcar. */}
             {termsError && <p id="terms-error" className="-mt-2 text-xs text-red-600" data-testid="register-terms-error">{termsError}</p>}
+            {/* transition-all + active:scale (prévia validada): resposta ao
+                toque no clique, sombra mais forte no hover. */}
             <Button type="submit" disabled={registerLoading}
-              className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="register-submit-btn">
+              className="w-full bg-[#1E3A8A] transition-all hover:bg-[#0F2C59] hover:shadow-lg hover:shadow-[#1E3A8A]/30 active:scale-[0.98]"
+              data-testid="register-submit-btn">
               {registerLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Continuar"}
             </Button>
           </form>

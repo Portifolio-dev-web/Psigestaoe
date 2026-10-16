@@ -1,0 +1,139 @@
+# docker-compose.prod.yml
+# ---------------------------------------------------------------------------
+# DEPLOY (passo a passo em docs/deploy-vps.md): Compose de PRODUÇÃO, diferente
+# do docker-compose.yml (esse é só para a sua máquina de desenvolvimento).
+#
+# Arquitetura (a mesma recomendada no padrão de segurança do projeto):
+#   Caddy (HTTPS automático, único serviço com porta publicada)
+#     -> web   (nginx, estáticos do frontend)
+#     -> api/* (gunicorn, backend)
+#   db e redis: só na rede interna, sem porta publicada — nem o host os vê
+#   de fora (Docker ignora o firewall do sistema para portas publicadas).
+#
+# Uso: ver docs/deploy-vps.md. Resumo:
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+# ---------------------------------------------------------------------------
+
+networks:
+  psigestao:
+    driver: bridge
+    ipam:
+      config:
+        # Rede fixa: o Caddy recebe um IP fixo nela (abaixo), que é o valor
+        # de FORWARDED_ALLOW_IPS no .env — o backend só confia no X-Forwarded-For
+        # de quem tem ESSE IP exato (uvicorn não aceita faixa de IPs).
+        - subnet: 172.28.0.0/24
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - psigestao
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env (veja docs/deploy-vps.md)}
+      POSTGRES_DB: psigestao
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d psigestao"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # SEM "ports": só quem está na rede "psigestao" (Caddy, api) alcança o banco.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - psigestao
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Defina REDIS_PASSWORD no .env}", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    networks:
+      - psigestao
+    env_file:
+      # Mesma convenção do docker-compose.yml de desenvolvimento: o .env da
+      # raiz (variáveis "de infraestrutura") + o backend/.env (as específicas
+      # do backend — PRIVACY_*, SMTP_*, GOOGLE_CLIENT_ID etc.).
+      - .env
+      - ./backend/.env
+    environment:
+      # Monta a URL do banco/redis a partir das MESMAS senhas do .env — não
+      # repita a senha em duas variáveis diferentes.
+      DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD}@db:5432/psigestao
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # db e redis estão na MESMA rede Docker isolada desta máquina — a
+      # exceção documentada em database.py/rate_limit.py para dispensar TLS
+      # interno (o tráfego não sai do host).
+      DATABASE_TLS_DISABLED: "true"
+      REDIS_TLS_DISABLED: "true"
+      ENVIRONMENT: production
+      # Único IP que o backend aceita como "proxy confiável" para o X-Forwarded-For
+      # (rate limit e auditoria por IP real). Precisa bater com o IP fixo do
+      # Caddy, abaixo.
+      FORWARDED_ALLOW_IPS: 172.28.0.10
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/api/health/live', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  web:
+    build:
+      context: ./frontend
+      target: production
+      args:
+        REACT_APP_BACKEND_URL: "${REACT_APP_BACKEND_URL:?Defina REACT_APP_BACKEND_URL no .env, por exemplo https://app.seudominio.com.br}"
+        REACT_APP_GOOGLE_CLIENT_ID: "${REACT_APP_GOOGLE_CLIENT_ID:-}"
+    restart: unless-stopped
+    networks:
+      - psigestao
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      psigestao:
+        # IP fixo: é o valor que FORWARDED_ALLOW_IPS (acima) espera. Mudar um
+        # sem mudar o outro quebra o rate limit por IP real.
+        ipv4_address: 172.28.0.10
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: "${DOMAIN:?Defina DOMAIN no .env, por exemplo app.seudominio.com.br}"
+      ACME_EMAIL: ${ACME_EMAIL:?Defina ACME_EMAIL no .env (avisos de expiração de certificado)}
+    depends_on:
+      - api
+      - web
