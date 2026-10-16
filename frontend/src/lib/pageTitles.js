@@ -28,6 +28,9 @@ const PAGES = [
   [/^\/ajuda\/?$/, "Ajuda"],  // análise de UI, O2
   [/^\/assinatura\/simulacao\/?$/, "Pagamento simulado"],  // produto: assinatura (desenvolvimento)
   [/^\/administracao\/?$/, "Administração"],  // produto: administração
+  // DEPLOY (varredura, item D2): precisa ser o ÚLTIMO (qualquer endereço que
+  // não bateu em nenhum padrão acima) — a página 404 em si.
+  [/^\/.*/, "Página não encontrada"],
 ];
 
 /** { name: "Pacientes", full: "Pacientes · PsiGestão" } para o endereço dado. */

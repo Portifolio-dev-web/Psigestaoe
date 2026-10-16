@@ -35,6 +35,8 @@ const SimulatedCheckout = lazy(() => import("@/pages/SimulatedCheckout"));
 const Admin = lazy(() => import("@/pages/Admin"));
 // Produto (cadastro pelo paciente): página pública do link de cadastro.
 const PatientIntake = lazy(() => import("@/pages/PatientIntake"));
+// DEPLOY (varredura, item D2): página 404.
+const NotFound = lazy(() => import("@/pages/NotFound"));
 
 function LoadingScreen() {
   return (
@@ -147,7 +149,10 @@ function AppRouter() {
         {/* Produto (administração): a página pergunta ao servidor (404 para quem não é administrador). */}
         <Route path="/administracao" element={<Admin />} />
       </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      {/* DEPLOY (varredura, item D2): antes, qualquer endereço inválido caía
+          direto no Dashboard sem explicação. Fora do AppBranch — funciona
+          logado ou não, como /privacidade e /termos acima. */}
+      <Route path="*" element={<NotFound />} />
     </Routes>
     </Suspense>
   );

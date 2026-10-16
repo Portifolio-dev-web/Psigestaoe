@@ -13,6 +13,31 @@
     <meta name="description" content="PsiGestão — Gestão Clínica e Prontuários de Psicologia" />
     <!-- Fontes: servidas pelo próprio app (src/index.js), não mais pelo Google Fonts. -->
     <title>PsiGestão — Prontuários de Psicologia</title>
+
+    <!-- DEPLOY (varredura, item D3): sem isso, um link do PsiGestão colado no
+         WhatsApp/Slack (ex.: o link de cadastro mandado ao paciente, ou a
+         própria tela de login) aparecia sem nenhum preview. Site inteiro
+         atrás de login, então isso não é SEO de conteúdo (o Google não indexa
+         o que exige senha) — é só a prévia do link em si.
+         og:image usa caminho relativo (resolve pela própria origem de quem
+         compartilhou, igual a todo o resto do app — nunca um domínio fixo
+         aqui). og:url PRECISA do domínio final; preencha ao decidir onde o
+         site vai morar (ver README, "Endereços do deploy"). -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PsiGestão" />
+    <meta property="og:locale" content="pt_BR" />
+    <meta property="og:title" content="PsiGestão — Prontuários de Psicologia" />
+    <meta property="og:description" content="Gestão clínica e prontuários de Psicologia, com criptografia e conformidade com o CFP e a LGPD." />
+    <meta property="og:image" content="%PUBLIC_URL%/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="PsiGestão — Gestão clínica e prontuários de Psicologia" />
+    <!-- <meta property="og:url" content="https://SEU-DOMINIO-AQUI" /> -->
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="PsiGestão — Prontuários de Psicologia" />
+    <meta name="twitter:description" content="Gestão clínica e prontuários de Psicologia, com criptografia e conformidade com o CFP e a LGPD." />
+    <meta name="twitter:image" content="%PUBLIC_URL%/og-image.png" />
   </head>
   <body>
     <noscript>Você precisa habilitar o JavaScript para usar este aplicativo.</noscript>

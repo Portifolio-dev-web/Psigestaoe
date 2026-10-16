@@ -61,3 +61,19 @@ export async function initSentry() {
     beforeSendTransaction: scrubSentryEvent,
   });
 }
+
+// DEPLOY (varredura, item D1): usado pelo ErrorBoundary (components/ErrorBoundary.jsx)
+// para reportar um erro de render sem travar se o Sentry não estiver ligado
+// (sem DSN) ou não tiver terminado de carregar ainda — nunca é motivo para a
+// tela de erro falhar também. `info` é só o componentStack (nomes de
+// componentes, nunca dado do formulário/estado) que o React já devolve.
+export async function captureException(error, info) {
+  if (!initialized) return;
+  try {
+    const Sentry = await import("@sentry/react");
+    Sentry.captureException(error, info ? { contexts: { react: { componentStack: info.componentStack } } } : undefined);
+  } catch {
+    // Sentry não carregou (rede, bloqueador de terceiros etc.) — a tela de
+    // erro já apareceu para a pessoa; isso aqui é só telemetria.
+  }
+}

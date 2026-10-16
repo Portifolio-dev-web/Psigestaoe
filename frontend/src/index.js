@@ -14,6 +14,7 @@ import "@fontsource/manrope/700.css";
 import "@fontsource/manrope/800.css";
 import "@/index.css";
 import App from "@/App";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import { isPatientIntakePage } from "@/lib/patientIntakeRoute";
 import { initSentry } from "@/lib/sentry";
 
@@ -36,13 +37,18 @@ const root = ReactDOM.createRoot(document.getElementById("root"));
 // Produto (cadastro pelo paciente): a página do link de cadastro (/cadastro) abre SEM
 // o provedor do Google. Ele baixa o script de login do Google assim que a página
 // carrega, e o IP do paciente iria para o Google sem motivo (o paciente não faz login).
+// DEPLOY (varredura, item D1): por fora de tudo — se o provedor do Google ou
+// o próprio App quebrarem no meio do render, ainda cai na tela de erro, não
+// numa página em branco (ver components/ErrorBoundary.jsx).
 root.render(
-  isPatientIntakePage() ? (
-    <App />
-  ) : (
-    // 3. Envolver o App com o Provider
-    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+  <ErrorBoundary>
+    {isPatientIntakePage() ? (
       <App />
-    </GoogleOAuthProvider>
-  ),
+    ) : (
+      // 3. Envolver o App com o Provider
+      <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+        <App />
+      </GoogleOAuthProvider>
+    )}
+  </ErrorBoundary>,
 );
