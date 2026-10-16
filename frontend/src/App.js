@@ -17,7 +17,6 @@ import { PATIENT_INTAKE_PATH, isPatientIntakePage } from "@/lib/patientIntakeRou
 // (compactado), inclusive para quem só abria a tela de login. O que é comum
 // a todas (layout, bloqueio, aceite da política) continua no arquivo principal.
 const Login = lazy(() => import("@/pages/Login"));
-const Register = lazy(() => import("@/pages/Register"));
 const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
 const EmailLinkPassword = lazy(() => import("@/pages/EmailLinkPassword"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
@@ -122,7 +121,10 @@ function AppRouter() {
     <Suspense fallback={<LoadingScreen />}>
     <Routes>
       <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
-      <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
+      {/* DESIGN: cadastro passou a ser o mesmo componente do login, num
+          cartão só que alterna de modo (ver pages/Login.js) — o caminho
+          decide só o modo INICIAL. */}
+      <Route path="/register" element={<PublicOnly><Login /></PublicOnly>} />
       {/* Segurança média: "Esqueci minha senha" e as telas abertas pelos links
           do e-mail. Os links valem mesmo com alguém logado no navegador (por
           isso não ficam dentro de PublicOnly, que redirecionaria ao painel). */}
