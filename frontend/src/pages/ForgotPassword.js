@@ -1,21 +1,34 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Loader2, MailCheck } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
 import { LIMITS } from "@/lib/validation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import AuthShell from "@/components/auth/AuthShell";
+import AuthCard from "@/components/auth/AuthCard";
 
 // ---------------------------------------------------------------------------
 // "Esqueci minha senha" (segurança média). Antes não existia: quem esquecia a
 // senha perdia o acesso aos prontuários. O servidor manda um link de uso
 // único (vale 1 hora) e responde SEMPRE a mesma coisa, exista ou não conta
 // com o e-mail, para não revelar quem usa o sistema.
+//
+// DESIGN (mesmo visual de login/cadastro): reaproveita o AuthCard, mas sem
+// alternar de modo — não existe "outro lado" aqui como em entrar/cadastrar,
+// então `mode` fica fixo em "login" (o painel decorativo sempre à direita,
+// parado) e o botão dele volta para /login de verdade (navegação, não
+// estado local — esta é outra página/rota, diferente do cartão de Login.js).
 // ---------------------------------------------------------------------------
+const HERO = {
+  title: "Lembrou da senha?",
+  text: "Volte para a tela de entrada e acesse sua conta normalmente.",
+  buttonLabel: "Entrar",
+};
+
 export default function ForgotPassword() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
@@ -34,15 +47,12 @@ export default function ForgotPassword() {
   };
 
   return (
-    <AuthShell headline="Recupere o acesso com segurança."
-      tagline="O link de troca de senha vai só para o e-mail da conta e vale uma única vez.">
+    <AuthCard mode="login" hero={HERO} onSwitch={() => navigate("/login")}
+      formTitle={sent ? "Confira seu e-mail" : "Esqueci minha senha"}
+      formSubtitle={sent ? undefined : "Informe o e-mail da conta e enviaremos um link para criar uma nova senha."}>
       {sent ? (
         <div data-testid="forgot-sent">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
-            <MailCheck className="h-5 w-5" aria-hidden="true" />
-          </div>
-          <h1 className="mt-4 font-head text-2xl font-bold text-[#0F172A]">Confira seu e-mail</h1>
-          <p className="mt-2 text-sm leading-relaxed text-slate-600" role="status">
+          <p className="text-sm leading-relaxed text-slate-600" role="status">
             Se houver uma conta com <b className="text-[#0F172A]">{email}</b>, enviamos um link para criar uma nova
             senha. Ele vale por 1 hora e só pode ser usado uma vez.
           </p>
@@ -52,25 +62,23 @@ export default function ForgotPassword() {
           </Button>
         </div>
       ) : (
-        <>
-          <h1 className="font-head text-2xl font-bold text-[#0F172A]">Esqueci minha senha</h1>
-          <p className="mt-1 text-sm text-slate-500">Informe o e-mail da conta e enviaremos um link para criar uma nova senha.</p>
-          <form onSubmit={submit} className="mt-6 space-y-4">
-            <div>
-              <Label htmlFor="forgot-email" className="text-slate-700">E-mail</Label>
-              <Input id="forgot-email" type="email" required autoFocus maxLength={LIMITS.email} autoComplete="email"
-                value={email} onChange={(e) => setEmail(e.target.value)} placeholder="voce@clinica.com"
-                className="mt-1.5" data-testid="forgot-email-input" />
-            </div>
-            <Button type="submit" disabled={loading} className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="forgot-submit">
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Enviar link"}
-            </Button>
-          </form>
-        </>
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <Label htmlFor="forgot-email" className="text-slate-700">E-mail</Label>
+            <Input id="forgot-email" type="email" required autoFocus maxLength={LIMITS.email} autoComplete="email"
+              value={email} onChange={(e) => setEmail(e.target.value)} placeholder="voce@clinica.com"
+              className="mt-1.5" data-testid="forgot-email-input" />
+          </div>
+          <Button type="submit" disabled={loading} className="w-full bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="forgot-submit">
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Enviar link"}
+          </Button>
+        </form>
       )}
-      <Link to="/login" className="mt-6 flex items-center justify-center gap-1.5 text-sm text-slate-500 hover:text-[#1E3A8A]">
-        <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Voltar para o login
-      </Link>
-    </AuthShell>
+      <p className="mt-6 text-center text-sm text-slate-500">
+        <Link to="/login" className="font-medium text-[#1E3A8A] hover:underline">
+          Voltar para o login
+        </Link>
+      </p>
+    </AuthCard>
   );
 }

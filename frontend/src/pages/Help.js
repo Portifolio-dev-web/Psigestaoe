@@ -76,6 +76,14 @@ const TOPICS = [
   {
     id: "seguranca", icon: ShieldCheck, title: "Segurança e privacidade",
     items: [
+      // Produto (ajuda, O3): faltava a dúvida mais comum de todas — a tela
+      // de "Esqueci minha senha" existia, mas não tinha explicação aqui.
+      ["Esqueci minha senha. Como eu entro de novo?",
+        "Na tela de entrar, toque em “Esqueci minha senha” e informe o e-mail da conta. Enviamos um link para criar " +
+        "uma senha nova — ele vale por 1 hora e só funciona uma vez. Não chegou? Veja a caixa de spam, confira se " +
+        "digitou o e-mail certo, ou peça de novo depois de alguns minutos. Por segurança, a mensagem “enviamos um " +
+        "link” aparece mesmo quando o e-mail digitado não tem conta neste sistema — se isso acontecer com você, " +
+        "pode ser que o cadastro tenha sido feito com outro e-mail."],
       ["Por que a tela bloqueou?",
         "Por inatividade (5 a 30 minutos, em Configurações > Minha conta). Um aviso aparece 1 minuto antes. Desbloqueie com a sua senha (ou com o Google): o que estava aberto continua lá."],
       ["Como deixar a conta mais protegida?",
