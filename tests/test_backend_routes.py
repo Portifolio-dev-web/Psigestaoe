@@ -236,7 +236,10 @@ async def test_all_backend_routes(client):
     session = await client.post("/api/sessions", headers=headers, json=session_payload)
     assert session.status_code == 200
     session_id = session.json()["id"]
-    assert len((await client.get("/api/sessions", headers=headers)).json()) == 1
+    # Fixo (em vez de depender da janela padrão de 30 dias): a sessão do
+    # teste é datada de 2026-09, que foge da janela com o tempo passando.
+    assert len((await client.get("/api/sessions", headers=headers,
+                                 params={"start": "2026-01-01T00:00:00Z"})).json()) == 1
     changed_session = await client.put(
         f"/api/sessions/{session_id}",
         headers=headers,
@@ -545,7 +548,8 @@ async def test_patient_and_agenda_identifiers_are_encrypted_at_rest(client):
 
     # Para o profissional, nada muda: a API devolve os valores legíveis.
     assert (await client.get(f"/api/patients/{patient_id}")).json()["full_name"] == "Maria Sigilosa"
-    assert (await client.get("/api/sessions")).json()[0]["title"] == "Sessão com Maria Sigilosa"
+    assert (await client.get("/api/sessions", params={"start": "2026-01-01T00:00:00Z"})
+            ).json()[0]["title"] == "Sessão com Maria Sigilosa"
 
 
 @pytest.mark.anyio
