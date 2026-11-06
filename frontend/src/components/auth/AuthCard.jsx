@@ -1,7 +1,11 @@
 import { useEffect, useRef } from "react";
-import { Stethoscope } from "lucide-react";
 import { GradientWave } from "@/components/ui/gradient-wave";
 import { cn } from "@/lib/utils";
+// DESIGN (prévia validada): só o símbolo do logo, recortado do arquivo
+// original (logo-transparente.png) pelo usuário — mesmo motivo de
+// pages/Landing.js (o texto do arquivo original é escuro demais para o
+// fundo navy; "PsiGestão"/título continuam em branco, como já estavam).
+import logoIcone from "@/assets/logo-icone.png";
 
 // ---------------------------------------------------------------------------
 // DESIGN (pedido do usuário, referência visual anexada): cartão com dois
@@ -38,7 +42,7 @@ function Hero({ title, text, buttonLabel, onSwitch }) {
       {/* psi-breathe (prévia validada): pulsação lenta e sutil, só para o
           painel não ficar 100% parado — desliga com "reduzir movimento". */}
       <div className="psi-breathe flex h-11 w-11 items-center justify-center rounded-lg bg-white/15">
-        <Stethoscope className="h-5 w-5" aria-hidden="true" />
+        <img src={logoIcone} alt="" className="h-7 w-auto" />
       </div>
       <div>
         <h2 className="font-head text-2xl font-bold">{title}</h2>

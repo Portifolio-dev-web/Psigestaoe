@@ -1,5 +1,10 @@
 import { Link } from "react-router-dom";
-import { Stethoscope } from "lucide-react";
+// DESIGN (prévia validada): logo da marca — só o símbolo, recortado do
+// arquivo original (logo-transparente.png) pelo usuário. No fundo navy, só
+// o símbolo (cores próprias, contraste bom sozinho); o texto "PsiGestão" do
+// arquivo original é escuro demais para este fundo (WCAG 1.4.3), por isso
+// continua em branco, como já estava.
+import logoIcone from "@/assets/logo-icone.png";
 
 // ---------------------------------------------------------------------------
 // DESIGN (pedido do usuário, prévia validada): tela de entrada em "/", antes
@@ -29,7 +34,7 @@ export default function Landing() {
           "reduzir movimento" (mesma classe usada no cartão de login). */}
       <div className="psi-fade-up relative z-10 flex max-w-md flex-col items-center gap-5">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/15">
-          <Stethoscope className="h-7 w-7" aria-hidden="true" />
+          <img src={logoIcone} alt="" className="h-9 w-auto" />
         </div>
         <span className="font-head text-xl font-bold">PsiGestão</span>
         <div>

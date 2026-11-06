@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
-  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Stethoscope, Lock, Loader2, LifeBuoy, UserCog,
+  LayoutDashboard, Users, CalendarDays, Settings, LogOut, Shield, Menu, Lock, Loader2, LifeBuoy, UserCog,
 } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import api from "@/lib/api";
@@ -12,6 +12,10 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import SubscriptionBanner from "@/components/SubscriptionBanner";
 import { WriteAccessProvider } from "@/context/WriteAccessContext";
+// DESIGN (prévia validada): só o símbolo do logo — mesmo recorte e mesmo
+// motivo de AuthCard.jsx/Landing.js (fundo navy; o texto do arquivo
+// original é escuro demais aqui, por isso "PsiGestão" continua em texto).
+import logoIcone from "@/assets/logo-icone.png";
 
 const nav = [
   // Análise de UI (F3): "Painel" em vez de "Dashboard" (o resto do sistema é em português).
@@ -60,7 +64,7 @@ export default function AppLayout() {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2.5 px-6 py-6">
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/15">
-          <Stethoscope className="h-5 w-5 text-white" strokeWidth={1.8} />
+          <img src={logoIcone} alt="" className="h-6 w-auto" />
         </div>
         <div className="leading-tight">
           <p className="font-head text-lg font-800 font-bold text-white">PsiGestão</p>

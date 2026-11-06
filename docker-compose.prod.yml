@@ -14,6 +14,14 @@
 #   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
 # ---------------------------------------------------------------------------
 
+# Log rotation (todos os serviços emitem para stdout; sem isso o driver
+# json-file cresce sem limite e pode encher o disco da VPS).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 networks:
   psigestao:
     driver: bridge
@@ -47,6 +55,13 @@ services:
       timeout: 5s
       retries: 5
     # SEM "ports": só quem está na rede "psigestao" (Caddy, api) alcança o banco.
+    logging: *default-logging
+    # ponytail: limites fixos p/ VPS 2 vCPU / 4 GB; suba se o plano for maior.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   redis:
     image: redis:7-alpine
@@ -59,6 +74,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
   api:
     build:
@@ -98,6 +119,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
 
   web:
     build:
@@ -115,6 +142,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   caddy:
     image: caddy:2-alpine
@@ -122,6 +155,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC); Caddy já ativa sozinho, sem mudar o Caddyfile
     networks:
       psigestao:
         # IP fixo: é o valor que FORWARDED_ALLOW_IPS (acima) espera. Mudar um
@@ -137,3 +171,9 @@ services:
     depends_on:
       - api
       - web
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
