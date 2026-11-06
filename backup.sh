@@ -64,7 +64,10 @@ DB_NAME="${POSTGRES_DB:-psigestao}"
 # Compose de PRODUÇÃO por padrão (docs/deploy-vps.md) — "docker compose exec db"
 # sem -f apontaria para o docker-compose.yml de DESENVOLVIMENTO, que a VPS nem tem.
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
-COMPOSE="docker compose -f $COMPOSE_FILE"
+# Igual ao deploy.sh: sem --env-file, o Compose não resolve as variáveis
+# obrigatórias do arquivo (POSTGRES_PASSWORD, DOMAIN...) fora de um shell
+# que já carregou o .env — e falha sempre quando chamado pelo cron.
+COMPOSE="docker compose -f $COMPOSE_FILE --env-file .env"
 
 # O dump (prontuários dentro) fica num diretório temporário só deste script e
 # é apagado ao sair, com sucesso ou erro — nunca sobra em disco.

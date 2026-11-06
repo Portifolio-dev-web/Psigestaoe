@@ -31,6 +31,8 @@ if $COMPOSE exec -T db pg_dump -U admin -d psigestao --format=custom > "$DUMP_FI
   ls -1t "$DUMP_DIR"/pre_deploy_*.dump 2>/dev/null | tail -n +6 | xargs -r rm --
 else
   echo "deploy.sh: aviso: não consegui gerar o dump de segurança (banco ainda não existe? primeiro deploy?)." >&2
+  rm -f "$DUMP_FILE"
+  DUMP_FILE=""
 fi
 
 echo "deploy.sh: baixando o código mais novo..."
@@ -48,6 +50,10 @@ until $COMPOSE exec -T api python -c "import sys, urllib.request; sys.exit(0 if 
   tries=$((tries + 1))
   if [ "$tries" -ge 20 ]; then
     echo "deploy.sh: a API não respondeu saudável a tempo. Confira os logs: $COMPOSE logs api" >&2
+    if [ -n "$DUMP_FILE" ]; then
+      echo "deploy.sh: para restaurar o dump de antes deste deploy:" >&2
+      echo "  cat $DUMP_FILE | $COMPOSE exec -T db pg_restore -U admin -d psigestao --clean --if-exists" >&2
+    fi
     exit 1
   fi
   sleep 3
