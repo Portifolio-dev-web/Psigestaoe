@@ -49,9 +49,9 @@ tudo afeta especificamente quem usa teclado ou leitor de tela.
 
 ## Status
 
-**Corrigidos e verificados: A1, A3, A5 (primeira rodada) e A2 (segunda rodada)** — ver detalhe de
-cada um na tabela abaixo e as seções "Verificação" no final. **A4 continua aberto** — não foi
-alterado.
+**Corrigidos e verificados: A1, A3, A5 (primeira rodada), A2 (segunda rodada) e A4 (terceira
+rodada)** — ver detalhe de cada um na tabela abaixo e as seções "Verificação" no final. Todos os
+achados desta auditoria foram corrigidos.
 
 ## Achados, por prioridade
 
@@ -60,7 +60,7 @@ alterado.
 | **A1** ✅ | *(Corrigido)* As telas de Entrar, Cadastro e "Esqueci minha senha" não têm nenhuma região (`<main>`, `<header>` etc.). Quem navega por landmarks (leitor de tela, atalho "próxima região") não encontra nada — justamente nas telas que mais precisam disso, porque é onde alguém aflito (esqueceu a senha, não recebeu o e-mail) chega primeiro. | `axe-core`: violação `region` ("All page content should be contained by landmarks"), confirmada nas 3 telas. Código: [`AuthCard.jsx:85`](Psigestaoe/frontend/src/components/auth/AuthCard.jsx#L85) — o `<div>` externo (e os dois painéis internos) não usam nenhuma tag/role de landmark. Usado por [`Login.js`](Psigestaoe/frontend/src/pages/Login.js) (Entrar/Cadastro) e [`ForgotPassword.js`](Psigestaoe/frontend/src/pages/ForgotPassword.js). Comparar com [`AuthShell.js:46`](Psigestaoe/frontend/src/components/auth/AuthShell.js#L46), o componente mais antigo, que já envolve o conteúdo num `<main>` — provavelmente ainda usado só por `EmailLinkPassword.js` (criar/redefinir senha), não auditado nesta rodada. | WCAG 2.4.1 (Bypass Blocks) / 1.3.1 (Info and Relationships); Lei de Jakob |
 | **A2** ✅ | *(Corrigido)* Ao fechar o diálogo "Novo paciente" com **Esc**, o foco não volta ao botão "Novo paciente" que o abriu — vai para o início do conteúdo principal (cai perto do aviso "Teste grátis: faltam 60 dias..."). Quem usa teclado ou leitor de tela perde o lugar onde estava. | Verificado em CDP com teclado real: abrir o diálogo → foco corretamente dentro dele (campo "Nome") → `Esc` → `document.activeElement` passa a ser `<main id="conteudo">`, não o botão. Causa provável: [`useDialogFocusReturn.js:41-47`](Psigestaoe/frontend/src/hooks/useDialogFocusReturn.js#L41-L47) chama `restoreFocus` no `onCloseAutoFocus`, mas [`focus.js:19-24`](Psigestaoe/frontend/src/lib/focus.js#L19-L24) rejeita o botão original se ele estiver dentro de `[aria-hidden="true"]` — e o Radix ainda não removeu esse `aria-hidden` dos elementos-irmãos do diálogo nesse instante exato (condição de corrida). O comentário do próprio arquivo (`dialog.jsx:31-33`) descreve o comportamento pretendido, que não é o que acontece. Testado só no diálogo "Novo paciente"; como o código é compartilhado (`dialog.jsx`), é provável que o mesmo ocorra nos outros diálogos do sistema, mas isso não foi testado em cada um. | WCAG 2.4.3 (Focus Order); padrão ARIA APG para diálogos modais |
 | A3 ✅ | *(Corrigido)* Vários links/controles isolados (fora de frases) têm menos de 24px de altura — alvo pequeno para toque e para quem tem tremores/baixa precisão (Lei de Fitts). | `axe`/heurística de alvo: "Esqueci minha senha" 116×16 ([`Login.js:306-308`](Psigestaoe/frontend/src/pages/Login.js#L306-L308)); "Voltar para o login" 116×18 ([`ForgotPassword.js:78-80`](Psigestaoe/frontend/src/pages/ForgotPassword.js#L78-L80)); "Ler a Política de Privacidade"/"Ler os Termos de Uso" 180×20/136×20 ([`Help.js:177-183`](Psigestaoe/frontend/src/pages/Help.js#L177-L183)); "Abrir agenda do dia" 125×20 ([`Dashboard.js:112-114`](Psigestaoe/frontend/src/pages/Dashboard.js#L112-L114)). O próprio projeto já resolveu isso uma vez: [`AuthShell.js:60`](Psigestaoe/frontend/src/components/auth/AuthShell.js#L60) usa `inline-flex min-h-6 items-center` no link "Precisa de ajuda?" — é só repetir o padrão. | WCAG 2.5.8 (Target Size, Minimum) |
-| A4 | Na tela de Entrar, o primeiro `Tab` ao abrir a página vai para o botão decorativo "Criar conta" (painel da esquerda), não para o campo de e-mail — quem navega por teclado precisa pular esse botão a cada visita antes de chegar ao formulário. | Ordem de `Tab` real (CDP), medida na raiz da página: 1) botão "Criar conta" → 2) campo e-mail → 3) "Esqueci minha senha" → 4) senha → ... Vem da ordem do DOM em [`AuthCard.jsx:112-149`](Psigestaoe/frontend/src/components/auth/AuthCard.jsx#L112-L149): o painel decorativo (`Hero`, com o botão) é renderizado ANTES do painel do formulário, mesmo ficando visualmente à esquerda só no desktop (no celular os painéis empilham e isso pode inverter de novo). | WCAG 2.4.3 (Focus Order); Lei de Jakob (ordem previsível = formulário primeiro) |
+| A4 ✅ | *(Corrigido)* Na tela de Entrar, o primeiro `Tab` ao abrir a página vai para o botão decorativo "Criar conta" (painel da esquerda), não para o campo de e-mail — quem navega por teclado precisa pular esse botão a cada visita antes de chegar ao formulário. | Ordem de `Tab` real (CDP), medida na raiz da página: 1) botão "Criar conta" → 2) campo e-mail → 3) "Esqueci minha senha" → 4) senha → ... Vem da ordem do DOM em [`AuthCard.jsx:112-149`](Psigestaoe/frontend/src/components/auth/AuthCard.jsx#L112-L149): o painel decorativo (`Hero`, com o botão) é renderizado ANTES do painel do formulário, mesmo ficando visualmente à esquerda só no desktop (no celular os painéis empilham e isso pode inverter de novo). | WCAG 2.4.3 (Focus Order); Lei de Jakob (ordem previsível = formulário primeiro) |
 | A5 ✅ | *(Corrigido)* A caixa de aceite dos Termos/Privacidade no cadastro é pequena (16×16px). O clique no texto do rótulo (`<Label htmlFor>`) também marca a caixa — então funciona —, mas quem olha para a tela vê só a caixinha pequena como alvo, e pode tentar acertar exatamente ela. | [`Login.js:432-436`](Psigestaoe/frontend/src/pages/Login.js#L432-L436): `<Checkbox id="terms">` como elemento irmão do `<Label>`, não envolvido por ele. | WCAG 2.5.8 (Target Size) — severidade baixa pela mitigação do `label` |
 
 ## O que já está bom
@@ -113,8 +113,6 @@ teclado real (como o que gerou esse achado) rodando de novo depois da correção
   desenvolvimento foi recriado (uma das armadilhas já descritas no padrão deste projeto — conta de
   teste some, banco vem vazio). Não é relacionado às correções; recriei a conta descartável
   (`a11y-audit@example.com`) pelo cadastro normal e revalidei.
-- **Não verificado nesta seção**: A4 continua como estava, nenhuma mudança de código foi feita nele.
-
 ## Verificação da correção de A2 (foco após fechar o diálogo)
 
 - **O que mudou**: [`useDialogFocusReturn.js`](Psigestaoe/frontend/src/hooks/useDialogFocusReturn.js#L41-L65)
@@ -132,6 +130,33 @@ teclado real (como o que gerou esse achado) rodando de novo depois da correção
   botão. Com um clique de mouse real (CDP) e também com teclado puro (`Tab` até o botão + barra de
   espaço), confirmado: **o foco volta corretamente ao botão "Novo paciente"** depois do `Esc`, nos
   dois casos.
+- **Build de produção (`yarn build`, `CI=true`)**: compilou sem avisos depois da correção.
+
+## Verificação da correção de A4 (ordem de Tab no login/cadastro)
+
+- **O que mudou**: [`AuthCard.jsx`](Psigestaoe/frontend/src/components/auth/AuthCard.jsx) — o
+  painel do formulário passou a vir **primeiro no DOM** (era o segundo); o painel decorativo
+  passou a vir depois. A posição **visual** de cada um não mudou: antes dependia da ordem natural
+  do DOM (coluna 1/coluna 2) combinada com `lg:order-none`; agora os dois têm `order-1`
+  (decorativo) e `order-2` (formulário) fixos nos dois tamanhos de tela, então a troca de ordem no
+  DOM não move nada na tela — só o que o `Tab` alcança primeiro.
+- **Ordem de `Tab` depois da correção** (medida com teclado real via CDP, na tela de Entrar): 1)
+  e-mail, 2) "Esqueci minha senha", 3) senha, 4) mostrar senha, 5) Entrar, 6) botão do Google, 7)
+  "Cadastre-se", 8) Termos de Uso, 9) Política de Privacidade, **10) "Criar conta" (painel
+  decorativo, antes era o 1º)**.
+- **Checagem visual** (capturas de tela via CDP, desktop 1366px e celular 390px, nos dois modos):
+  layout idêntico ao de antes da correção nos quatro casos — decorativo à esquerda/em cima,
+  formulário à direita/embaixo, igual à referência original.
+- **Ressalva**: no modo **Cadastro**, o painel decorativo aparece visualmente à ESQUERDA (convite
+  "Já tem conta?") mas só é alcançado pelo `Tab` depois do formulário inteiro (à direita). A ordem
+  de leitura por teclado deixa de bater exatamente com a ordem visual da esquerda para a direita
+  nesse modo — uma troca consciente: o formulário (ação principal) chega primeiro ao `Tab` em
+  qualquer um dos dois modos, às custas de, no Cadastro, o painel à esquerda vir depois na
+  navegação por teclado. Como o conteúdo do painel decorativo é um convite secundário (não muda o
+  sentido da tela, só oferece ir para o outro modo), optei por manter a prioridade do formulário.
+  Avise se preferir a ordem visual estrita em vez disso.
+- **Varredura `axe-core`**: 0 problemas nas 5 telas verificadas (login, cadastro, esqueci minha
+  senha, ajuda, painel).
 - **Build de produção (`yarn build`, `CI=true`)**: compilou sem avisos depois da correção.
 
 ---

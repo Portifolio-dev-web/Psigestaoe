@@ -100,40 +100,20 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
         "psi-fade-up relative z-10 grid w-full max-w-4xl grid-cols-1 overflow-hidden rounded-[28px] bg-white shadow-2xl shadow-slate-900/10",
         "lg:min-h-[460px] lg:grid-cols-2",
       )}>
-        {/* Painel decorativo: 1ª coluna no DOM (grid auto-flow já o coloca à
-            esquerda). No cadastro (estado "neutro") fica aí mesmo; no login,
-            translate-x-full desliza pela LARGURA DA PRÓPRIA COLUNA até a
-            direita. Importante: "translate" não tira do fluxo (diferente de
-            "absolute") — a grade mede a altura de CADA coluna pelo conteúdo
-            normalmente, e o "align-items: stretch" padrão do grid estica a
-            mais curta até a altura da mais alta. É assim que a altura do
-            cartão acompanha o formulário (sem corte nem barra de rolagem,
-            mesmo o cadastro tendo mais campos que o login) — NÃO troque isto
-            de volta para "position: absolute" nos dois painéis: foi assim
-            que a rolagem apareceu da primeira vez (o cartão ficava com
-            altura fixa, sem acompanhar o conteúdo). */}
-        <div className={cn(
-          "relative min-h-[200px] overflow-hidden",
-          "lg:transition-transform lg:duration-700 lg:ease-in-out motion-reduce:lg:duration-0",
-          isRegister ? "lg:translate-x-0" : "lg:translate-x-full",
-        )}>
-          <div className="absolute inset-0 bg-[#0F2C59]">
-            <GradientWave colors={PANEL_COLORS} shadowPower={6} />
-          </div>
-          <div key={mode} className="psi-fade-up relative h-full">
-            <Hero title={hero.title} text={hero.text} buttonLabel={hero.buttonLabel} onSwitch={onSwitch} />
-          </div>
-        </div>
-
-        {/* Painel do formulário: 2ª coluna no DOM. Login (estado "neutro")
-            fica aí; cadastro desliza -translate-x-full (uma coluna para a
+        {/* Painel do formulário: 1º no DOM (auditoria UX/A11Y, A4 — antes vinha
+            depois do painel decorativo, e o primeiro Tab ao abrir a tela caía
+            no botão "Criar conta"/"Entrar" do painel decorativo, não no campo
+            de e-mail). Continua aparecendo DEPOIS visualmente: "order-2",
+            fixo nos dois tamanhos de tela (por isso não precisa mais de
+            "lg:order-none" — o order já é o mesmo em qualquer largura, só a
+            ORDEM NO DOM mudou). Login (estado "neutro") fica na coluna da
+            direita; cadastro desliza -translate-x-full (uma coluna para a
             esquerda) — sempre o lado OPOSTO ao decorativo. z-10: fica por
             cima durante os ~700ms em que os dois se cruzam.
             Compacto (prévia validada pelo usuário): padding menor nas bordas
             (antes p-10 no computador) e menos respiro até o formulário. */}
         <div className={cn(
           "relative z-10 order-2 flex flex-col justify-center p-6 sm:p-7",
-          "lg:order-none",
           "lg:transition-transform lg:duration-700 lg:ease-in-out motion-reduce:lg:duration-0",
           // CORREÇÃO: estava invertido (os dois painéis caíam do MESMO lado,
           // sobrepostos — login mostrava tudo empilhado à direita, esquerda
@@ -148,6 +128,32 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
             </h1>
             {formSubtitle && <p className="mt-1 text-sm text-slate-500">{formSubtitle}</p>}
             <div className="mt-3">{children}</div>
+          </div>
+        </div>
+
+        {/* Painel decorativo: 2º no DOM agora (ver comentário acima, A4),
+            continua aparecendo PRIMEIRO visualmente ("order-1", fixo). No
+            cadastro (estado "neutro") fica na coluna da esquerda; no login,
+            translate-x-full desliza pela LARGURA DA PRÓPRIA COLUNA até a
+            direita. Importante: "translate" não tira do fluxo (diferente de
+            "absolute") — a grade mede a altura de CADA coluna pelo conteúdo
+            normalmente, e o "align-items: stretch" padrão do grid estica a
+            mais curta até a altura da mais alta. É assim que a altura do
+            cartão acompanha o formulário (sem corte nem barra de rolagem,
+            mesmo o cadastro tendo mais campos que o login) — NÃO troque isto
+            de volta para "position: absolute" nos dois painéis: foi assim
+            que a rolagem apareceu da primeira vez (o cartão ficava com
+            altura fixa, sem acompanhar o conteúdo). */}
+        <div className={cn(
+          "order-1 relative min-h-[200px] overflow-hidden",
+          "lg:transition-transform lg:duration-700 lg:ease-in-out motion-reduce:lg:duration-0",
+          isRegister ? "lg:translate-x-0" : "lg:translate-x-full",
+        )}>
+          <div className="absolute inset-0 bg-[#0F2C59]">
+            <GradientWave colors={PANEL_COLORS} shadowPower={6} />
+          </div>
+          <div key={mode} className="psi-fade-up relative h-full">
+            <Hero title={hero.title} text={hero.text} buttonLabel={hero.buttonLabel} onSwitch={onSwitch} />
           </div>
         </div>
       </div>
