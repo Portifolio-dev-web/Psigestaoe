@@ -42,8 +42,26 @@ export function useDialogFocusReturn({ onOpenAutoFocus, onCloseAutoFocus } = {})
     onCloseAutoFocus?.(event);
     if (event.defaultPrevented) return; // quem usa o diálogo decidiu o foco
     event.preventDefault(); // impede o Radix de mandar o foco para o início da página
-    if (window.location.pathname !== pathRef.current) return;
-    restoreFocus(originRef.current);
+    // Acessibilidade (auditoria UX/A11Y, A2): neste momento o Radix ainda não
+    // tirou o aria-hidden que ele mesmo põe nos elementos-irmãos do diálogo
+    // enquanto ele está aberto — ele só tira depois que a animação de saída
+    // termina (~200ms, ver dialog.jsx/sheet.jsx). Um requestAnimationFrame só
+    // não bastava (ainda estava escondido); por isso espera em pequenos
+    // intervalos até o botão original deixar de estar "escondido" (ou até um
+    // limite, para nunca travar o foco caso algo dê errado).
+    const path = pathRef.current;
+    const origin = originRef.current;
+    const deadline = Date.now() + 500;
+    const tryRestore = () => {
+      const stillHidden = origin?.closest?.("[aria-hidden='true'], [inert]");
+      if (stillHidden && Date.now() < deadline) {
+        setTimeout(tryRestore, 20);
+        return;
+      }
+      if (window.location.pathname !== path) return;
+      restoreFocus(origin);
+    };
+    tryRestore();
   }, [onCloseAutoFocus]);
 
   return { onOpenAutoFocus: handleOpenAutoFocus, onCloseAutoFocus: handleCloseAutoFocus };
