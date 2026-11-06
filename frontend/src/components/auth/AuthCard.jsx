@@ -82,7 +82,10 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
   }, [mode]);
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#F5F7FA] px-4 py-6">
+    // Acessibilidade (auditoria UX/A11Y, A1): faltava uma região (<main>) nesta
+    // tela — quem navega por landmarks (leitor de tela) não achava nada aqui.
+    // AuthShell.js (telas mais antigas) já tinha isso; faltava replicar aqui.
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#F5F7FA] px-4 py-6">
       {/* Fundo da página: só um véu estático em degradê (sem WebGL) — o
           destaque animado fica no painel do cartão, abaixo. */}
       <div className="pointer-events-none absolute inset-0" aria-hidden="true" style={{
@@ -148,6 +151,6 @@ export default function AuthCard({ mode, hero, onSwitch, formTitle, formSubtitle
           </div>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

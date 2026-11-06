@@ -174,11 +174,13 @@ function ContactCard() {
           )}
         </dl>
       )}
-      <Link to="/privacidade" className="mt-4 inline-block rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+      {/* Acessibilidade (auditoria UX/A11Y, A3): alvo de toque mínimo (24px, WCAG 2.5.8),
+          "inline-flex items-center" no lugar de "inline-block" para o min-h-6 valer. */}
+      <Link to="/privacidade" className="mt-4 inline-flex min-h-6 items-center rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
         Ler a Política de Privacidade
       </Link>
       {/* AD1 */}
-      <Link to="/termos" className="ml-4 mt-4 inline-block rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
+      <Link to="/termos" className="ml-4 mt-4 inline-flex min-h-6 items-center rounded-sm text-sm font-medium text-[#1E3A8A] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]">
         Ler os Termos de Uso
       </Link>
     </Card>

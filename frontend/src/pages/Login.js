@@ -303,7 +303,8 @@ export default function Login() {
                 <div className="flex items-center justify-between">
                   <Label htmlFor="password" className="text-slate-700">Senha</Label>
                   {/* Segurança média: antes não havia como recuperar a senha esquecida. */}
-                  <Link to="/esqueci-senha" className="text-xs font-medium text-[#1E3A8A] hover:underline" data-testid="forgot-password-link">
+                  {/* Acessibilidade (auditoria UX/A11Y, A3): alvo de toque mínimo (24px, WCAG 2.5.8). */}
+                  <Link to="/esqueci-senha" className="inline-flex min-h-6 items-center text-xs font-medium text-[#1E3A8A] hover:underline" data-testid="forgot-password-link">
                     Esqueci minha senha
                   </Link>
                 </div>
@@ -430,10 +431,13 @@ export default function Login() {
               <p id="email-hint" className="mt-1 text-xs text-slate-500">Você vai receber um link para criar a senha.</p>
             </div>
             <div className="flex items-start gap-2.5 rounded-md bg-[#F0F4F8] p-2">
+              {/* Acessibilidade (auditoria UX/A11Y, A5): caixa maior (24px, WCAG 2.5.8) — o
+                  rótulo ao lado já expandia a área clicável, mas quem OLHA para a tela via
+                  só a caixinha de 16px como alvo. */}
               <Checkbox id="terms" checked={terms}
                 onCheckedChange={(value) => { setTerms(value); if (value) setTermsError(""); }}
                 aria-invalid={termsError ? true : undefined} aria-describedby={termsError ? "terms-error" : undefined}
-                className="mt-0.5" data-testid="register-terms-checkbox" />
+                className="mt-0.5 h-6 w-6" data-testid="register-terms-checkbox" />
               {/* Conformidade: o texto cita os documentos reais, abertos em nova aba
                   para não perder o formulário preenchido. O backend registra o
                   aceite com a versão vigente e a data (AD1: um aceite só). */}

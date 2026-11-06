@@ -109,7 +109,8 @@ function TodaySessions() {
               `capitalize` deixava "2 De Outubro". */}
           <span className="text-sm text-slate-500">{capitalizeFirst(format(today, "EEEE, d 'de' MMMM", { locale: ptBR }))}</span>
         </div>
-        <Link to={`/agenda?visao=dia&data=${formatDateParam(today)}`} className="text-sm font-medium text-[#1E3A8A] hover:underline">
+        {/* Acessibilidade (auditoria UX/A11Y, A3): alvo de toque mínimo (24px, WCAG 2.5.8). */}
+        <Link to={`/agenda?visao=dia&data=${formatDateParam(today)}`} className="inline-flex min-h-6 items-center text-sm font-medium text-[#1E3A8A] hover:underline">
           Abrir agenda do dia
         </Link>
       </div>

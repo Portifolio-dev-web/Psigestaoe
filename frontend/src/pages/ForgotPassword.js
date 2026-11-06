@@ -75,7 +75,8 @@ export default function ForgotPassword() {
         </form>
       )}
       <p className="mt-6 text-center text-sm text-slate-500">
-        <Link to="/login" className="font-medium text-[#1E3A8A] hover:underline">
+        {/* Acessibilidade (auditoria UX/A11Y, A3): alvo de toque mínimo (24px, WCAG 2.5.8). */}
+        <Link to="/login" className="inline-flex min-h-6 items-center font-medium text-[#1E3A8A] hover:underline">
           Voltar para o login
         </Link>
       </p>
