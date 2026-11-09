@@ -126,7 +126,10 @@ function ProfessionalProfile() {
           <Label htmlFor="profile-crp" className="text-slate-700">CRP</Label>
           <Input id="profile-crp" placeholder="06/123456" pattern="\d{2}/\d{1,6}"
             title="Formato: região/número, ex.: 06/123456" className="mt-1.5" value={form.crp}
+            aria-describedby="profile-crp-hint"
             onChange={(e) => setForm({ ...form, crp: e.target.value })} data-testid="profile-crp-input" />
+          {/* Fitts/Postel: o `title` só vira dica visível no hover do mouse; no celular (toque) ninguém a vê. */}
+          <p id="profile-crp-hint" className="mt-1 text-xs text-slate-500">Formato: região/número, ex.: 06/123456</p>
         </div>
         <Button type="submit" disabled={saving} className="bg-[#1E3A8A] hover:bg-[#0F2C59]" data-testid="profile-save-btn">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}

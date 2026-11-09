@@ -780,7 +780,8 @@ function RowMenu({ p, busy, onEdit, onOpen, onDelete, onAnon, onArchive }) {
     //   inconsistente. Um menu de ações não precisa bloquear a página.
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-8 w-8" data-testid={`patient-menu-${p.id}`}
+        {/* Fitts: 44px no celular (alvo de toque isolado), 32px no desktop (mouse). */}
+        <Button variant="ghost" size="icon-lg" className="md:h-8 md:w-8" data-testid={`patient-menu-${p.id}`}
           aria-label={`Ações de ${p.full_name}`} aria-busy={busy || undefined}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin text-slate-500" /> : <MoreVertical className="h-4 w-4 text-slate-500" />}
         </Button>

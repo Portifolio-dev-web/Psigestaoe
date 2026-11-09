@@ -196,7 +196,7 @@ export function PatientFormFields({ form, errors = {}, onFormChange, selfFill = 
             onChange={onFormChange("marital_status")}
             className="mt-1.5" selectClassName={invalidClass(errors, "marital_status")}
           >
-            <option value="">Selecione...</option>
+            <option value="" disabled>Selecione...</option>
             {MARITAL_STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
           </NativeSelect>
           <FieldError id="patient-marital-status" message={errors.marital_status} />
@@ -215,7 +215,7 @@ export function PatientFormFields({ form, errors = {}, onFormChange, selfFill = 
             onChange={onFormChange("education")}
             className="mt-1.5" selectClassName={invalidClass(errors, "education")}
           >
-            <option value="">Selecione...</option>
+            <option value="" disabled>Selecione...</option>
             {EDUCATION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
           </NativeSelect>
           <FieldError id="patient-education" message={errors.education} />
@@ -266,7 +266,7 @@ export function PatientFormFields({ form, errors = {}, onFormChange, selfFill = 
             <NativeSelect id="patient-guardian-relationship" {...fieldA11y(errors, "guardian_relationship", "patient-guardian-relationship")}
               required value={form.guardian_relationship} onChange={onFormChange("guardian_relationship")}
               className="mt-1.5" selectClassName={invalidClass(errors, "guardian_relationship")}>
-              <option value="">Selecione...</option>
+              <option value="" disabled>Selecione...</option>
               {GUARDIAN_RELATIONSHIPS.map((option) => <option key={option} value={option}>{option}</option>)}
             </NativeSelect>
             <FieldError id="patient-guardian-relationship" message={errors.guardian_relationship} />

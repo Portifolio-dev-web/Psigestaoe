@@ -1,0 +1,18 @@
+# load_tests/docker-compose.override.yml
+# ---------------------------------------------------------------------------
+# SOMENTE para o teste de carga local. Não altera docker-compose.prod.yml.
+#
+# ENVIRONMENT=development aqui desliga só as checagens de POLÍTICA DE
+# SEGURANÇA que fariam o boot abortar num teste local (CORS allowlist
+# https-only, RATE_LIMIT_ENABLED=false proibido em produção, cookie Secure
+# exigindo HTTPS real via Caddy). Pool de conexões, bcrypt, criptografia e as
+# queries em si são EXATAMENTE as mesmas — isso não muda com ENVIRONMENT.
+#
+# Uso:
+#   docker compose -f docker-compose.prod.yml -f load_tests/docker-compose.override.yml \
+#     --env-file .env up -d --build db redis api
+# ---------------------------------------------------------------------------
+services:
+  api:
+    environment:
+      ENVIRONMENT: development

@@ -25,6 +25,8 @@ const buttonVariants = cva(
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-10 rounded-md px-8",
         icon: "h-9 w-9",
+        // Fitts: alvo de 44px para botões-ícone isolados em telas de toque (ex.: menu "⋮" em lista no celular).
+        "icon-lg": "h-11 w-11",
       },
     },
     defaultVariants: {

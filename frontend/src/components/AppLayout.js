@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useIdleLock } from "@/context/IdleLockContext";
 import {
@@ -62,7 +62,12 @@ export default function AppLayout() {
 
   const SidebarContent = () => (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2.5 px-6 py-6">
+      <Link
+        to="/dashboard"
+        onClick={() => setOpen(false)}
+        aria-label="Ir para o Painel"
+        className="flex items-center gap-2.5 px-6 py-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white rounded-md"
+      >
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/15">
           <img src={logoIcone} alt="" className="h-6 w-auto" />
         </div>
@@ -70,7 +75,7 @@ export default function AppLayout() {
           <p className="font-head text-lg font-800 font-bold text-white">PsiGestão</p>
           <p className="text-[11px] text-blue-200">Prontuários de Psicologia</p>
         </div>
-      </div>
+      </Link>
       <nav className="flex-1 space-y-1 px-3 py-2">
         {nav.filter((item) => !item.adminOnly || user?.is_admin).map((item) => (
           <NavLink
