@@ -104,6 +104,12 @@ limiter = SlidingWindowLimiter()  # contador em memória (também usado pelos te
 _redis_limiter = RedisFixedWindowLimiter(REDIS_URL) if REDIS_URL else None
 
 
+def get_redis_client():
+    """Reusa a mesma conexão do rate limit para outros usos de cache (ESCALA,
+    ex.: cache de leitura do dashboard). None em desenvolvimento (sem REDIS_URL)."""
+    return _redis_limiter._client if _redis_limiter else None
+
+
 def require_shared_rate_limit(environment: str) -> None:
     """SEGURANÇA (varredura, itens 8 e 15): em produção o limite de tentativas
     precisa estar LIGADO e COMPARTILHADO (Redis); senão o servidor não sobe.

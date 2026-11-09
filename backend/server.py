@@ -57,7 +57,7 @@ from crypto import (
     name_search_tokens, query_contact_tokens, query_search_tokens,
 )
 import rate_limit as rate_limiting
-from rate_limit import client_ip, enforce, rate_limit, require_shared_rate_limit
+from rate_limit import client_ip, enforce, get_redis_client, rate_limit, require_shared_rate_limit
 from database import AsyncSessionLocal, get_db, engine, Base
 from environment import get_environment
 from http_security import (
@@ -5001,9 +5001,29 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
 
 # ESCALA (auditoria de prontidão para deploy): rota mais cara do sistema (9
 # queries sequenciais) e sem limite de taxa — ver PERFORMANCE_ACTION_PLAN.md.
+#
+# Cache de leitura DESLIGADO por padrão (0 = sem cache). Ao ligar
+# (DASHBOARD_CACHE_TTL_SECONDS > 0): a resposta cacheada tem nomes de
+# paciente JÁ DESCRIPTOGRAFADOS (recent_patients, records_feed), guardados
+# no Redis — que agora persiste em disco via AOF (docker-compose.prod.yml) —
+# por até N segundos. Avalie esse ponto antes de ligar em produção com dado
+# real; um TTL curto (15-20s) é o suficiente para proteger o pool de conexões
+# sob pico sem deixar o dado "velho" por muito tempo.
+DASHBOARD_CACHE_TTL_SECONDS = int(os.environ.get("DASHBOARD_CACHE_TTL_SECONDS", "0"))
+
+
 @api_router.get("/dashboard/stats", dependencies=[Depends(rate_limit("dashboard-stats", 30, 60))])
 async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     uid = user.user_id
+    redis_client = get_redis_client() if DASHBOARD_CACHE_TTL_SECONDS > 0 else None
+    cache_key = f"psigestao:dash:{uid}" if redis_client else None
+    if cache_key:
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            logger.warning("Cache do dashboard indisponível (Redis); calculando sem cache.")
     # Item 12: pacientes arquivados não entram nas contagens nem na lista recente.
     active_patient = (Patient.owner_id == uid, Patient.archived_at.is_(None))
 
@@ -5077,7 +5097,7 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
         PatientIntake.draft.is_not(None), PatientIntake.draft != ""))
     has_sessions = await db.scalar(select(exists().where(Session.owner_id == uid)))
 
-    return {
+    result = {
         "total_patients": total_patients,
         "sessions_month": sessions_month,
         "total_records": total_records,
@@ -5087,6 +5107,12 @@ async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSessio
         "onboarding": {"has_patients": bool(has_patients), "has_sessions": bool(has_sessions)},
         "incomplete_intakes": incomplete_intakes or 0,  # RS2
     }
+    if cache_key:
+        try:
+            await redis_client.set(cache_key, json.dumps(result), ex=DASHBOARD_CACHE_TTL_SECONDS)
+        except Exception:
+            logger.warning("Não consegui gravar o cache do dashboard (Redis).")
+    return result
 # ---------------------------------------------------------------------------
 # Funções Auxiliares de Serialização (Agenda)
 # ---------------------------------------------------------------------------
