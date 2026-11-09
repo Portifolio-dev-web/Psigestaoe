@@ -27,7 +27,7 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import jwt
 from cryptography.fernet import InvalidToken
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
@@ -38,7 +38,6 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 from sqlalchemy import delete, desc, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
@@ -62,8 +61,8 @@ from rate_limit import client_ip, enforce, rate_limit, require_shared_rate_limit
 from database import AsyncSessionLocal, get_db, engine, Base
 from environment import get_environment
 from http_security import (
-    BodySizeLimitMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, integrity_error_handler,
-    validation_error_handler,
+    BodySizeLimitMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, generic_exception_handler,
+    integrity_error_handler, validation_error_handler,
 )
 from models import (
     AuditLog, BillingEventLog, EmailToken, Patient, PatientIntake, PatientSearchToken, Record, RecordVersion,
@@ -358,6 +357,10 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 # SEGURANÇA (varredura, item 9): gravações simultâneas que batem numa regra de
 # unicidade do banco viram 409 com mensagem clara, em vez de erro 500.
 app.add_exception_handler(IntegrityError, integrity_error_handler)
+# MELHORIA (auditoria de prontidão para deploy): torna explícito que qualquer
+# outra exceção não tratada vira 500 genérico sem traceback, em vez de
+# depender do default implícito do Starlette (debug=False).
+app.add_exception_handler(Exception, generic_exception_handler)
 
 # Monitoramento: Sentry (só com SENTRY_DSN) e exigência de rate limit
 # compartilhado entre workers (ver rate_limit.py).
@@ -3381,7 +3384,14 @@ async def _patients_page(db: AsyncSession, user: User, *, archived: bool, query:
 # Rotas de Pacientes e Prontuários
 # ---------------------------------------------------------------------------
 
-@api_router.get("/patients")
+# ESCALA (auditoria de prontidão para deploy): a listagem só exigia sessão
+# válida, sem limite de taxa — uma sessão roubada (ou um bug de frontend em
+# loop) podia martelar o endpoint mais usado do app. 60/min sobra para o uso
+# real (a tela não recarrega a lista várias vezes por minuto).
+PATIENTS_LIST_LIMIT_PER_MINUTE = 60
+
+
+@api_router.get("/patients", dependencies=[Depends(rate_limit("patients-list", PATIENTS_LIST_LIMIT_PER_MINUTE, 60))])
 async def list_patients(
     archived: bool = Query(False, description="true = lista só os arquivados (item 12)"),
     cursor: Optional[str] = Query(None, max_length=CURSOR_MAX, description="next_cursor da página anterior"),
@@ -4989,7 +4999,9 @@ async def admin_suspension(data: AdminSuspensionInput, background: BackgroundTas
 # Dashboard
 # ---------------------------------------------------------------------------
 
-@api_router.get("/dashboard/stats")
+# ESCALA (auditoria de prontidão para deploy): rota mais cara do sistema (9
+# queries sequenciais) e sem limite de taxa — ver PERFORMANCE_ACTION_PLAN.md.
+@api_router.get("/dashboard/stats", dependencies=[Depends(rate_limit("dashboard-stats", 30, 60))])
 async def dashboard_stats(user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
     uid = user.user_id
     # Item 12: pacientes arquivados não entram nas contagens nem na lista recente.

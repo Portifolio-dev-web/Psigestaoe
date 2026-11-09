@@ -34,6 +34,7 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:
   caddy_data:
   caddy_config:
 
@@ -69,6 +70,13 @@ services:
     networks:
       - psigestao
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Defina REDIS_PASSWORD no .env}", "--appendonly", "yes"]
+    volumes:
+      # MELHORIA (auditoria): sem volume, o "--appendonly yes" gravava num
+      # filesystem que some a cada recriação do container — writeback inútil.
+      # O dado em si é descartável (contadores de rate-limit, ver
+      # backend/rate_limit.py), mas persistir evita perder a janela de rate
+      # limit em todo restart/deploy.
+      - redis_data:/data
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
@@ -108,6 +116,18 @@ services:
       # (rate limit e auditoria por IP real). Precisa bater com o IP fixo do
       # Caddy, abaixo.
       FORWARDED_ALLOW_IPS: 172.28.0.10
+      # ESCALA (auditoria de prontidão para deploy): o padrão de
+      # backend/database.py (5 + 5 por worker) estourava sob carga alta —
+      # ver PERFORMANCE_ACTION_PLAN.md (2,5% de erro 500 em 240 VUs, causa
+      # confirmada: QueuePool timeout). 2 workers x (10 + 10) = 40 conexões,
+      # dentro do max_connections=100 do Postgres, com folga para migração/
+      # backup/acesso administrativo. Suba os dois juntos se o plano da VPS
+      # crescer (ex.: 4 workers x (10+10) = 80 — perto do limite do Postgres,
+      # considere um PgBouncer na frente do banco antes disso).
+      WEB_CONCURRENCY: "2"
+      DB_POOL_SIZE: "10"
+      DB_MAX_OVERFLOW: "10"
+      DB_POOL_TIMEOUT: "3"
     depends_on:
       db:
         condition: service_healthy

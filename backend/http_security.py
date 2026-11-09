@@ -119,7 +119,7 @@ NO_STORE = "no-store"
 # HSTS: o navegador passa a usar SÓ HTTPS com este domínio por 2 anos, mesmo
 # que alguém digite http:// ou caia num link http:// (impede o rebaixamento
 # para HTTP numa rede Wi-Fi hostil). Só em produção, que roda atrás de HTTPS.
-HSTS = "max-age=63072000; includeSubDomains"
+HSTS = "max-age=63072000; includeSubDomains; preload"
 # A documentação automática (só existe no desenvolvimento) carrega scripts de
 # uma CDN e quebraria com a CSP acima.
 _DOCS_PATHS = ("/docs", "/redoc")
@@ -213,6 +213,25 @@ async def integrity_error_handler(_request: Request, exc: IntegrityError) -> JSO
     return JSONResponse(status_code=409, content={"detail": {
         "code": "concurrent_write",
         "msg": "Esta informação foi alterada ao mesmo tempo em outra tela ou aparelho. Tente novamente.",
+    }})
+
+
+# ---------------------------------------------------------------------------
+# 6. Erro genérico (qualquer exceção sem handler próprio) -> 500 sem traceback
+# ---------------------------------------------------------------------------
+# MELHORIA (auditoria de prontidão para deploy): o Starlette/FastAPI já devolve
+# "Internal Server Error" sem traceback por padrão quando `debug=False` (o caso
+# de hoje), mas isso depende do default implícito do framework. Este handler
+# torna o comportamento explícito e auditável, independente de alguém ligar
+# `debug=True` no futuro (ex.: para depurar algo em produção e esquecer de
+# desligar). O traceback completo só vai para o log do servidor, nunca para o
+# cliente; o Sentry (se configurado) já captura a exceção antes deste handler
+# rodar, via sua própria integração com o Starlette.
+async def generic_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Erro não tratado (%s).", type(exc).__name__)
+    return JSONResponse(status_code=500, content={"detail": {
+        "code": "internal_error",
+        "msg": "Ocorreu um erro inesperado. Tente novamente em alguns instantes.",
     }})
 
 

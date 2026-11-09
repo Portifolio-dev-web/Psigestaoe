@@ -40,6 +40,10 @@ jobs:
           cache-dependency-path: backend/requirements-dev.txt
       # --require-hashes: instala exatamente o que foi revisado (varredura, item 13).
       - run: pip install --require-hashes -r requirements-dev.txt
+      # MELHORIA (auditoria de prontidão para deploy): só erro real de código
+      # (sintaxe inválida, import não usado/redefinido...), não estilo — ver
+      # backend/pyproject.toml.
+      - run: python -m ruff check .
       - run: python -m pytest ../tests -q
         env:
           ENVIRONMENT: development

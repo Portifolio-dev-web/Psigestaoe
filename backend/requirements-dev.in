@@ -14,3 +14,4 @@
 pytest                      # executor dos testes
 pytest-xdist                # testes em paralelo (pytest.ini: -n 2)
 httpx                       # cliente HTTP dos testes (ASGITransport, sem subir servidor)
+ruff                        # lint do backend no CI (.github/workflows/ci.yml)

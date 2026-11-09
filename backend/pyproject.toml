@@ -1,0 +1,11 @@
+[tool.ruff]
+# Mesma versão do Dockerfile/CI.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Erro real de código, não estilo: sintaxe inválida (E9), importação não
+# usada/redefinida, variável não definida, etc. (F, pyflakes). De propósito
+# SEM as regras de estilo do ruff (E/W/UP/...): o projeto não foi escrito
+# com elas em mente, e ligá-las de uma vez gera um diff gigante sem relação
+# com nenhuma mudança real. Suba o conjunto aos poucos, se quiser.
+select = ["E9", "F"]
